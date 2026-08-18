@@ -751,12 +751,14 @@ function recomputeAttemptCategories(){
 
 /* =========================================================
    GOOGLE SHEET CONFIG
-   The dashboard's permanent, automatic data source.
-   Set these two values to your sheet and the dashboard loads
-   itself on open — no upload, no prompts.
+   The dashboard's permanent, automatic data source: a Google Apps
+   Script Web App (deployed from the sheet itself) that returns the
+   sheet's rows as JSON. Set WEBAPP_URL + SHEET_NAME and the dashboard
+   loads itself on open — no upload, no prompts.
+   See the Code.gs snippet provided separately for the Apps Script side.
    ========================================================= */
 const GOOGLE_SHEET_CONFIG = {
-  SHEET_ID: 'PUT_GOOGLE_SHEET_ID_HERE',
+  WEBAPP_URL: 'PUT_APPS_SCRIPT_WEBAPP_URL_HERE',   // ends with /exec
   SHEET_NAME: 'PUT_SHEET_NAME_HERE'
 };
 
@@ -1015,45 +1017,60 @@ async function loadFromGoogleSheet(rawUrl, opts){
 }
 /* =========================================================
    AUTOMATIC GOOGLE SHEET DATA SOURCE (GOOGLE_SHEET_CONFIG)
-   Uses the CORS-compatible gviz csv export endpoint, then feeds
-   the result through the SAME parsing/normalization pipeline
-   (handleWorkbook / detectColumnMap / classifyStatus, etc.)
-   used by the Excel importer, so the rest of the app never knows
-   whether data came from an uploaded file or a live sheet.
+   Fetches rows as JSON from a Google Apps Script Web App (deployed
+   from the sheet itself — see the accompanying Code.gs), converts
+   them into an in-memory workbook, then feeds that through the SAME
+   parsing/normalization pipeline (handleWorkbook / detectColumnMap /
+   classifyStatus, etc.) used by the Excel importer, so the rest of
+   the app never knows whether data came from an uploaded file,
+   a public sheet, or an Apps Script backend.
    ========================================================= */
-function buildConfiguredSheetCsvUrl(){
-  const { SHEET_ID, SHEET_NAME } = GOOGLE_SHEET_CONFIG;
-  if(!SHEET_ID || SHEET_ID === 'PUT_GOOGLE_SHEET_ID_HERE'){
-    throw new Error('لم يتم ضبط SHEET_ID في GOOGLE_SHEET_CONFIG داخل الكود.');
+function buildAppsScriptUrl(){
+  const { WEBAPP_URL, SHEET_NAME } = GOOGLE_SHEET_CONFIG;
+  if(!WEBAPP_URL || WEBAPP_URL === 'PUT_APPS_SCRIPT_WEBAPP_URL_HERE'){
+    throw new Error('لم يتم ضبط WEBAPP_URL في GOOGLE_SHEET_CONFIG داخل الكود.');
   }
   if(!SHEET_NAME || SHEET_NAME === 'PUT_SHEET_NAME_HERE'){
     throw new Error('لم يتم ضبط SHEET_NAME في GOOGLE_SHEET_CONFIG داخل الكود.');
   }
-  return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(SHEET_ID)}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
+  const sep = WEBAPP_URL.includes('?') ? '&' : '?';
+  return `${WEBAPP_URL}${sep}sheet=${encodeURIComponent(SHEET_NAME)}`;
 }
 
 async function loadDataFromGoogleSheet(){
-  const csvUrl = buildConfiguredSheetCsvUrl();
+  const url = buildAppsScriptUrl();
   let res;
   try{
-    res = await fetch(csvUrl, {cache:'no-store'});
+    res = await fetch(url, {cache:'no-store'});
   }catch(networkErr){
-    throw new Error('تعذر الوصول لجوجل شيت (خطأ شبكة). تأكد من اتصالك بالإنترنت وحاول مرة أخرى.');
+    throw new Error('تعذر الوصول لـ Apps Script (خطأ شبكة). تأكد من اتصالك بالإنترنت وحاول مرة أخرى.');
   }
   if(!res.ok){
-    throw new Error('تعذر الوصول إلى الشيت (HTTP '+res.status+'). تأكد إن الـ SHEET_ID وSHEET_NAME صحيحين وإن مشاركة الشيت "Anyone with the link – Viewer".');
+    throw new Error('تعذر الوصول إلى Apps Script (HTTP '+res.status+'). تأكد إن رابط الـ Web App صحيح وإنه منشور بصلاحية وصول "Anyone".');
   }
-  const csvText = await res.text();
-  if(!csvText || !csvText.trim() || /^<!DOCTYPE html/i.test(csvText.trim())){
-    throw new Error('تعذر قراءة بيانات الشيت. تأكد إن الشيت متاح للعرض للجميع (Anyone with the link) وأن اسم الشيت (SHEET_NAME) مطابق تماماً.');
+  const text = await res.text();
+  let payload;
+  try{
+    payload = JSON.parse(text);
+  }catch(parseErr){
+    throw new Error('استجابة غير صالحة من Apps Script (تعذر تحليل JSON). تأكد إن الرابط بتاع /exec مش /dev وإن الكود بيرجّع JSON.');
+  }
+  if(payload && payload.error){
+    throw new Error('خطأ من Apps Script: ' + payload.error);
+  }
+  const rows = payload && payload.rows;
+  if(!Array.isArray(rows) || rows.length < 2){
+    throw new Error('لا توجد بيانات كافية في الشيت (لازم صف عناوين + صف بيانات واحد على الأقل).');
   }
   let wb;
   try{
-    wb = XLSX.read(csvText, {type:'string', cellDates:false});
-  }catch(parseErr){
-    throw new Error('استجابة غير صالحة من Google Sheets (تعذر تحليل البيانات).');
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, GOOGLE_SHEET_CONFIG.SHEET_NAME || 'Sheet1');
+  }catch(buildErr){
+    throw new Error('تعذر تجهيز بيانات الشيت لمعالجتها.');
   }
-  const result = handleWorkbook(wb, 'Google Sheets'); // same normalization pipeline as Excel uploads
+  const result = handleWorkbook(wb, 'Google Sheets (Apps Script)'); // same normalization pipeline as Excel uploads
   return {
     columnMap: result.colMap,
     rows: result.rows,
@@ -1068,7 +1085,7 @@ function applyLoadedSheetData(data){
   STATE.columnMap = data.columnMap;
   STATE.rows = data.rows;
   STATE.dq = data.dq;
-  STATE.fileName = `Google Sheets — ${GOOGLE_SHEET_CONFIG.SHEET_NAME}`;
+  STATE.fileName = `Google Sheets — Apps Script (${GOOGLE_SHEET_CONFIG.SHEET_NAME})`;
   STATE.lastUpdated = data.lastUpdated;
   STATE.rowsLoaded = data.rowsLoaded;
   STATE.grandTotalShipments = data.grandTotalShipments;
