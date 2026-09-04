@@ -1845,10 +1845,8 @@ function sortMonths(list){
   numbered.sort((a,b)=>b.n-a.n);
   return [...numbered.map(x=>x.name), ...other];
 }
-function pickDefaultMonth(sortedList){
-  const saved = loadSelectedMonthFromStorage();
-  if(saved && (saved === ALL_MONTHS_SENTINEL || sortedList.includes(saved))) return saved;
-  return ALL_MONTHS_SENTINEL; // default selection on first open
+function pickDefaultMonth(){
+  return ALL_MONTHS_SENTINEL; // startup ALWAYS begins on All Months — never restores a saved individual month
 }
 
 function populateMonthSelector(){
@@ -2051,47 +2049,38 @@ async function switchToMonth(month, opts){
 async function bootDashboard(){
   hideGsheetError();
 
-  // ---------- STEP 1: IndexedDB compact-summary cache check — before ANYTHING else. ----------
-  const savedMonth = loadSelectedMonthFromStorage();
-  let cachedDefault = '';
-  if(savedMonth && await hasCachedSummary(savedMonth)) cachedDefault = savedMonth;
-  if(!cachedDefault){
-    const cachedMonths = await getCachedSummaryMonths();
-    if(cachedMonths.length) cachedDefault = cachedMonths[0];
-  }
+  // PRIMARY GOAL (strict): the dashboard ALWAYS starts on All Months —
+  // never restores a previously-viewed individual month from localStorage,
+  // never speculatively loads any other month first, regardless of what
+  // might already be cached for some other specific month. The required
+  // flow is exactly: Open Dashboard → selectedMonth = ALL_MONTHS → Load All
+  // Months Compact Summary → Render Dashboard. The user can still switch to
+  // a specific month afterward — that choice only affects what's shown from
+  // that point on, never what loads first on a fresh open.
+  const startMonth = ALL_MONTHS_SENTINEL;
 
-  if(cachedDefault){
-    // CACHE-FIRST: dashboard opens immediately from cache — the Apps Script
-    // URL being unset and Chart.js/XLSX being unavailable are both handled
-    // as non-blocking concerns from here on, never as reasons to hide this.
-    // Populate the selector with at least this one placeholder option NOW,
-    // before switchToMonth runs — otherwise switchToMonth's own `sel.value =
-    // month` (called on a still-empty <select>) would silently fail to
-    // match anything and show blank until refreshMonthList() resolves later.
-    if(!availableMonths.length && cachedDefault !== ALL_MONTHS_SENTINEL){ availableMonths = [cachedDefault]; }
-    populateMonthSelector();
-    await switchToMonth(cachedDefault, { force:false, silent:true }); // instant cache render + silent background revalidation
-
+  // STEP 1: All Months itself may already have a cached compact summary
+  // (from a previous session) — if so, open instantly from it, then
+  // silently revalidate in the background. Still always All Months; a
+  // cached SPECIFIC month is never used to decide the startup selection.
+  if(await hasCachedSummary(startMonth)){
+    populateMonthSelector(); // ensures the "📊 All Months" option exists before switchToMonth sets .value
+    await switchToMonth(startMonth, { force:false, silent:true }); // instant cache render + silent background revalidation
     if(!effectiveWebAppUrl()){
       showRefreshBanner('nourl');
       return true; // nothing to refresh in the background without a URL — cached view stands as-is
     }
-    // URL is configured — refresh the month list + revalidate in the
-    // background only; a failure here can only show the small banner
-    // (see switchToMonth's catch path), never hide the cached dashboard.
-    refreshMonthList().then(list=>{
-      populateMonthSelector();
-      const trueDefault = pickDefaultMonth(list.length?list:availableMonths);
-      if(trueDefault && trueDefault !== selectedMonth) switchToMonth(trueDefault, { force:false, silent:true });
-    }).catch(()=>{});
+    // URL is configured — refresh the month list (for the selector's other
+    // options) in the background only; this never changes what's currently
+    // displayed. A failure here can only show the small banner (see
+    // switchToMonth's catch path), never hide the cached dashboard.
+    refreshMonthList().then(()=>{ populateMonthSelector(); }).catch(()=>{});
     return true;
   }
 
-  // ---------- STEP 2: No cache anywhere — a genuine first visit. Only now ----------
-  // do the Apps Script URL and the external libraries become hard requirements,
-  // since there is nothing else that could be shown. (XLSX is still needed
-  // here for the Raw Export path and the manual Excel-upload fallback — not
-  // for this normal compact-summary boot flow itself.)
+  // STEP 2: All Months isn't cached yet — a genuine first-ever load (or its
+  // cache expired). Only now do the Apps Script URL and external libraries
+  // become hard requirements, since there is nothing else that could be shown.
   if(typeof XLSX === 'undefined' || typeof Chart === 'undefined'){
     showGsheetBoot(false);
     document.getElementById('app').classList.add('hidden');
@@ -2105,31 +2094,13 @@ async function bootDashboard(){
     return false;
   }
 
-  // Discover the available months FIRST, then fetch the correct default
-  // ONCE. (The previous approach ran a speculative compact-summary fetch of
-  // a single configured "guess" month IN PARALLEL with listSheets — with
-  // All Months now the universal default, that guess is essentially always
-  // wrong/discarded, meaning it always wasted one full Apps Script
-  // invocation for nothing. Sequencing costs a little latency on the rare
-  // case the guess would have matched, in exchange for reliably avoiding
-  // duplicate/wasted requests on every other visit.)
+  // Discover the month list purely for the SELECTOR's other options (so real
+  // months are listed alongside All Months) — this never changes what loads
+  // first, and there is no speculative fetch of any other month here.
   showGsheetBoot(true);
-  let list;
-  try{
-    list = await refreshMonthList();
-  }catch(e){
-    list = availableMonths;
-  }
+  try{ await refreshMonthList(); }catch(e){ /* non-fatal — the selector falls back to whatever it already has */ }
   populateMonthSelector();
-  const defaultMonth = pickDefaultMonth(list.length ? list : availableMonths);
-
-  if(!defaultMonth){
-    showGsheetBoot(false);
-    document.getElementById('app').classList.add('hidden');
-    await showGsheetError('لم يتم العثور على أي شهر/تبويب في المصدر. تأكد من اسم الشيت أو أضف تبويب شهر جديد.');
-    return false;
-  }
-  return switchToMonth(defaultMonth, { force:false });
+  return switchToMonth(startMonth, { force:false });
 }
 
 
