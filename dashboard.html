@@ -1719,7 +1719,14 @@ function applyLoadedSummary(summary, month){
   }else{
     refreshFilterUIForNewData(); // same DOM, same listeners — just sync labels/inputs to the reset selection state
   }
-  renderAll();
+  // Render directly from the summary already in hand — the filters were
+  // just reset to empty above, which is EXACTLY what this summary was
+  // fetched for, so there is no need to go through renderAll()'s own
+  // server request (that used to fire a second, redundant Apps Script
+  // execution for every single month load — same data, wasted round trip).
+  updateTopbar();
+  renderExecFilterTag();
+  applyServerSummaryToDashboard(summary);
   document.getElementById('app').classList.remove('hidden');
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(refreshBtn) refreshBtn.classList.remove('hidden');
@@ -2015,52 +2022,24 @@ async function bootDashboard(){
     return false;
   }
 
-  // Run month-list discovery AND a speculative compact-summary fetch of the
-  // configured default month IN PARALLEL (instead of sequentially), so the
-  // worst-case wait stays close to one timeout window rather than stacking
-  // two. PHASE 5: this "guess fetch" is now the SAME lightweight
-  // ?action=dashboard aggregation every other tab uses — never
-  // fetchSheetRows()/raw pagination — and its result is cached (compact
-  // summary only) exactly like any other month load.
+  // Discover the correct default month FIRST, then fetch its summary ONCE.
+  // (Previously this ran a full dashboard-summary aggregation for the
+  // configured default month IN PARALLEL with listSheets, on the theory that
+  // it saved time — but when the true default (from the live sheet list)
+  // turned out to be a different month, that entire expensive aggregation
+  // was wasted, AND a second one had to run for the real month. listSheets
+  // is now cached and normally fast, so waiting for it first and fetching
+  // only the correct month once is the safer trade.)
   showGsheetBoot(true);
-  const listPromise = refreshMonthList();
-  const guessMonth = effectiveDefaultSheetName();
-  const [listResult, guessResult] = await Promise.allSettled([
-    listPromise,
-    guessMonth ? getMonthFullSummary(guessMonth, {}) : Promise.reject(new Error('no default month configured')),
-  ]);
-  const list = listResult.status === 'fulfilled' ? listResult.value : availableMonths;
-  populateMonthSelector();
-  const defaultMonth = pickDefaultMonth(list.length ? list : availableMonths) || guessMonth;
-
-  if(defaultMonth && defaultMonth === guessMonth){
-    // We already attempted exactly this month in the parallel guess above —
-    // never fetch it a second time. Use the result we already have (it was
-    // already cached — mem + IndexedDB — inside getMonthFullSummary itself).
-    if(guessResult.status === 'fulfilled' && guessResult.value && guessResult.value.summary){
-      try{
-        selectedMonth = guessMonth; saveSelectedMonthToStorage(guessMonth);
-        applyLoadedSummary(guessResult.value.summary, guessMonth);
-        showGsheetBoot(false); hideRefreshBanner(); hasLiveDataOnce = true; setConnStatus('live');
-        return true;
-      }catch(e){
-        // Rendering error on data we already fetched — not a connectivity
-        // issue, so no point retrying the network call either.
-        showGsheetBoot(false);
-        document.getElementById('app').classList.add('hidden');
-        await showGsheetError(e.message || 'تعذر معالجة ملخص الشهر الحالي.');
-        return false;
-      }
-    }else{
-      // Already know this exact request failed/timed out — surface that
-      // immediately instead of waiting through a second identical timeout.
-      showGsheetBoot(false);
-      document.getElementById('app').classList.add('hidden');
-      const reason = guessResult.status === 'rejected' ? guessResult.reason : new Error('تعذر معالجة ملخص الشهر الحالي.');
-      await showGsheetError((reason && reason.message) || 'تعذر الاتصال بمصدر البيانات.');
-      return false;
-    }
+  let list;
+  try{
+    list = await refreshMonthList();
+  }catch(e){
+    list = availableMonths;
   }
+  populateMonthSelector();
+  const guessMonth = effectiveDefaultSheetName();
+  const defaultMonth = pickDefaultMonth(list.length ? list : availableMonths) || guessMonth;
 
   if(!defaultMonth){
     showGsheetBoot(false);
@@ -2068,8 +2047,6 @@ async function bootDashboard(){
     await showGsheetError('لم يتم العثور على أي شهر/تبويب في المصدر. تأكد من اسم الشيت أو أضف تبويب شهر جديد.');
     return false;
   }
-  // defaultMonth is genuinely different from guessMonth (the real month list
-  // arrived with a different true default) — this is a fresh request, not a repeat.
   return switchToMonth(defaultMonth, { force:false });
 }
 

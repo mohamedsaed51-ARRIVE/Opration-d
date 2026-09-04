@@ -89,45 +89,42 @@ var MAX_PAGE_SIZE = 5000;
 
 function doGet(e) {
 
+  var requestId = Utilities.getUuid();
+  var reqStart = new Date().getTime();
+  var params =
+    (e && e.parameter)
+      ? e.parameter
+      : {};
+  var action = params.action || "(page)";
+  var sheetName = params.sheet || "";
+  params.__requestId = requestId; // threaded through so downstream functions can log under the same id
+
+  console.log("[REQUEST START] " + JSON.stringify({
+    requestId: requestId, action: action, sheet: sheetName,
+    debug: params.debug || "", filters: params.filters || "",
+    dateFrom: params.dateFrom || "", dateTo: params.dateTo || "",
+    refresh: params.refresh || "", ts: new Date().toISOString()
+  }));
+
   try {
 
-    var params =
-      (e && e.parameter)
-        ? e.parameter
-        : {};
-
-    var action =
-      params.action || "";
-
-    var sheetName =
-      params.sheet || "";
-
+    var result;
 
     // --------------------------------------------------------
     // LIST MONTHS
     // --------------------------------------------------------
 
     if (action === "listSheets") {
-
-      return jsonResponse(
-        listSheetsPayload()
-      );
-
+      result = listSheetsPayload();
     }
-
 
     // --------------------------------------------------------
     // DIAGNOSTIC
     // --------------------------------------------------------
 
-    if (action === "diagnose") {
-
-      return jsonResponse(
-        diagnoseMonth(sheetName)
-      );
-
+    else if (action === "diagnose") {
+      result = diagnoseMonth(sheetName);
     }
-
 
     // --------------------------------------------------------
     // DASHBOARD SUMMARY (server-side aggregation — compact JSON,
@@ -135,50 +132,45 @@ function doGet(e) {
     // KPI/overview view instead of downloading the entire raw month.
     // --------------------------------------------------------
 
-    if (action === "dashboard") {
-
+    else if (action === "dashboard") {
       if (!sheetName) {
-        return jsonResponse({
-          success: false,
-          error: "لم يتم تحديد الشهر. استخدم ?action=dashboard&sheet=July"
-        });
+        result = { success: false, error: "لم يتم تحديد الشهر. استخدم ?action=dashboard&sheet=July" };
+      } else {
+        result = getMonthDashboardSummary(sheetName, params);
       }
-
-      return jsonResponse(
-        getMonthDashboardSummary(sheetName, params)
-      );
-
     }
 
-
     // --------------------------------------------------------
-    // NORMAL DATA REQUEST
+    // NORMAL DATA REQUEST (raw pagination — Excel Raw Export only)
     // --------------------------------------------------------
 
-    if (!sheetName) {
-
-      return jsonResponse({
-
-        success: false,
-
-        error:
-          "لم يتم تحديد الشهر. استخدم ?sheet=July"
-
-      });
-
+    else if (!sheetName) {
+      result = { success: false, error: "لم يتم تحديد الشهر. استخدم ?sheet=July" };
     }
 
+    else {
+      result = getMonthPage(sheetName, params);
+    }
 
-    return jsonResponse(
-      getMonthPage(
-        sheetName,
-        params
-      )
-    );
+    var reqEnd = new Date().getTime();
+    console.log("[REQUEST END] " + JSON.stringify({
+      requestId: requestId, action: action, sheet: sheetName,
+      durationMs: (reqEnd - reqStart), success: !(result && result.success === false),
+      cached: !!(result && result.cached), empty: !!(result && (result.empty || result.noData))
+    }));
+
+    return jsonResponse(result);
 
   }
 
   catch (err) {
+
+    var reqEndErr = new Date().getTime();
+    console.log("[REQUEST ERROR] " + JSON.stringify({
+      requestId: requestId, action: action, sheet: sheetName,
+      durationMs: (reqEndErr - reqStart),
+      error: String(err && err.message ? err.message : err)
+    }));
 
     return jsonResponse({
 
@@ -223,6 +215,43 @@ function doGet(e) {
 
 var DASHBOARD_CACHE_TTL_SECONDS = 300; // 5 minutes — short enough that edits show up soon, long enough to absorb repeat requests
 var LIST_SHEETS_CACHE_TTL_SECONDS = 600; // 10 minutes — month/tab names change far less often than shipment data; this avoids opening all 4 spreadsheets on every boot/list-refresh
+var CACHE_CHUNK_SIZE = 90000; // stay safely under CacheService's 100KB-per-key limit
+
+// Splits a serialized string across as many "<key>_c0", "<key>_c1", ... keys
+// as needed, plus a "<key>_meta" key recording the chunk count — so a
+// Compact Summary of ANY size can be cached, not just ones under 100KB.
+function cachePutChunked(cache, key, serialized, ttlSeconds) {
+  try {
+    var numChunks = Math.ceil(serialized.length / CACHE_CHUNK_SIZE) || 1;
+    var batch = {};
+    batch[key + "_meta"] = JSON.stringify({ numChunks: numChunks, totalLength: serialized.length });
+    for (var i = 0; i < numChunks; i++) {
+      batch[key + "_c" + i] = serialized.substr(i * CACHE_CHUNK_SIZE, CACHE_CHUNK_SIZE);
+    }
+    cache.putAll(batch, ttlSeconds);
+  } catch (e) {
+    // Non-fatal — caching is a performance optimization, not a requirement.
+  }
+}
+function cacheGetChunked(cache, key) {
+  try {
+    var metaRaw = cache.get(key + "_meta");
+    if (!metaRaw) return null;
+    var meta = JSON.parse(metaRaw);
+    var keys = [];
+    for (var i = 0; i < meta.numChunks; i++) keys.push(key + "_c" + i);
+    var chunkMap = cache.getAll(keys);
+    var parts = [];
+    for (var j = 0; j < meta.numChunks; j++) {
+      var part = chunkMap[key + "_c" + j];
+      if (part === undefined || part === null) return null; // a chunk expired independently — treat the whole entry as a miss
+      parts.push(part);
+    }
+    return parts.join("");
+  } catch (e) {
+    return null;
+  }
+}
 
 var SUMMARY_COLUMN_ALIASES = {
   awb:         ["رقم البوليصة", "رقم بوليصة", "AWB", "awb"],
@@ -639,17 +668,23 @@ function getMonthDashboardSummary(sheetName, params) {
   // the returned timings reflect a REAL computation, never a cache hit.
   var debugMode = !!(params && (params.debug === "1" || params.debug === "true"));
   var forceRefresh = debugMode || (params && (params.refresh === "1" || params.refresh === "true"));
-  var hasFilters = Object.keys(filters).length > 0 || dateFrom || dateTo;
-  var cacheKeySuffix = hasFilters ? ("_f_" + summaryHashKey(JSON.stringify(filters) + "|" + dateFrom + "|" + dateTo + "|" + attemptT1 + "|" + attemptT2)) : "";
-  cacheKeySuffix += "_sla_" + summaryHashKey(slaTargetDefault + "|" + JSON.stringify(branchSlaTargets));
-  var cacheKey = "dash_v2_" + sheetName + cacheKeySuffix;
+  // Cache key includes EVERY input that affects the computed result — not
+  // just filters/dates, but also the attempt-window and SLA-target settings
+  // (these affect attemptSummary / slaPct / withinSla even when no other
+  // filter is active) — see requirement: "Cache key must include sheet/month,
+  // active filters, and SLA settings that affect calculations."
+  var cacheKey = "dash_v3_" + sheetName + "_p_" + summaryHashKey(
+    JSON.stringify(filters) + "|" + dateFrom + "|" + dateTo + "|" +
+    attemptT1 + "|" + attemptT2 + "|" + slaTargetDefault + "|" + JSON.stringify(branchSlaTargets)
+  );
   var cache = CacheService.getScriptCache();
 
   if (!forceRefresh) {
-    var cached = cache.get(cacheKey);
+    var cached = cacheGetChunked(cache, cacheKey);
     if (cached) {
       var cachedObj = JSON.parse(cached);
       cachedObj.cached = true;
+      console.log("[CACHE HIT]" + (params.__requestId ? (" " + JSON.stringify({ requestId: params.__requestId, sheet: sheetName, cacheKey: cacheKey })) : ""));
       return cachedObj;
     }
   }
@@ -1031,36 +1066,41 @@ function getMonthDashboardSummary(sheetName, params) {
 
   try {
     var serialized = JSON.stringify(result);
-    // CacheService values are capped at 100KB — if a month's aggregate is
-    // unusually large (very many distinct branches/customers), skip caching
-    // rather than failing the request; the response itself is still returned.
-    if (serialized.length < 100000) {
-      cache.put(cacheKey, serialized, DASHBOARD_CACHE_TTL_SECONDS);
+    // Chunked write — no more silent "skip caching if >100KB" (see
+    // cachePutChunked above). A sane upper bound still guards against a
+    // truly pathological payload consuming excessive cache quota.
+    if (serialized.length < 3000000) {
+      cachePutChunked(cache, cacheKey, serialized, DASHBOARD_CACHE_TTL_SECONDS);
     }
   } catch (cacheErr) {
     // Non-fatal — caching is a performance optimization, not a requirement.
   }
 
-  // Debug timing — ONLY attached when ?debug=1 was requested (never cached;
-  // the cache.put above already happened using `result` before this runs on
-  // a distinct object reference for the field... see note below).
+  var tTotalEnd = new Date().getTime();
+  var debugTimings = {
+    totalMs: tTotalEnd - tStart,
+    openSpreadsheetMs: tOpenEnd - tOpenStart,
+    locateSheetMs: tLocateEnd - tOpenEnd,
+    dimensionsMs: tDimEnd - tLocateEnd,
+    readMs: tReadEnd - tReadStart,
+    headerMappingMs: tMapEnd - tMapStart,
+    normalizePassMs: tNormalizeEnd - tNormalizeStart,
+    dedupBuildMs: tDedupBuildEnd - tDedupBuildStart,
+    aggregatePassMs: tAggregateEnd - tAggregateStart,
+    finalizeMs: tFinalizeEnd - tFinalizeStart,
+    responsePrepMs: tResponsePrepEnd - tResponsePrepStart,
+    rowCounts: { rawDataRows: dataRows.length, distinctAwb: grandTotal, matchedAfterFilters: topAcc.total },
+    notes: "KPI + branch/customer/province/area + SLA + Growth-Trend timeSeries + attempt-baseline are fused into ONE pass (aggregatePassMs). Data Quality counters, facets, and duplicate-record capture are fused into the normalization pass (normalizePassMs). 'Reading headers' has no separate cost — headers and data share one getRange().getValues() call (readMs)."
+  };
+  // ALWAYS logged (regardless of ?debug=1) so every real execution in the
+  // Apps Script Executions transcript — including ones nobody thought to
+  // reproduce with debug=1 — can be diagnosed after the fact.
+  console.log("[TIMING] " + JSON.stringify(Object.assign({ requestId: params.__requestId || null, sheet: sheetName }, debugTimings)));
+
+  // The JSON response only includes the `debug` field when explicitly
+  // requested — keeps the normal API contract unchanged.
   if (debugMode) {
-    var tTotalEnd = new Date().getTime();
-    result.debug = {
-      totalMs: tTotalEnd - tStart,
-      openSpreadsheetMs: tOpenEnd - tOpenStart,
-      locateSheetMs: tLocateEnd - tOpenEnd,
-      dimensionsMs: tDimEnd - tLocateEnd,
-      readMs: tReadEnd - tReadStart,
-      headerMappingMs: tMapEnd - tMapStart,
-      normalizePassMs: tNormalizeEnd - tNormalizeStart,
-      dedupBuildMs: tDedupBuildEnd - tDedupBuildStart,
-      aggregatePassMs: tAggregateEnd - tAggregateStart,
-      finalizeMs: tFinalizeEnd - tFinalizeStart,
-      responsePrepMs: tResponsePrepEnd - tResponsePrepStart,
-      rowCounts: { rawDataRows: dataRows.length, distinctAwb: grandTotal, matchedAfterFilters: topAcc.total },
-      notes: "KPI + branch/customer/province/area + SLA + Growth-Trend timeSeries + attempt-baseline are fused into ONE pass (aggregatePassMs). Data Quality counters, facets, and duplicate-record capture are fused into the normalization pass (normalizePassMs). 'Reading headers' has no separate cost — headers and data share one getRange().getValues() call (readMs)."
-    };
+    result.debug = debugTimings;
   }
 
   return result;
