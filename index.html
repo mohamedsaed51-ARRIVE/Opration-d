@@ -1732,6 +1732,44 @@ function applyLoadedSummary(summary, month){
   if(refreshBtn) refreshBtn.classList.remove('hidden');
 }
 
+// Explicit non-blocking state used only when there is no usable data currently
+// on screen (for example: December was genuinely empty and the user switches
+// to May). This prevents the dashboard from showing fake zero KPIs while the
+// new month is still loading.
+function renderMonthLoadingState(month){
+  const kpiGrid = document.getElementById('kpiGrid');
+  if(kpiGrid){
+    kpiGrid.innerHTML = `<div style="grid-column:1/-1; text-align:center; padding:40px 16px; color:var(--text-faint);">
+      <div style="font-size:16px; margin-bottom:10px;">⏳ جاري تحميل بيانات شهر "${month}"...</div>
+      <div style="font-size:13px;">سيتم عرض النتائج فور وصول ملخص البيانات.</div>
+    </div>`;
+  }
+  const alertsGrid = document.getElementById('alertsGrid');
+  if(alertsGrid) alertsGrid.innerHTML = '';
+}
+
+// A real successful empty month is NOT an error and must not be represented
+// as six KPI cards containing zeros. It gets a dedicated No Data state.
+function renderMonthEmptyState(month){
+  STATE.grandTotalShipments = 0;
+  const kpiGrid = document.getElementById('kpiGrid');
+  if(kpiGrid){
+    kpiGrid.innerHTML = `<div style="grid-column:1/-1; text-align:center; padding:40px 16px; color:var(--text-faint);">
+      <div style="font-size:16px; margin-bottom:10px;">📭 لا توجد بيانات لشهر "${month || selectedMonth}"</div>
+      <div style="font-size:13px;">تم الاتصال بمصدر البيانات بنجاح، لكن هذا الشهر لا يحتوي على شحنات قابلة للعرض.</div>
+    </div>`;
+  }
+  const alertsGrid = document.getElementById('alertsGrid');
+  if(alertsGrid) alertsGrid.innerHTML = '';
+  Object.keys(STATE.charts).forEach(destroyChart);
+  document.getElementById('metaRowCount').textContent = '0';
+  document.getElementById('metaPeriod').textContent = '-';
+  const badge = document.getElementById('validityBadge');
+  if(badge){ badge.textContent = '● لا توجد بيانات'; badge.style.color = 'var(--text-faint)'; badge.style.background = 'transparent'; }
+  renderExecFilterTag();
+  hideRefreshBanner();
+}
+
 // req #2/#6 — shown when a newly-selected month has NO successful summary
 // anywhere (live or cached). Never fabricates zero KPIs and never leaves a
 // different month's numbers on screen under this selection: every chart and
@@ -1919,6 +1957,11 @@ async function switchToMonth(month, opts){
   const priorMonth = selectedMonth;
   const hadDataOnEntry = !!STATE.serverOverviewSummary; // something is already on screen (any month)
   const isMonthChange = !background && month !== priorMonth;
+  const priorSummaryWasEmpty = !!(STATE.serverOverviewSummary && (STATE.serverOverviewSummary.empty || STATE.serverOverviewSummary.noData));
+  // If the current screen itself is a genuine empty month, there is no real
+  // data to preserve. Replace the fake/empty KPI area with an explicit target
+  // month loading message so May never appears as December's zeros.
+  if(!silent && !background && isMonthChange && (!hadDataOnEntry || priorSummaryWasEmpty)) renderMonthLoadingState(month);
   // req #1: never blank/zero what's already on screen while a new request is
   // in flight — the boot screen only appears on a truly empty dashboard;
   // otherwise this is a non-blocking "updating" cue (existing KPIs/charts/
@@ -1951,7 +1994,9 @@ async function switchToMonth(month, opts){
     // A tab that exists but has no data yet is a normal state, not a
     // connection failure — show a small persistent-until-changed notice
     // instead of either an error screen or silently blank KPIs.
-    if(summary.empty || summary.noData) showRefreshBanner('nodata', month); else hideRefreshBanner();
+    // Empty is a successful No Data state, not a retry/error state. The
+    // dedicated renderer handles the message and no banner is shown.
+    if(!(summary.empty || summary.noData)) hideRefreshBanner();
     hasLiveDataOnce = true;
     console.info('[MONTH LOAD COMPLETE]', { month, totalRows: summary.totalRows, empty: !!(summary.empty||summary.noData), ms: Math.round(performance.now()-loadStartTime), fromCache });
     if(!background && refreshBtn && !silent && force){
@@ -3649,13 +3694,13 @@ async function refreshKpiAndOverviewFromServer(month, opts){
 }
 
 function applyServerSummaryToDashboard(serverSummary){
-  if(serverSummary.empty){
-    STATE.grandTotalShipments = 0;
-    renderKpiCards(ZERO_KPIS);
-  }else{
-    STATE.grandTotalShipments = serverSummary.grandTotal;
-    renderKpiCards(withAnchoredDeliveryRate(serverSummary));
+  if(serverSummary && (serverSummary.empty || serverSummary.noData || serverSummary.totalRows === 0)){
+    renderMonthEmptyState(selectedMonth);
+    ['overview','branches','geo','clients','sla','trend','dq'].forEach(t=>dirtyTabs.add(t));
+    return;
   }
+  STATE.grandTotalShipments = serverSummary.grandTotal;
+  renderKpiCards(withAnchoredDeliveryRate(serverSummary));
   renderAlertsFromServer(serverSummary); // always-visible, like KPI cards — not gated behind a tab click
   ['overview','branches','geo','clients','sla','trend','dq'].forEach(t=>dirtyTabs.add(t));
   renderActiveTabIfDirty();
