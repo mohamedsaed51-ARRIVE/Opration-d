@@ -738,7 +738,18 @@ footer.app-footer{text-align:center; padding:20px; color:var(--text-faint); font
     </div>
     <div id="mgmtPdfStatus" class="mgmt-loadstate hidden" style="margin-bottom:12px;"><span class="spinner-sm"></span> <span id="mgmtPdfStatusText">جاري تجهيز التقرير...</span></div>
 
+    <div class="card-title" style="margin:4px 0 8px;">الملخص التنفيذي للأداء (Executive Performance Summary)</div>
+    <div class="kpi-grid" id="mgmtExecSummaryGrid" style="grid-template-columns:repeat(6,1fr); margin-bottom:14px;"></div>
+
     <div class="kpi-grid" id="mgmtKpiGrid" style="grid-template-columns:repeat(4,1fr);"></div>
+
+    <div class="card mgmt-section" id="mgmtMonthlyPerformanceSection">
+      <div class="table-toolbar">
+        <div class="card-title" style="margin-bottom:0;">📅 الأداء الشهري (Monthly Performance)</div>
+      </div>
+      <div class="card-sub">العدد والنسبة لكل شهر ضمن الفترة المختارة — محسوبة من إجمالي كل شهر على حدة، وليست متوسطًا بين الشهور.</div>
+      <div class="table-scroll"><table class="data-table sticky-col" id="mgmtMonthlyPerformanceTable"></table></div>
+    </div>
 
     <div class="card mgmt-section" id="mgmtQuickCompareSection">
       <div class="table-toolbar">
@@ -2640,7 +2651,54 @@ function mgmtPeriodMonths(){
   return chrono.slice(a, b+1);
 }
 
-// Combines multiple months' already-aggregated server KPI totals into one
+function mgmtRenderExecutiveSummary(overall){
+  const grid = document.getElementById('mgmtExecSummaryGrid');
+  if(!grid) return;
+  const cards = [
+    { l:'TOTAL SHIPMENTS', v: fmtInt(overall.total), sub:'', cls:'neu' },
+    { l:'DELIVERED', v: fmtInt(overall.delivered), sub: fmtPct(overall.deliveryRate), cls:'pos' },
+    { l:'RETURNED', v: fmtInt(overall.returned), sub: fmtPct(overall.returnRate), cls: (overall.returnRate??0)>15?'neg':'warn' },
+    { l:'REJECTED', v: fmtInt(overall.rejected), sub: fmtPct(overall.rejectedRate), cls: (overall.rejectedRate??0)>5?'neg':'warn' },
+    { l:'IN PROGRESS', v: fmtInt(overall.pending), sub: fmtPct(overall.inProgressRate), cls:'neu' },
+    { l:'SLA %', v: fmtPct(overall.slaAchievement), sub:'', cls: pctClass(overall.slaAchievement) },
+  ];
+  if(overall.successRate!==null && overall.deliveryRate!==null && Math.abs(overall.successRate-overall.deliveryRate)>0.05){
+    cards.push({ l:'SUCCESS RATE (S.R %)', v: fmtPct(overall.successRate), sub:'يشمل التسليم + الرفض', cls:pctClass(overall.successRate) });
+  }
+  grid.innerHTML = cards.map(c=>`
+    <div class="kpi-card ${c.cls}">
+      <div class="kpi-label">${c.l}</div>
+      <div class="kpi-value ${c.cls}" style="font-size:21px;">${c.v}</div>
+      ${c.sub?`<div class="kpi-sub" style="font-size:13px; font-weight:700;">${c.sub}</div>`:''}
+    </div>`).join('');
+}
+
+// Section 2 (Monthly Performance Table): each row is ONE month's own
+// already-correct kpis object — count+rate together, never an average
+// across months (there is nothing to average here, each row is self-contained).
+function mgmtRenderMonthlyPerformanceTable(months){
+  const table = document.getElementById('mgmtMonthlyPerformanceTable');
+  if(!table) return;
+  const rows = months.map(m=>{
+    const monthData = MGMT.monthsData[m];
+    const k = monthData && monthData.summary && monthData.summary.kpis;
+    if(!k) return null;
+    const pending = k.pending||0;
+    const inProgressRate = k.total>0 ? pending/k.total*100 : null;
+    return { month:m, total:k.total||0, delivered:k.delivered||0, deliveryRate:k.deliveryRate,
+      returned:k.returned||0, returnRate:k.returnRate, rejected:k.rejected||0, rejectedRate:k.rejectedRate,
+      pending, inProgressRate, sla:k.slaAchievement };
+  }).filter(Boolean);
+  if(!rows.length){ table.innerHTML = '<tbody><tr><td class="mgmt-empty-note">لا توجد بيانات لعرضها ضمن الفترة المختارة</td></tr></tbody>'; return; }
+  let thead = '<thead><tr><th>الشهر</th><th>الإجمالي</th><th>تم التسليم</th><th>Delivery %</th><th>مرتجعات</th><th>Return %</th><th>رفض</th><th>Reject %</th><th>قيد التشغيل</th><th>In Progress %</th><th>SLA %</th></tr></thead>';
+  let tbody = '<tbody>' + rows.map(r=>`<tr><td>${r.month}</td><td>${fmtInt(r.total)}</td>
+    <td>${fmtInt(r.delivered)}</td><td>${fmtPct(r.deliveryRate)}</td>
+    <td>${fmtInt(r.returned)}</td><td>${fmtPct(r.returnRate)}</td>
+    <td>${fmtInt(r.rejected)}</td><td>${fmtPct(r.rejectedRate)}</td>
+    <td>${fmtInt(r.pending)}</td><td>${fmtPct(r.inProgressRate)}</td>
+    <td>${r.sla!==null?fmtPct(r.sla):'-'}</td></tr>`).join('') + '</tbody>';
+  table.innerHTML = thead + tbody;
+}
 // overall period total (sum counts, then recompute rates) — mathematically
 // equivalent to computeKPIs() over all raw rows, without ever touching them.
 function mgmtCombineKpis(months){
@@ -2658,6 +2716,8 @@ function mgmtCombineKpis(months){
     total, delivered, returned, rejected, pending, eligible,
     deliveryRate: total>0 ? delivered/total*100 : null,
     returnRate: eligible>0 ? returned/eligible*100 : null,
+    rejectedRate: eligible>0 ? rejected/eligible*100 : null,
+    inProgressRate: total>0 ? pending/total*100 : null,
     successRate: total>0 ? (delivered+rejected)/total*100 : null,
     slaAchievement: deliveredWithDate>0 ? withinSla/deliveredWithDate*100 : null,
   };
@@ -2693,7 +2753,9 @@ function mgmtBuildSeries(field, months, opts){
     for(const s of list){
       if(!s.name) continue;
       if(!byName.has(s.name)) byName.set(s.name, { name:s.name, byMonth:{} });
-      byName.get(s.name).byMonth[m] = { count: s.shipments, sr: s.successRate };
+      byName.get(s.name).byMonth[m] = { count: s.shipments, sr: s.successRate,
+        delivered: s.delivered, returned: s.returned, rejected: s.rejected,
+        withinSla: s.withinSla, slaBreach: s.slaBreach };
     }
   }
   return byName;
@@ -2736,9 +2798,34 @@ function mgmtEntryStats(entry, months){
   const srPresent = months.map(m=>srs[m]).filter(v=>v!==null&&v!==undefined);
   const avgSr = srPresent.length ? srPresent.reduce((a,b)=>a+b,0)/srPresent.length : null;
   const lastMonth = months[months.length-1], firstMonth = months[0];
+
+  // Period totals across the selected months — summed from each month's own
+  // counts (weighted), never an average of monthly percentages.
+  let delivered=0, returned=0, rejected=0, withinSla=0, slaBreach=0;
+  months.forEach(m=>{
+    const v = entry.byMonth[m];
+    if(!v) return;
+    delivered += v.delivered||0; returned += v.returned||0; rejected += v.rejected||0;
+    withinSla += v.withinSla||0; slaBreach += v.slaBreach||0;
+  });
+  // "pending" isn't tracked separately per branch/customer in the persisted
+  // summary (only at the whole-month level) — approximated as whatever isn't
+  // delivered/returned/rejected. Documented limitation: this folds any
+  // "unknown"-status shipments into pending too, and is 0 whenever
+  // delivered+returned+rejected already accounts for the full volume.
+  const pending = Math.max(0, totalVolume - delivered - returned - rejected);
+  const deliveredWithDate = withinSla + slaBreach; // exact — not an approximation
+  const resolved = delivered + returned + rejected; // "eligible" proxy — see the same documented limitation as summaryMergeGroupLists (Code.gs)
+
   return { counts, srs, volGrowth, srGrowth, totalVolume, avgSr,
     lastCount: counts[lastMonth]||0, firstCount: counts[firstMonth]||0,
-    trend: mgmtClassifyGrowth(volGrowth) };
+    trend: mgmtClassifyGrowth(volGrowth),
+    delivered, returned, rejected, pending,
+    deliveryRate: totalVolume>0 ? delivered/totalVolume*100 : null,
+    returnRate: resolved>0 ? returned/resolved*100 : null,
+    rejectRate: resolved>0 ? rejected/resolved*100 : null,
+    inProgressRate: totalVolume>0 ? pending/totalVolume*100 : null,
+    slaPct: deliveredWithDate>0 ? withinSla/deliveredWithDate*100 : null };
 }
 
 function mgmtSortedEntries(series, months){
@@ -2940,8 +3027,17 @@ function mgmtRenderRanking(tableId, series, months){
   if(!table) return;
   const entries = mgmtSortedEntries(series, months).sort((a,b)=>b.stats.totalVolume - a.stats.totalVolume);
   if(!entries.length){ table.innerHTML = '<tbody><tr><td class="mgmt-empty-note">لا توجد بيانات</td></tr></tbody>'; return; }
-  let thead = '<thead><tr><th>#</th><th>الاسم</th><th>Volume</th><th>S.R %</th><th>Growth</th><th>الاتجاه</th></tr></thead>';
-  let tbody = '<tbody>' + entries.map((e,i)=>`<tr><td>${i+1}</td><td>${e.name}</td><td>${fmtInt(e.stats.totalVolume)}</td><td>${fmtPct(e.stats.avgSr)}</td><td>${fmtPct(e.stats.volGrowth,1)}</td><td><span class="mgmt-trend-tag ${e.stats.trend.cls}">${e.stats.trend.arrow} ${e.stats.trend.label}</span></td></tr>`).join('') + '</tbody>';
+  let thead = '<thead><tr><th>#</th><th>الاسم</th><th>الإجمالي</th><th>تم التسليم</th><th>Delivery %</th><th>مرتجعات</th><th>Return %</th><th>رفض</th><th>Reject %</th><th>قيد التشغيل</th><th>SLA %</th><th>الاتجاه</th></tr></thead>';
+  let tbody = '<tbody>' + entries.map((e,i)=>{
+    const s = e.stats;
+    return `<tr><td>${i+1}</td><td>${e.name}</td><td>${fmtInt(s.totalVolume)}</td>
+      <td>${fmtInt(s.delivered)}</td><td>${fmtPct(s.deliveryRate)}</td>
+      <td>${fmtInt(s.returned)}</td><td>${fmtPct(s.returnRate)}</td>
+      <td>${fmtInt(s.rejected)}</td><td>${fmtPct(s.rejectRate)}</td>
+      <td>${fmtInt(s.pending)}</td>
+      <td>${s.slaPct!==null?fmtPct(s.slaPct):'-'}</td>
+      <td><span class="mgmt-trend-tag ${s.trend.cls}">${s.trend.arrow} ${s.trend.label}</span></td></tr>`;
+  }).join('') + '</tbody>';
   table.innerHTML = thead + tbody;
 }
 
@@ -2965,6 +3061,22 @@ function mgmtRenderInsights(months, branchSeries, customerSeries, showBranches, 
   const insights = [];
   const branchEntries = showBranches ? mgmtSortedEntries(branchSeries, months) : [];
   const custEntries = showCustomers ? mgmtSortedEntries(customerSeries, months) : [];
+
+  // Overall period-level observations — count + rate together, not a bare
+  // qualitative phrase (uses the same weighted mgmtCombineKpis already used
+  // for the Executive Summary — no new formulas).
+  const overall = mgmtCombineKpis(months);
+  if(overall.total>0){
+    if(overall.deliveryRate!==null){
+      insights.push({cls: overall.deliveryRate<70?'warn':'pos', text:`تم تسليم ${fmtInt(overall.delivered)} من أصل ${fmtInt(overall.total)} شحنة بنسبة ${fmtPct(overall.deliveryRate)} خلال الفترة المختارة.`});
+    }
+    if(overall.returnRate!==null && overall.returnRate>10){
+      insights.push({cls: overall.returnRate>20?'neg':'warn', text:`بلغت المرتجعات ${fmtInt(overall.returned)} شحنة بنسبة ${fmtPct(overall.returnRate)} من إجمالي الشحنات القابلة للتقييم (${fmtInt(overall.eligible)}) خلال الفترة المختارة.`});
+    }
+    if(overall.rejectedRate!==null && overall.rejectedRate>5){
+      insights.push({cls:'warn', text:`بلغت حالات رفض الاستلام ${fmtInt(overall.rejected)} شحنة بنسبة ${fmtPct(overall.rejectedRate)} من إجمالي الشحنات القابلة للتقييم خلال الفترة المختارة.`});
+    }
+  }
 
   const addMover = (e, kind)=>{
     const g = e.stats.volGrowth;
@@ -3060,6 +3172,9 @@ async function mgmtGeneratePdfReport(){
     const comparisonLabel = {both:'الفروع والعملاء', branches:'الفروع فقط', customers:'العملاء فقط'}[MGMT.comparisonType] || 'الفروع والعملاء';
 
     const overall = mgmtCombineKpis(months); // sums per-month server KPI totals — no raw rows involved
+    if(!overall || !overall.total){
+      throw new Error('لا توجد بيانات فعلية ضمن الفترة المختارة — لن يتم إصدار تقرير بأرقام صفرية. اختر فترة تحتوي على شحنات فعلية.');
+    }
     const grab = id => { const el = document.getElementById(id); return el ? el.outerHTML : ''; };
     const branchChartImg = showBranches ? safeChartImage('chartMgmtBranchTrend') : null;
     const customerChartImg = showCustomers ? safeChartImage('chartMgmtCustomerTrend') : null;
@@ -3111,13 +3226,19 @@ async function mgmtGeneratePdfReport(){
       <h2>الملخص التنفيذي</h2>
       <p style="font-size:11px; line-height:1.8;">خلال الفترة من ${periodLabel}، بلغ إجمالي الشحنات ${fmtInt(overall.total)} شحنة بمعدل نجاح (S.R %) قدره ${fmtPct(overall.successRate)}. رصد التقرير ${topGrowersAll.length} حالة نمو ملحوظ و${topDeclinersAll.length} حالة تراجع ملحوظ تستدعي المتابعة.</p>
 
-      <h2>المؤشرات العامة (Overall KPIs)</h2>
+      <h2>المؤشرات العامة (Overall KPIs) — العدد والنسبة</h2>
       <div class="kpi-row">
-        <div class="kpi-box"><b>إجمالي الشحنات</b><span>${fmtInt(overall.total)}</span></div>
-        <div class="kpi-box"><b>S.R %</b><span>${fmtPct(overall.successRate)}</span></div>
-        <div class="kpi-box"><b>تم التسليم</b><span>${fmtInt(overall.delivered)}</span></div>
-        <div class="kpi-box"><b>مرتجعات</b><span>${fmtInt(overall.returned)}</span></div>
+        <div class="kpi-box"><b>إجمالي الشحنات (TOTAL SHIPMENTS)</b><span>${fmtInt(overall.total)}</span></div>
+        <div class="kpi-box"><b>تم التسليم (DELIVERED)</b><span>${fmtInt(overall.delivered)}</span><span style="font-size:11px; color:#0E7C55;">${fmtPct(overall.deliveryRate)}</span></div>
+        <div class="kpi-box"><b>مرتجعات (RETURNED)</b><span>${fmtInt(overall.returned)}</span><span style="font-size:11px; color:#B4302A;">${fmtPct(overall.returnRate)}</span></div>
+        <div class="kpi-box"><b>رفض الاستلام (REJECTED)</b><span>${fmtInt(overall.rejected)}</span><span style="font-size:11px; color:#B4302A;">${fmtPct(overall.rejectedRate)}</span></div>
+        <div class="kpi-box"><b>قيد التشغيل (IN PROGRESS)</b><span>${fmtInt(overall.pending)}</span><span style="font-size:11px; color:#5B6472;">${fmtPct(overall.inProgressRate)}</span></div>
+        <div class="kpi-box"><b>SLA %</b><span>${fmtPct(overall.slaAchievement)}</span></div>
+        ${(overall.successRate!==null && overall.deliveryRate!==null && Math.abs(overall.successRate-overall.deliveryRate)>0.05) ? `<div class="kpi-box"><b>S.R % (تسليم + رفض)</b><span>${fmtPct(overall.successRate)}</span></div>` : ''}
       </div>
+
+      <h2>الأداء الشهري (Monthly Performance)</h2>
+      ${grab('mgmtMonthlyPerformanceTable')}
 
       ${showBranches?`<h2>أداء الفروع (Branch Performance)</h2>${grab('mgmtBranchRankTable') || '<p>لا يوجد.</p>'}`:''}
       ${showCustomers?`<h2>أداء العملاء (Customer Performance)</h2>${grab('mgmtCustomerRankTable') || '<p>لا يوجد.</p>'}`:''}
@@ -3191,6 +3312,8 @@ function mgmtRenderAll(months){
   const branchSeries = mgmtBuildSeries('branch', months, {});
   const customerSeries = mgmtBuildSeries('client', months, {});
 
+  mgmtRenderExecutiveSummary(mgmtCombineKpis(months));
+  mgmtRenderMonthlyPerformanceTable(months);
   mgmtRenderKpis(months, branchSeries, customerSeries);
   if(showBranches) mgmtRenderMovementTable('mgmtBranchMovementTable', branchSeries, months, document.getElementById('mgmtBranchTableMetric').value, 'الفرع');
   if(showCustomers) mgmtRenderMovementTable('mgmtCustomerMovementTable', customerSeries, months, document.getElementById('mgmtCustomerTableMetric').value, 'العميل');
