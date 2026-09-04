@@ -3296,7 +3296,18 @@ async function mgmtRenderQuickCompare(){
   console.info('[COMPARISON COMPLETE]', { current, previous, ms: Math.round(performance.now()-t0) });
 }
 async function renderManagementTab(){
-  if(!availableMonths.length) return;
+  if(!availableMonths.length){
+    // The month list may still be resolving in the background (e.g. right
+    // after an All-Months cache-hit boot, which no longer blocks on it) —
+    // wait for it here rather than silently leaving the panel empty with no
+    // way to recover short of an unrelated action re-triggering this render.
+    try{ await refreshMonthList(); }catch(e){ /* non-fatal — proceed with whatever is already known */ }
+    if(!availableMonths.length){
+      const loadStateEl = document.getElementById('mgmtLoadState');
+      if(loadStateEl){ document.getElementById('mgmtLoadStateText').textContent = 'تعذر العثور على أي شهر متاح — تحقق من الاتصال ثم أعد فتح هذا التبويب.'; loadStateEl.classList.remove('hidden'); }
+      return;
+    }
+  }
   mgmtPopulateMonthSelects();
   mgmtRenderQuickCompare().catch(e=>console.warn('Quick compare failed:', e)); // independent of the period-based sections below — never blocks them
   const months = mgmtPeriodMonths();
@@ -3385,8 +3396,15 @@ function getActiveTabKey(){
   const activeBtn = document.querySelector('.tab-btn.active');
   return (activeBtn && TAB_RENDERERS[activeBtn.dataset.tab]) ? activeBtn.dataset.tab : 'overview';
 }
+// 'management' and 'settings' manage their OWN internal staleness
+// (MGMT.monthsData / current STATE.* reads respectively) and never
+// participate in the summary-driven dirty-tracking below — nothing ever
+// marks them dirty, so they must always render on click rather than being
+// gated by a flag that would otherwise never be true for them.
+const TAB_ALWAYS_RENDER = new Set(['management', 'settings']);
 function renderActiveTabIfDirty(){
   const key = getActiveTabKey();
+  if(TAB_ALWAYS_RENDER.has(key)){ TAB_RENDERERS[key](); return; }
   if(dirtyTabs.has(key)){
     TAB_RENDERERS[key]();
     dirtyTabs.delete(key);
