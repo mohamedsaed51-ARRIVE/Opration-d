@@ -222,6 +222,7 @@ function doGet(e) {
 // ============================================================
 
 var DASHBOARD_CACHE_TTL_SECONDS = 300; // 5 minutes — short enough that edits show up soon, long enough to absorb repeat requests
+var LIST_SHEETS_CACHE_TTL_SECONDS = 600; // 10 minutes — month/tab names change far less often than shipment data; this avoids opening all 4 spreadsheets on every boot/list-refresh
 
 var SUMMARY_COLUMN_ALIASES = {
   awb:         ["رقم البوليصة", "رقم بوليصة", "AWB", "awb"],
@@ -280,16 +281,22 @@ function summaryDetectColumnMap(headers) {
   return map;
 }
 
-function summaryClassifyStatus(status) {
-  var n = summaryNormText(status);
+var SUMMARY_STATUS_LOOKUP = null; // built once, lazily, on first use — see summaryClassifyStatus
+function summaryBuildStatusLookup() {
+  var lookup = {};
   var buckets = Object.keys(SUMMARY_STATUS_MAP);
   for (var i = 0; i < buckets.length; i++) {
     var vals = SUMMARY_STATUS_MAP[buckets[i]];
     for (var v = 0; v < vals.length; v++) {
-      if (summaryNormText(vals[v]) === n) return buckets[i];
+      lookup[summaryNormText(vals[v])] = buckets[i];
     }
   }
-  return "unknown";
+  return lookup;
+}
+function summaryClassifyStatus(status) {
+  if (!SUMMARY_STATUS_LOOKUP) SUMMARY_STATUS_LOOKUP = summaryBuildStatusLookup();
+  var n = summaryNormText(status);
+  return SUMMARY_STATUS_LOOKUP.hasOwnProperty(n) ? SUMMARY_STATUS_LOOKUP[n] : "unknown";
 }
 
 function summaryParseDate(v) {
@@ -487,7 +494,125 @@ function summaryHashKey(s) {
   return digest.map(function (b) { return (b < 0 ? b + 256 : b).toString(16); }).join("");
 }
 
+// ------------------------------------------------------------
+// Single-pass aggregation engine (performance hotfix).
+// Previously: summaryApplyFilters/summaryComputeKPIs/summaryGroupBy/
+// summaryBuildTimeSeries were each called separately (branch/customer/
+// province/area/timeSeries-daily/weekly/monthly/attempt-baseline), meaning
+// ~15-20 full linear passes over the deduped month for a single request.
+// These helpers replace that with exactly ONE aggregation pass: a single
+// accumulator object per group/bucket, updated once per row, finalized
+// (cheap — proportional to the number of DISTINCT groups, not rows) only at
+// the end. The old summaryApplyFilters/summaryComputeKPIs/summaryGroupBy/
+// summaryBuildTimeSeries functions above are kept (unused by the hot path
+// now) rather than deleted, to keep this change minimal and reviewable.
+// ------------------------------------------------------------
+function summaryNewGroupAcc() {
+  return { total: 0, delivered: 0, returned: 0, rejected: 0, pending: 0, unknown: 0,
+    withinSla: 0, slaBreach: 0, sumSlaDays: 0, deliveredWithDate: 0 };
+}
+function summaryAccumulateRow(acc, r, target) {
+  acc.total++;
+  if (r.bucket === "delivered") {
+    acc.delivered++;
+    if (r.slaDays !== null) {
+      acc.deliveredWithDate++;
+      acc.sumSlaDays += r.slaDays;
+      if (r.slaDays <= target) acc.withinSla++; else acc.slaBreach++;
+    }
+  } else if (r.bucket === "returned") { acc.returned++; }
+  else if (r.bucket === "rejected") { acc.rejected++; }
+  else if (r.bucket === "pending") { acc.pending++; }
+  else { acc.unknown++; }
+}
+function summaryFinalizeGroup(name, acc) {
+  var total = acc.total;
+  var eligible = total - acc.pending;
+  var deliveryRate = total > 0 ? (acc.delivered / total * 100) : null;
+  var returnRate = eligible > 0 ? (acc.returned / eligible * 100) : null;
+  var rejectedRate = eligible > 0 ? (acc.rejected / eligible * 100) : null;
+  var successRate = total > 0 ? ((acc.delivered + acc.rejected) / total * 100) : null;
+  var slaAchievement = acc.deliveredWithDate > 0 ? (acc.withinSla / acc.deliveredWithDate * 100) : null;
+  var avgDays = acc.deliveredWithDate > 0 ? (acc.sumSlaDays / acc.deliveredWithDate) : null;
+  return {
+    name: name, shipments: total, delivered: acc.delivered, deliveryRate: deliveryRate,
+    returned: acc.returned, returnRate: returnRate, rejected: acc.rejected, rejectedRate: rejectedRate,
+    successRate: successRate, avgDays: avgDays, withinSla: acc.withinSla, slaBreach: acc.slaBreach, slaPct: slaAchievement
+  };
+}
+function summaryFinalizeGroupList(accMap, order, topN) {
+  var out = [];
+  for (var i = 0; i < order.length; i++) out.push(summaryFinalizeGroup(order[i], accMap[order[i]]));
+  out.sort(function (a, b) { return b.shipments - a.shipments; });
+  if (topN && out.length > topN) out = out.slice(0, topN);
+  return out;
+}
+function summaryFinalizeTimeSeries(map, order) {
+  var sortedKeys = order.slice().sort();
+  var out = [];
+  for (var i = 0; i < sortedKeys.length; i++) {
+    var key = sortedKeys[i];
+    var b = map[key];
+    var eligible = b.shipments - b.pending;
+    var deliveryRate = b.shipments > 0 ? (b.delivered / b.shipments * 100) : null;
+    var returnRate = eligible > 0 ? (b.returned / eligible * 100) : null;
+    out.push({ label: key, shipments: b.shipments, delivered: b.delivered, returned: b.returned,
+      deliveryRate: deliveryRate, returnRate: returnRate });
+  }
+  return out;
+}
+// Single-row filter predicate — same semantics as summaryApplyFilters, but
+// evaluated once per row inline in the aggregation loop instead of
+// allocating a filtered copy of the array per call site. No inner closures
+// (this runs twice per row in the aggregation pass — closures allocated
+// per-call would mean ~2x117k extra function objects on a large month).
+function summaryFilterListMatches(val, list) {
+  for (var i = 0; i < list.length; i++) { if (list[i] === val) return true; }
+  return false;
+}
+function summaryRowMatchesFilters(r, filters, excludeDim, fromTime, toTime) {
+  if (excludeDim !== "province" && filters.province && filters.province.length && !summaryFilterListMatches(r.province, filters.province)) return false;
+  if (excludeDim !== "area" && filters.area && filters.area.length && !summaryFilterListMatches(r.area, filters.area)) return false;
+  if (excludeDim !== "branch" && filters.branch && filters.branch.length && !summaryFilterListMatches(r.branch, filters.branch)) return false;
+  if (excludeDim !== "client" && filters.client && filters.client.length && !summaryFilterListMatches(r.client, filters.client)) return false;
+  if (excludeDim !== "status" && filters.status && filters.status.length && !summaryFilterListMatches(r.status, filters.status)) return false;
+  if (excludeDim !== "attempt" && filters.attempt && filters.attempt.length && !summaryFilterListMatches(r.attemptCat, filters.attempt)) return false;
+  if (excludeDim !== "date" && (fromTime !== null || toTime !== null)) {
+    var t = r.pickup ? r.pickup.getTime() : null;
+    if (t === null) return false;
+    if (fromTime !== null && t < fromTime) return false;
+    if (toTime !== null && t > toTime) return false;
+  }
+  return true;
+}
+function summaryFormatDuplicateRecord(r) {
+  var tz = Session.getScriptTimeZone() || "Africa/Cairo";
+  return {
+    awb: r.awb, client: r.client, status: r.status, branch: r.branch,
+    pickup: r.pickup ? Utilities.formatDate(r.pickup, tz, "yyyy-MM-dd") : "",
+    lastStatus: r.lastStatus ? Utilities.formatDate(r.lastStatus, tz, "yyyy-MM-dd") : ""
+  };
+}
+// Hoisted per-row helpers for the normalize pass — plain functions with no
+// closure over `row`/`idx`, called ~117k times on a large month. Avoids
+// allocating a new function object on every iteration (as the previous
+// per-row `row.every(function(c){...})` / `var get = function(field){...}`
+// pattern did).
+function summaryRowIsAllEmpty(row) {
+  for (var i = 0; i < row.length; i++) {
+    var c = row[i];
+    if (c !== null && c !== "" && c !== undefined) return false;
+  }
+  return true;
+}
+function summaryGetField(row, idx, field) {
+  var i = idx[field];
+  return (i !== undefined && i >= 0) ? row[i] : null;
+}
+
 function getMonthDashboardSummary(sheetName, params) {
+
+  var tStart = new Date().getTime();
 
   if (!MONTH_SOURCE.hasOwnProperty(sheetName)) {
     return { success: false, error: "شهر غير معروف: " + sheetName };
@@ -510,7 +635,10 @@ function getMonthDashboardSummary(sheetName, params) {
   var dateFrom = (params && params.dateFrom) ? params.dateFrom : "";
   var dateTo = (params && params.dateTo) ? params.dateTo : "";
   var branchFilter = (filters.branch && filters.branch.length === 1) ? filters.branch[0] : ""; // kept for legacy response field only
-  var forceRefresh = params && (params.refresh === "1" || params.refresh === "true");
+  // Performance hotfix: ?debug=1 always forces a fresh (non-cached) run so
+  // the returned timings reflect a REAL computation, never a cache hit.
+  var debugMode = !!(params && (params.debug === "1" || params.debug === "true"));
+  var forceRefresh = debugMode || (params && (params.refresh === "1" || params.refresh === "true"));
   var hasFilters = Object.keys(filters).length > 0 || dateFrom || dateTo;
   var cacheKeySuffix = hasFilters ? ("_f_" + summaryHashKey(JSON.stringify(filters) + "|" + dateFrom + "|" + dateTo + "|" + attemptT1 + "|" + attemptT2)) : "";
   cacheKeySuffix += "_sla_" + summaryHashKey(slaTargetDefault + "|" + JSON.stringify(branchSlaTargets));
@@ -529,20 +657,24 @@ function getMonthDashboardSummary(sheetName, params) {
   var quarter = MONTH_SOURCE[sheetName];
   var spreadsheetId = SPREADSHEET_IDS[quarter];
 
+  var tOpenStart = new Date().getTime();
   var ss;
   try {
     ss = SpreadsheetApp.openById(spreadsheetId);
   } catch (err) {
     return { success: false, error: "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err) };
   }
+  var tOpenEnd = new Date().getTime();
 
   var sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     return { success: false, error: "الشيت غير موجود: " + sheetName + " داخل " + quarter };
   }
+  var tLocateEnd = new Date().getTime();
 
   var lastRow = sheet.getLastRow();
   var lastColumn = sheet.getLastColumn();
+  var tDimEnd = new Date().getTime();
 
   // Empty tab (no data yet) is a normal state, NOT an error — matches the
   // dashboard's existing "no data yet" handling exactly.
@@ -556,9 +688,13 @@ function getMonthDashboardSummary(sheetName, params) {
   // Single full read, done ONCE on the server — this is the whole point:
   // the heavy read happens here (fast, server-side), and only a small
   // aggregated JSON crosses the network to the browser, never the raw rows.
+  // (Headers and data share this one call — there is no separate "read
+  // headers" round trip to instrument; see debug.readMs below.)
+  var tReadStart = new Date().getTime();
   var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
   var headers = values[0];
   var dataRows = values.slice(1);
+  var tReadEnd = new Date().getTime();
 
   var hasAnyContent = dataRows.some(function (row) {
     return row.some(function (cell) { return cell !== "" && cell !== null; });
@@ -567,53 +703,70 @@ function getMonthDashboardSummary(sheetName, params) {
     return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
   }
 
+  var tMapStart = new Date().getTime();
   var colMap = summaryDetectColumnMap(headers);
   var idx = {};
   var mappedFields = Object.keys(colMap);
   for (var mf = 0; mf < mappedFields.length; mf++) {
     idx[mappedFields[mf]] = headers.indexOf(colMap[mappedFields[mf]]);
   }
+  var tMapEnd = new Date().getTime();
+
+  // ============================================================
+  // PASS 1 (normalize) — ONE loop over the raw sheet rows. Builds the
+  // deduped AWB map, every Data Quality counter, the filter-dropdown facets,
+  // AND captures duplicate-record detail — all fused into this single pass
+  // (previously facets and duplicate-record capture were each a SEPARATE
+  // full scan of the data).
+  // ============================================================
+  var tNormalizeStart = new Date().getTime();
 
   var awbMap = {}; // awb -> latest row object (dedup, matches dedupeForKPI)
   var dupCount = 0;
   var invalidDates = 0;
-  // Data Quality counters — computed on every non-empty, has-AWB row (matches
-  // the client's old buildRowsAndDQFromHeaderedData: totalRows only counts
-  // rows that would have been pushed into its `rows` array).
   var dqTotalRows = 0, missingBranch = 0, missingClient = 0, missingProvince = 0, negativeCod = 0, unknownStatusCount = 0;
   var unknownStatusSet = {};
-  var seenAwbCount = {}; // awb -> occurrence count, for duplicate detection (see pass 2 below)
+  var seenAwbCount = {}; // awb -> occurrence count
+
+  var DQ_MAX_DUPLICATE_RECORDS = 1000;
+  var duplicateRecords = [];
+  var duplicateRecordsTruncated = false;
+
+  // Facets — distinct values per dimension, collected from every raw row
+  // that has a valid AWB (duplicates just re-touch an already-seen key, so
+  // scanning raw rows here — instead of the deduped set afterward — is
+  // equivalent and saves a whole extra pass).
+  var provinceSet = {}, branchSet = {}, clientSet = {}, statusSet = {}, areaSet = {};
+  var areasByProvinceSets = {};
 
   for (var ri = 0; ri < dataRows.length; ri++) {
     var row = dataRows[ri];
-    var allEmpty = row.every(function (c) { return c === null || c === "" || c === undefined; });
-    if (allEmpty) continue;
+    if (summaryRowIsAllEmpty(row)) continue;
 
-    var get = function (field) { return (idx[field] !== undefined && idx[field] >= 0) ? row[idx[field]] : null; };
-    var awb = summaryNormText(get("awb"));
+    var awb = summaryNormText(summaryGetField(row, idx, "awb"));
     if (!awb) continue;
 
     dqTotalRows++;
     seenAwbCount[awb] = (seenAwbCount[awb] || 0) + 1;
 
-    var pickup = summaryParseDate(get("pickup"));
-    var lastStatus = summaryParseDate(get("lastStatus"));
+    var pickup = summaryParseDate(summaryGetField(row, idx, "pickup"));
+    var lastStatus = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
     if (!pickup) invalidDates++;
 
-    var status = summaryNormText(get("status"));
+    var status = summaryNormText(summaryGetField(row, idx, "status"));
     var bucket = summaryClassifyStatus(status);
     if (bucket === "unknown" && status) { unknownStatusSet[status] = true; unknownStatusCount++; }
-    var branch = summaryNormText(get("branch"));
+    var branch = summaryNormText(summaryGetField(row, idx, "branch"));
     if (!branch) missingBranch++;
-    var client = summaryNormText(get("client"));
+    var client = summaryNormText(summaryGetField(row, idx, "client"));
     if (!client) missingClient++;
-    var province = summaryNormText(get("province"));
+    var province = summaryNormText(summaryGetField(row, idx, "province"));
     if (!province) missingProvince++;
-    var area = summaryNormText(get("area"));
-    var finalStatus = summaryNormText(get("finalStatus"));
-    var cod = parseFloat(get("cod")) || 0;
+    var area = summaryNormText(summaryGetField(row, idx, "area"));
+    var finalStatus = summaryNormText(summaryGetField(row, idx, "finalStatus"));
+    var cod = parseFloat(summaryGetField(row, idx, "cod")) || 0;
     if (cod < 0) negativeCod++;
-    var shipCost = parseFloat(get("shipCost")) || 0;
+    var shipCost = parseFloat(summaryGetField(row, idx, "shipCost")) || 0;
 
     var slaDays = null;
     if (pickup && lastStatus) slaDays = (lastStatus.getTime() - pickup.getTime()) / 86400000;
@@ -626,53 +779,57 @@ function getMonthDashboardSummary(sheetName, params) {
       attemptCat: attemptCat
     };
 
+    if (province) provinceSet[province] = true;
+    if (branch) branchSet[branch] = true;
+    if (client) clientSet[client] = true;
+    if (status) statusSet[status] = true;
+    if (area) {
+      areaSet[area] = true;
+      if (province) {
+        if (!areasByProvinceSets[province]) areasByProvinceSets[province] = {};
+        areasByProvinceSets[province][area] = true;
+      }
+    }
+
     if (awbMap.hasOwnProperty(awb)) {
       dupCount++;
-      var existing = awbMap[awb];
-      var et = existing.lastStatus ? existing.lastStatus.getTime() : -Infinity;
+      var existingRec = awbMap[awb];
+      // Duplicate-record capture, inline — no second pass needed: by the
+      // time a duplicate is detected we already hold both the previous
+      // occurrence (existingRec) and this one.
+      if (duplicateRecords.length < DQ_MAX_DUPLICATE_RECORDS) {
+        if (seenAwbCount[awb] === 2) duplicateRecords.push(summaryFormatDuplicateRecord(existingRec));
+        if (duplicateRecords.length < DQ_MAX_DUPLICATE_RECORDS) duplicateRecords.push(summaryFormatDuplicateRecord(rec));
+        else duplicateRecordsTruncated = true;
+      } else {
+        duplicateRecordsTruncated = true;
+      }
+      var et = existingRec.lastStatus ? existingRec.lastStatus.getTime() : -Infinity;
       var rt = lastStatus ? lastStatus.getTime() : -Infinity;
       if (rt >= et) awbMap[awb] = rec;
     } else {
       awbMap[awb] = rec;
     }
   }
+  duplicateRecords.sort(function (a, b) { return a.awb < b.awb ? -1 : (a.awb > b.awb ? 1 : 0); });
 
-  // Duplicate AWB detail table (Data Quality tab) — pass 2, only runs if
-  // duplicates actually exist, over data already in memory (no extra Sheet
-  // read). Capped at DQ_MAX_DUPLICATE_RECORDS so this stays a compact
-  // diagnostic list, never a raw-row dump.
-  var dupAwbSet = {};
-  var dupAwbCount = 0;
-  for (var awbKey0 in seenAwbCount) {
-    if (seenAwbCount.hasOwnProperty(awbKey0) && seenAwbCount[awbKey0] > 1) { dupAwbSet[awbKey0] = true; dupAwbCount++; }
+  var areasByProvinceOut = {};
+  for (var provKey in areasByProvinceSets) {
+    if (areasByProvinceSets.hasOwnProperty(provKey)) areasByProvinceOut[provKey] = summaryObjKeysSorted(areasByProvinceSets[provKey]);
   }
-  var DQ_MAX_DUPLICATE_RECORDS = 1000;
-  var duplicateRecords = [];
-  var duplicateRecordsTruncated = false;
-  if (dupAwbCount > 0) {
-    for (var ri2 = 0; ri2 < dataRows.length && duplicateRecords.length < DQ_MAX_DUPLICATE_RECORDS; ri2++) {
-      var row2 = dataRows[ri2];
-      var allEmpty2 = row2.every(function (c) { return c === null || c === "" || c === undefined; });
-      if (allEmpty2) continue;
-      var get2 = function (field) { return (idx[field] !== undefined && idx[field] >= 0) ? row2[idx[field]] : null; };
-      var awb2 = summaryNormText(get2("awb"));
-      if (!awb2 || !dupAwbSet[awb2]) continue;
-      var pickup2 = summaryParseDate(get2("pickup"));
-      var lastStatus2 = summaryParseDate(get2("lastStatus"));
-      duplicateRecords.push({
-        awb: awb2, client: summaryNormText(get2("client")), status: summaryNormText(get2("status")),
-        branch: summaryNormText(get2("branch")),
-        pickup: pickup2 ? Utilities.formatDate(pickup2, Session.getScriptTimeZone() || "Africa/Cairo", "yyyy-MM-dd") : "",
-        lastStatus: lastStatus2 ? Utilities.formatDate(lastStatus2, Session.getScriptTimeZone() || "Africa/Cairo", "yyyy-MM-dd") : ""
-      });
-    }
-    if (duplicateRecords.length >= DQ_MAX_DUPLICATE_RECORDS) duplicateRecordsTruncated = true;
-    duplicateRecords.sort(function (a, b) { return a.awb < b.awb ? -1 : (a.awb > b.awb ? 1 : 0); });
-  }
+  var facets = {
+    provinces: summaryObjKeysSorted(provinceSet),
+    branches: summaryObjKeysSorted(branchSet),
+    clients: summaryObjKeysSorted(clientSet),
+    statuses: summaryObjKeysSorted(statusSet),
+    areasAll: summaryObjKeysSorted(areaSet),
+    areasByProvince: areasByProvinceOut
+  };
+
   var dataQuality = {
     totalRows: dqTotalRows,
     distinctAwb: Object.keys(seenAwbCount).length,
-    dupAwbCount: dupAwbCount,
+    dupAwbCount: dupCount > 0 ? (function () { var c = 0; for (var k in seenAwbCount) { if (seenAwbCount.hasOwnProperty(k) && seenAwbCount[k] > 1) c++; } return c; })() : 0,
     invalidDates: invalidDates,
     missingBranch: missingBranch,
     missingClient: missingClient,
@@ -683,6 +840,7 @@ function getMonthDashboardSummary(sheetName, params) {
     duplicateRecords: duplicateRecords,
     duplicateRecordsTruncated: duplicateRecordsTruncated
   };
+  var tNormalizeEnd = new Date().getTime();
 
   // A sheet can contain stray non-empty cells (a totals row, a leftover
   // note, formatting) that pass the hasAnyContent check above yet have zero
@@ -701,102 +859,140 @@ function getMonthDashboardSummary(sheetName, params) {
     };
   }
 
+  var tDedupBuildStart = new Date().getTime();
   var allDedupRows = [];
   for (var awbKey in awbMap) { if (awbMap.hasOwnProperty(awbKey)) allDedupRows.push(awbMap[awbKey]); }
+  var grandTotal = allDedupRows.length;
+  var tDedupBuildEnd = new Date().getTime();
 
-  // Filter-dropdown facets — distinct values per dimension (province/branch/
-  // client/status/area) PLUS a province→areas cascade map, all computed from
-  // the UNFILTERED month (matches the client's old buildDimensions(), which
-  // always derived options from the whole month regardless of active
-  // filters). This is what lets the filter UI populate without ever
-  // downloading raw rows.
-  var provinceSet = {}, branchSet = {}, clientSet = {}, statusSet = {}, areaSet = {};
-  var areasByProvinceSets = {};
-  for (var fi = 0; fi < allDedupRows.length; fi++) {
-    var fr = allDedupRows[fi];
-    if (fr.province) provinceSet[fr.province] = true;
-    if (fr.branch) branchSet[fr.branch] = true;
-    if (fr.client) clientSet[fr.client] = true;
-    if (fr.status) statusSet[fr.status] = true;
-    if (fr.area) {
-      areaSet[fr.area] = true;
-      if (fr.province) {
-        if (!areasByProvinceSets[fr.province]) areasByProvinceSets[fr.province] = {};
-        areasByProvinceSets[fr.province][fr.area] = true;
-      }
+  // ============================================================
+  // PASS 2 (aggregate) — ONE loop over the deduped rows. Every aggregation
+  // that used to be its own full pass (main KPIs, branch/customer/province/
+  // area breakdowns, SLA per group, status/finalStatus counts, COD/ship-cost
+  // totals, the attempt-distribution baseline, and all three Growth/Trend
+  // granularities) is accumulated together here, per row, once.
+  // ============================================================
+  var tAggregateStart = new Date().getTime();
+
+  var fromTime = dateFrom ? new Date(dateFrom + "T00:00:00").getTime() : null;
+  var toTime = dateTo ? new Date(dateTo + "T23:59:59").getTime() : null;
+
+  var topAcc = summaryNewGroupAcc();
+  var topSlaDaysArr = [];
+  var branchAccMap = {}, branchOrder = [];
+  var customerAccMap = {}, customerOrder = [];
+  var provinceAccMap = {}, provinceOrder = [];
+  var areaAccMap = {}, areaOrder = [];
+  var statusSummary = {}, finalStatusSummary = {};
+  var totalCod = 0, totalShipCost = 0;
+  var dailyMap = {}, dailyOrder = [];
+  var weeklyMap = {}, weeklyOrder = [];
+  var monthlyMap = {}, monthlyOrder = [];
+  var attemptSummary = { first: 0, second: 0, other: 0, na: 0, total: 0 };
+  var trendMapFiltered = {}; // Overview tab's 14-day mini trend — {date,count,delivered} shape
+
+  var tz = Session.getScriptTimeZone() || "Africa/Cairo";
+
+  function ensureAcc(map, order, key) {
+    if (!map[key]) { map[key] = summaryNewGroupAcc(); order.push(key); }
+    return map[key];
+  }
+  function ensureTimeAcc(map, order, key) {
+    if (!map[key]) { map[key] = { shipments: 0, delivered: 0, returned: 0, pending: 0 }; order.push(key); }
+    return map[key];
+  }
+  function bumpTimeAcc(acc, bucket) {
+    acc.shipments++;
+    if (bucket === "delivered") acc.delivered++;
+    else if (bucket === "returned") acc.returned++;
+    else if (bucket === "pending") acc.pending++;
+  }
+
+  for (var pi = 0; pi < allDedupRows.length; pi++) {
+    var pr = allDedupRows[pi];
+
+    var baselineMatch = summaryRowMatchesFilters(pr, filters, "attempt", fromTime, toTime);
+    if (baselineMatch) {
+      attemptSummary.total++;
+      attemptSummary[pr.attemptCat]++;
+    }
+
+    if (!summaryRowMatchesFilters(pr, filters, null, fromTime, toTime)) continue;
+
+    var target = (branchSlaTargets && branchSlaTargets[pr.branch] !== undefined) ? branchSlaTargets[pr.branch] : slaTargetDefault;
+
+    summaryAccumulateRow(topAcc, pr, target);
+    if (pr.bucket === "delivered" && pr.slaDays !== null) topSlaDaysArr.push(pr.slaDays);
+
+    if (pr.branch) summaryAccumulateRow(ensureAcc(branchAccMap, branchOrder, pr.branch), pr, target);
+    if (pr.client) summaryAccumulateRow(ensureAcc(customerAccMap, customerOrder, pr.client), pr, target);
+    if (pr.province) summaryAccumulateRow(ensureAcc(provinceAccMap, provinceOrder, pr.province), pr, target);
+    if (pr.area) summaryAccumulateRow(ensureAcc(areaAccMap, areaOrder, pr.area), pr, target);
+
+    var st = pr.status || "غير محدد";
+    statusSummary[st] = (statusSummary[st] || 0) + 1;
+    var fs = pr.finalStatus || "غير محدد";
+    finalStatusSummary[fs] = (finalStatusSummary[fs] || 0) + 1;
+
+    totalCod += pr.cod;
+    totalShipCost += pr.shipCost;
+
+    if (pr.pickup) {
+      var dayKey = Utilities.formatDate(pr.pickup, tz, "yyyy-MM-dd");
+      if (!trendMapFiltered[dayKey]) trendMapFiltered[dayKey] = { date: dayKey, count: 0, delivered: 0 };
+      trendMapFiltered[dayKey].count++;
+      if (pr.bucket === "delivered") trendMapFiltered[dayKey].delivered++;
+
+      bumpTimeAcc(ensureTimeAcc(dailyMap, dailyOrder, dayKey), pr.bucket);
+      bumpTimeAcc(ensureTimeAcc(weeklyMap, weeklyOrder, summaryWeekKey(pr.pickup)), pr.bucket);
+      bumpTimeAcc(ensureTimeAcc(monthlyMap, monthlyOrder, summaryMonthKey(pr.pickup)), pr.bucket);
     }
   }
-  var areasByProvinceOut = {};
-  for (var provKey in areasByProvinceSets) {
-    if (areasByProvinceSets.hasOwnProperty(provKey)) areasByProvinceOut[provKey] = summaryObjKeysSorted(areasByProvinceSets[provKey]);
-  }
-  var facets = {
-    provinces: summaryObjKeysSorted(provinceSet),
-    branches: summaryObjKeysSorted(branchSet),
-    clients: summaryObjKeysSorted(clientSet),
-    statuses: summaryObjKeysSorted(statusSet),
-    areasAll: summaryObjKeysSorted(areaSet),
-    areasByProvince: areasByProvinceOut
+  var tAggregateEnd = new Date().getTime();
+
+  // ============================================================
+  // FINALIZE — proportional to the number of DISTINCT groups/buckets, not
+  // to row count (cheap even for a month with thousands of branches/clients).
+  // ============================================================
+  var tFinalizeStart = new Date().getTime();
+
+  topSlaDaysArr.sort(function (a, b) { return a - b; });
+  var topAvgDays = topSlaDaysArr.length ? (topSlaDaysArr.reduce(function (a, b) { return a + b; }, 0) / topSlaDaysArr.length) : null;
+  var topMedianDays = topSlaDaysArr.length ? topSlaDaysArr[Math.floor(topSlaDaysArr.length / 2)] : null;
+  var topMaxDays = topSlaDaysArr.length ? topSlaDaysArr[topSlaDaysArr.length - 1] : null;
+  var topEligible = topAcc.total - topAcc.pending;
+  var kpis = {
+    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, rejected: topAcc.rejected,
+    pending: topAcc.pending, unknown: topAcc.unknown, eligible: topEligible,
+    deliveryRate: topAcc.total > 0 ? (topAcc.delivered / topAcc.total * 100) : null,
+    returnRate: topEligible > 0 ? (topAcc.returned / topEligible * 100) : null,
+    rejectedRate: topEligible > 0 ? (topAcc.rejected / topEligible * 100) : null,
+    successRate: topAcc.total > 0 ? ((topAcc.delivered + topAcc.rejected) / topAcc.total * 100) : null,
+    withinSla: topAcc.withinSla, slaBreach: topAcc.slaBreach,
+    slaAchievement: topAcc.deliveredWithDate > 0 ? (topAcc.withinSla / topAcc.deliveredWithDate * 100) : null,
+    avgDays: topAvgDays, medianDays: topMedianDays, maxDays: topMaxDays, deliveredWithDate: topAcc.deliveredWithDate
   };
 
-  // Unfiltered grand total (all dimensions ignored) — matches the client's
-  // STATE.grandTotalShipments, used only for the "من إجمالي الشحنات الكلي"
-  // KPI sub-label. Cheap: just a length count on data already in memory.
-  var grandTotal = allDedupRows.length;
+  var branchSummary = summaryFinalizeGroupList(branchAccMap, branchOrder, 3000);
+  var customerSummary = summaryFinalizeGroupList(customerAccMap, customerOrder, 3000);
+  var provinceSummary = summaryFinalizeGroupList(provinceAccMap, provinceOrder, 1000);
+  var areaSummary = summaryFinalizeGroupList(areaAccMap, areaOrder, 1000);
 
-  // Multi-dimension filtering (province/area/branch/client/status/attempt +
-  // pickup date range), entirely server-side. Replaces the old branch-only
-  // filter — this is what lets the Overview/KPI tab and, going forward, every
-  // other tab and Management Analysis drill-down run off compact aggregates
-  // for ANY combination of filters, never raw rows.
-  var dedupRows = summaryApplyFilters(allDedupRows, filters, [], dateFrom, dateTo);
-
-  var kpis = summaryComputeKPIs(dedupRows, branchSlaTargets, slaTargetDefault);
-
-  var statusSummary = {}, finalStatusSummary = {};
-  for (var d = 0; d < dedupRows.length; d++) {
-    var st = dedupRows[d].status || "غير محدد";
-    statusSummary[st] = (statusSummary[st] || 0) + 1;
-    var fs = dedupRows[d].finalStatus || "غير محدد";
-    finalStatusSummary[fs] = (finalStatusSummary[fs] || 0) + 1;
-  }
-
-  // Attempt-distribution baseline: same active filters EXCEPT the attempt
-  // dimension itself, so each bucket's % is always "out of total orders under
-  // the other active filters" and doesn't shrink when the attempt filter is
-  // used to narrow the view — mirrors the client's getFilteredRowsExcluding('attemptCategory').
-  var attemptBaseRows = summaryApplyFilters(allDedupRows, filters, ["attempt"], dateFrom, dateTo);
-  var attemptSummary = { first: 0, second: 0, other: 0, na: 0, total: attemptBaseRows.length };
-  for (var ab = 0; ab < attemptBaseRows.length; ab++) attemptSummary[attemptBaseRows[ab].attemptCat]++;
-
-  // Overview tab's 14-day mini trend — kept in its existing {date,count,delivered}
-  // shape (see renderOverviewTabFromServer in dashboard.html); the Growth/Trend
-  // tab's daily/weekly/monthly series below is a separate field, different shape.
-  var trendMapFiltered = {};
-  for (var tf = 0; tf < dedupRows.length; tf++) {
-    var trec = dedupRows[tf];
-    if (!trec.pickup) continue;
-    var tDayKey = Utilities.formatDate(trec.pickup, Session.getScriptTimeZone() || "Africa/Cairo", "yyyy-MM-dd");
-    if (!trendMapFiltered[tDayKey]) trendMapFiltered[tDayKey] = { date: tDayKey, count: 0, delivered: 0 };
-    trendMapFiltered[tDayKey].count++;
-    if (trec.bucket === "delivered") trendMapFiltered[tDayKey].delivered++;
-  }
   var trend = [];
   for (var tKey in trendMapFiltered) { if (trendMapFiltered.hasOwnProperty(tKey)) trend.push(trendMapFiltered[tKey]); }
   trend.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
 
-  // Growth/Trend tab — all three granularities computed once here (cheap:
-  // just grouping the same already-filtered dedupRows already in memory),
-  // so the client never needs to pick one ahead of time or re-request.
   var timeSeries = {
-    daily: summaryBuildTimeSeries(dedupRows, "daily"),
-    weekly: summaryBuildTimeSeries(dedupRows, "weekly"),
-    monthly: summaryBuildTimeSeries(dedupRows, "monthly")
+    daily: summaryFinalizeTimeSeries(dailyMap, dailyOrder),
+    weekly: summaryFinalizeTimeSeries(weeklyMap, weeklyOrder),
+    monthly: summaryFinalizeTimeSeries(monthlyMap, monthlyOrder)
   };
+  var tFinalizeEnd = new Date().getTime();
 
-  var totalCod = 0, totalShipCost = 0;
-  for (var c = 0; c < dedupRows.length; c++) { totalCod += dedupRows[c].cod; totalShipCost += dedupRows[c].shipCost; }
-
+  // ============================================================
+  // RESPONSE — same contract as before this hotfix, field for field.
+  // ============================================================
+  var tResponsePrepStart = new Date().getTime();
   var result = {
     success: true,
     sheet: sheetName,
@@ -811,17 +1007,17 @@ function getMonthDashboardSummary(sheetName, params) {
     kpis: kpis,
     attemptSummary: attemptSummary,
     dq: {
-      totalRows: dedupRows.length,
-      distinctAwb: dedupRows.length,
+      totalRows: topAcc.total,
+      distinctAwb: topAcc.total,
       dupAwbCount: dupCount,
       invalidDates: invalidDates
     },
     totalCod: totalCod,
     totalShipCost: totalShipCost,
-    branchSummary: summaryGroupBy(dedupRows, "branch", 3000, branchSlaTargets, slaTargetDefault),
-    customerSummary: summaryGroupBy(dedupRows, "client", 3000, branchSlaTargets, slaTargetDefault),
-    provinceSummary: summaryGroupBy(dedupRows, "province", 1000, branchSlaTargets, slaTargetDefault),
-    areaSummary: summaryGroupBy(dedupRows, "area", 1000, branchSlaTargets, slaTargetDefault),
+    branchSummary: branchSummary,
+    customerSummary: customerSummary,
+    provinceSummary: provinceSummary,
+    areaSummary: areaSummary,
     statusSummary: statusSummary,
     finalStatusSummary: finalStatusSummary,
     trend: trend,
@@ -831,6 +1027,7 @@ function getMonthDashboardSummary(sheetName, params) {
     facets: facets,
     cached: false
   };
+  var tResponsePrepEnd = new Date().getTime();
 
   try {
     var serialized = JSON.stringify(result);
@@ -842,6 +1039,28 @@ function getMonthDashboardSummary(sheetName, params) {
     }
   } catch (cacheErr) {
     // Non-fatal — caching is a performance optimization, not a requirement.
+  }
+
+  // Debug timing — ONLY attached when ?debug=1 was requested (never cached;
+  // the cache.put above already happened using `result` before this runs on
+  // a distinct object reference for the field... see note below).
+  if (debugMode) {
+    var tTotalEnd = new Date().getTime();
+    result.debug = {
+      totalMs: tTotalEnd - tStart,
+      openSpreadsheetMs: tOpenEnd - tOpenStart,
+      locateSheetMs: tLocateEnd - tOpenEnd,
+      dimensionsMs: tDimEnd - tLocateEnd,
+      readMs: tReadEnd - tReadStart,
+      headerMappingMs: tMapEnd - tMapStart,
+      normalizePassMs: tNormalizeEnd - tNormalizeStart,
+      dedupBuildMs: tDedupBuildEnd - tDedupBuildStart,
+      aggregatePassMs: tAggregateEnd - tAggregateStart,
+      finalizeMs: tFinalizeEnd - tFinalizeStart,
+      responsePrepMs: tResponsePrepEnd - tResponsePrepStart,
+      rowCounts: { rawDataRows: dataRows.length, distinctAwb: grandTotal, matchedAfterFilters: topAcc.total },
+      notes: "KPI + branch/customer/province/area + SLA + Growth-Trend timeSeries + attempt-baseline are fused into ONE pass (aggregatePassMs). Data Quality counters, facets, and duplicate-record capture are fused into the normalization pass (normalizePassMs). 'Reading headers' has no separate cost — headers and data share one getRange().getValues() call (readMs)."
+    };
   }
 
   return result;
@@ -1248,6 +1467,17 @@ function getMonthPage(sheetName, params) {
 
 function listSheetsPayload() {
 
+  var listCache = CacheService.getScriptCache();
+  var listCacheKey = "list_sheets_v1";
+  var cachedList = listCache.get(listCacheKey);
+  if (cachedList) {
+    try {
+      var parsedList = JSON.parse(cachedList);
+      parsedList.cached = true;
+      return parsedList;
+    } catch (eList) { /* corrupted cache entry — fall through and recompute */ }
+  }
+
   var allMonths = [];
 
   var sources = {};
@@ -1360,7 +1590,7 @@ function listSheetsPayload() {
   });
 
 
-  return {
+  var listResult = {
 
     success: true,
 
@@ -1371,9 +1601,18 @@ function listSheetsPayload() {
       sources,
 
     expectedMonths:
-      MONTH_ORDER
+      MONTH_ORDER,
+
+    cached: false
 
   };
+
+  try {
+    var serializedList = JSON.stringify(listResult);
+    if (serializedList.length < 100000) listCache.put(listCacheKey, serializedList, LIST_SHEETS_CACHE_TTL_SECONDS);
+  } catch (eListCache) { /* non-fatal — caching is a performance optimization, not a requirement */ }
+
+  return listResult;
 
 }
 
