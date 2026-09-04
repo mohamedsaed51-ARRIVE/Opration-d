@@ -83,6 +83,22 @@ var DEFAULT_PAGE_SIZE = 5000;
 var MAX_PAGE_SIZE = 5000;
 
 // ============================================================
+// 4Z. ALL MONTHS MODE
+// ============================================================
+// A virtual "sheet" name the frontend requests to get a combined summary
+// across every AVAILABLE month's Compact Summary. Never a real sheet tab —
+// doGet routes it to getAllMonthsDashboardSummary() and nowhere else (in
+// particular, never to getMonthPage()/raw pagination — see doGet below).
+var ALL_MONTHS_SENTINEL = "ALL_MONTHS";
+// Safety budget for the (rare) filtered All-Months path, which must fall
+// back to live per-month aggregation since persisted snapshots are
+// unfiltered — stops stacking further 100k-row live computations within one
+// request once this much wall-clock time has already been spent, rather
+// than risk exceeding Apps Script's execution ceiling. Any month skipped
+// this way is reported explicitly (skippedMonths), never silently guessed.
+var ALL_MONTHS_TIME_BUDGET_MS = 260000;
+
+// ============================================================
 // 4A. PERSISTENT DASHBOARD SUMMARY STORAGE
 // ============================================================
 // Each Q1/Q2/Q3/Q4 spreadsheet gets one internal tab named
@@ -161,6 +177,8 @@ function doGet(e) {
     else if (action === "dashboard") {
       if (!sheetName) {
         result = { success: false, error: "لم يتم تحديد الشهر. استخدم ?action=dashboard&sheet=July" };
+      } else if (sheetName === ALL_MONTHS_SENTINEL) {
+        result = getAllMonthsDashboardSummary(params);
       } else {
         result = getMonthDashboardSummary(sheetName, params);
       }
@@ -172,6 +190,12 @@ function doGet(e) {
 
     else if (!sheetName) {
       result = { success: false, error: "لم يتم تحديد الشهر. استخدم ?sheet=July" };
+    }
+
+    else if (sheetName === ALL_MONTHS_SENTINEL) {
+      // All Months has no single raw sheet to page through by design —
+      // Raw Export must be done per real month.
+      result = { success: false, error: "لا يمكن تصدير بيانات خام لوضع كل الشهور مجتمعة — اختر شهرًا محددًا لتصدير البيانات الخام." };
     }
 
     else {
@@ -1150,6 +1174,338 @@ function getMonthDashboardSummary(sheetName, params) {
   // requested — keeps the normal API contract unchanged.
   if (debugMode) {
     result.debug = debugTimings;
+  }
+
+  return result;
+}
+
+
+// ============================================================
+// 5C. ALL MONTHS — combine already-computed Compact Summaries
+// ============================================================
+// CRITICAL AGGREGATION RULE: every rate below (deliveryRate/returnRate/
+// rejectedRate/successRate/slaPct/avgDays) is recomputed from SUMMED
+// underlying counts across months — never by averaging each month's own
+// percentage. See summaryMergeTopKpis/summaryMergeGroupLists.
+
+// Top-level KPI merge — EXACT (the per-month `kpis` object carries the full
+// breakdown: total/delivered/returned/rejected/pending/unknown/withinSla/
+// slaBreach/deliveredWithDate), so every rate here is fully precise.
+// medianDays is the one field that cannot be validly derived from monthly
+// medians (median does not combine that way) — left null rather than faked;
+// maxDays IS validly the max of each month's max.
+function summaryMergeTopKpis(kpisList) {
+  var acc = { total:0, delivered:0, returned:0, rejected:0, pending:0, unknown:0, withinSla:0, slaBreach:0, deliveredWithDate:0, sumSlaDaysWeighted:0 };
+  var maxDays = null;
+  for (var i = 0; i < kpisList.length; i++) {
+    var k = kpisList[i]; if (!k) continue;
+    acc.total += k.total||0; acc.delivered += k.delivered||0; acc.returned += k.returned||0;
+    acc.rejected += k.rejected||0; acc.pending += k.pending||0; acc.unknown += k.unknown||0;
+    acc.withinSla += k.withinSla||0; acc.slaBreach += k.slaBreach||0; acc.deliveredWithDate += k.deliveredWithDate||0;
+    acc.sumSlaDaysWeighted += (k.avgDays||0) * (k.deliveredWithDate||0);
+    if (k.maxDays !== null && k.maxDays !== undefined) maxDays = (maxDays===null) ? k.maxDays : Math.max(maxDays, k.maxDays);
+  }
+  var eligible = acc.total - acc.pending;
+  return {
+    total: acc.total, delivered: acc.delivered, returned: acc.returned, rejected: acc.rejected,
+    pending: acc.pending, unknown: acc.unknown, eligible: eligible,
+    deliveryRate: acc.total>0 ? (acc.delivered/acc.total*100) : null,
+    returnRate: eligible>0 ? (acc.returned/eligible*100) : null,
+    rejectedRate: eligible>0 ? (acc.rejected/eligible*100) : null,
+    successRate: acc.total>0 ? ((acc.delivered+acc.rejected)/acc.total*100) : null,
+    withinSla: acc.withinSla, slaBreach: acc.slaBreach,
+    slaAchievement: acc.deliveredWithDate>0 ? (acc.withinSla/acc.deliveredWithDate*100) : null,
+    avgDays: acc.deliveredWithDate>0 ? (acc.sumSlaDaysWeighted/acc.deliveredWithDate) : null,
+    medianDays: null, // not mathematically derivable from monthly medians — documented limitation, never faked
+    maxDays: maxDays,
+    deliveredWithDate: acc.deliveredWithDate
+  };
+}
+
+// Per-entity (branch/customer/province/area) merge across months. Documented
+// approximation: the persisted per-entity summary does not expose pending/
+// unknown counts (only shipments/delivered/returned/rejected/withinSla/
+// slaBreach), so "eligible" here uses resolved = delivered+returned+rejected
+// instead of total-pending. When pending/unknown are near zero (the normal
+// case) this matches the exact formula; it slightly understates eligible
+// (inflating return/reject rate) only when a branch/customer/etc. has a
+// meaningful pending or unclassified-status volume. deliveredWithDate
+// (needed for exact avgDays/slaPct weighting) IS reconstructed exactly as
+// withinSla+slaBreach — no approximation there.
+function summaryMergeGroupLists(listOfArrays, topN) {
+  var accMap = {};
+  var order = [];
+  for (var a = 0; a < listOfArrays.length; a++) {
+    var arr = listOfArrays[a] || [];
+    for (var i = 0; i < arr.length; i++) {
+      var e = arr[i];
+      if (!accMap[e.name]) { accMap[e.name] = { shipments:0, delivered:0, returned:0, rejected:0, withinSla:0, slaBreach:0, sumSlaDaysWeighted:0, dwdTotal:0 }; order.push(e.name); }
+      var acc = accMap[e.name];
+      acc.shipments += e.shipments||0; acc.delivered += e.delivered||0; acc.returned += e.returned||0; acc.rejected += e.rejected||0;
+      acc.withinSla += e.withinSla||0; acc.slaBreach += e.slaBreach||0;
+      var dwd = (e.withinSla||0) + (e.slaBreach||0);
+      acc.sumSlaDaysWeighted += (e.avgDays||0) * dwd;
+      acc.dwdTotal += dwd;
+    }
+  }
+  var out = [];
+  for (var k = 0; k < order.length; k++) {
+    var name = order[k];
+    var acc = accMap[name];
+    var resolved = acc.delivered + acc.returned + acc.rejected;
+    out.push({
+      name: name, shipments: acc.shipments, delivered: acc.delivered,
+      deliveryRate: acc.shipments>0 ? (acc.delivered/acc.shipments*100) : null,
+      returned: acc.returned, returnRate: resolved>0 ? (acc.returned/resolved*100) : null,
+      rejected: acc.rejected, rejectedRate: resolved>0 ? (acc.rejected/resolved*100) : null,
+      successRate: acc.shipments>0 ? ((acc.delivered+acc.rejected)/acc.shipments*100) : null,
+      avgDays: acc.dwdTotal>0 ? (acc.sumSlaDaysWeighted/acc.dwdTotal) : null,
+      withinSla: acc.withinSla, slaBreach: acc.slaBreach,
+      slaPct: (acc.withinSla+acc.slaBreach)>0 ? (acc.withinSla/(acc.withinSla+acc.slaBreach)*100) : null
+    });
+  }
+  out.sort(function (a, b) { return b.shipments - a.shipments; });
+  if (topN && out.length > topN) out = out.slice(0, topN);
+  return out;
+}
+
+function summaryMergeCountMaps(list) {
+  var out = {};
+  for (var i = 0; i < list.length; i++) {
+    var m = list[i]; if (!m) continue;
+    for (var k in m) { if (m.hasOwnProperty(k)) out[k] = (out[k]||0) + (m[k]||0); }
+  }
+  return out;
+}
+
+function summaryMergeTimeSeriesList(list) {
+  // Daily/weekly/monthly labels (yyyy-MM-dd / yyyy-Www / yyyy-MM) are
+  // globally unique across the whole year regardless of which month
+  // produced them, so concatenating every month's entries (no de-dup
+  // needed) and sorting is exact — no double-counting.
+  var all = [];
+  for (var i = 0; i < list.length; i++) all = all.concat(list[i]||[]);
+  all.sort(function (a, b) { return a.label < b.label ? -1 : (a.label > b.label ? 1 : 0); });
+  return all;
+}
+function summaryMergeTrendList(list) {
+  var all = [];
+  for (var i = 0; i < list.length; i++) all = all.concat(list[i]||[]);
+  all.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  return all;
+}
+function summaryMergeDataQuality(dqList) {
+  var totalRows=0, distinctAwb=0, dupAwbCount=0, invalidDates=0, missingBranch=0, missingClient=0, missingProvince=0, unknownStatusCount=0, negativeCod=0;
+  var unknownStatusSet = {};
+  var allDupRecords = [];
+  var truncated = false;
+  var DQ_ALL_MONTHS_CAP = 1000;
+  for (var i = 0; i < dqList.length; i++) {
+    var dq = dqList[i]; if (!dq) continue;
+    totalRows += dq.totalRows||0; distinctAwb += dq.distinctAwb||0; dupAwbCount += dq.dupAwbCount||0;
+    invalidDates += dq.invalidDates||0; missingBranch += dq.missingBranch||0; missingClient += dq.missingClient||0;
+    missingProvince += dq.missingProvince||0; unknownStatusCount += dq.unknownStatusCount||0; negativeCod += dq.negativeCod||0;
+    var usl = dq.unknownStatusList || [];
+    for (var u = 0; u < usl.length; u++) unknownStatusSet[usl[u]] = true;
+    if (dq.duplicateRecordsTruncated) truncated = true;
+    var recs = dq.duplicateRecords || [];
+    for (var r = 0; r < recs.length; r++) {
+      if (allDupRecords.length < DQ_ALL_MONTHS_CAP) allDupRecords.push(recs[r]);
+      else { truncated = true; break; }
+    }
+  }
+  allDupRecords.sort(function (a, b) { return a.awb < b.awb ? -1 : (a.awb > b.awb ? 1 : 0); });
+  return {
+    totalRows: totalRows, distinctAwb: distinctAwb, dupAwbCount: dupAwbCount, invalidDates: invalidDates,
+    missingBranch: missingBranch, missingClient: missingClient, missingProvince: missingProvince,
+    unknownStatusCount: unknownStatusCount, unknownStatusList: summaryObjKeysSorted(unknownStatusSet),
+    negativeCod: negativeCod, duplicateRecords: allDupRecords, duplicateRecordsTruncated: truncated
+  };
+}
+function summaryMergeFacets(facetsList) {
+  var provinceSet={}, branchSet={}, clientSet={}, statusSet={}, areaSet={};
+  var areasByProvinceSets = {};
+  for (var i = 0; i < facetsList.length; i++) {
+    var f = facetsList[i]; if (!f) continue;
+    (f.provinces||[]).forEach(function(v){ provinceSet[v]=true; });
+    (f.branches||[]).forEach(function(v){ branchSet[v]=true; });
+    (f.clients||[]).forEach(function(v){ clientSet[v]=true; });
+    (f.statuses||[]).forEach(function(v){ statusSet[v]=true; });
+    (f.areasAll||[]).forEach(function(v){ areaSet[v]=true; });
+    var abp = f.areasByProvince || {};
+    for (var prov in abp) {
+      if (!abp.hasOwnProperty(prov)) continue;
+      if (!areasByProvinceSets[prov]) areasByProvinceSets[prov] = {};
+      (abp[prov]||[]).forEach(function(a){ areasByProvinceSets[prov][a]=true; });
+    }
+  }
+  var areasByProvinceOut = {};
+  for (var p in areasByProvinceSets) { if (areasByProvinceSets.hasOwnProperty(p)) areasByProvinceOut[p] = summaryObjKeysSorted(areasByProvinceSets[p]); }
+  return {
+    provinces: summaryObjKeysSorted(provinceSet), branches: summaryObjKeysSorted(branchSet),
+    clients: summaryObjKeysSorted(clientSet), statuses: summaryObjKeysSorted(statusSet),
+    areasAll: summaryObjKeysSorted(areaSet), areasByProvince: areasByProvinceOut
+  };
+}
+
+function getAllMonthsDashboardSummary(params) {
+  var t0 = new Date().getTime();
+  var debugMode = !!(params && (params.debug === "1" || params.debug === "true"));
+  var requestedFilters = summaryParseFilters(params);
+  var hasServerFilters = Object.keys(requestedFilters).some(function (k) {
+    return Array.isArray(requestedFilters[k]) && requestedFilters[k].length > 0;
+  }) || !!(params && (params.dateFrom || params.dateTo || params.branch));
+
+  var attemptT1 = (params && params.attemptT1 !== undefined && params.attemptT1 !== "") ? parseFloat(params.attemptT1) : 1;
+  var attemptT2 = (params && params.attemptT2 !== undefined && params.attemptT2 !== "") ? parseFloat(params.attemptT2) : 2;
+  if (isNaN(attemptT1)) attemptT1 = 1;
+  if (isNaN(attemptT2)) attemptT2 = 2;
+  var slaTargetDefault = (params && params.slaTarget !== undefined && params.slaTarget !== "") ? parseFloat(params.slaTarget) : SUMMARY_DEFAULT_SLA_DAYS;
+  if (isNaN(slaTargetDefault)) slaTargetDefault = SUMMARY_DEFAULT_SLA_DAYS;
+  var branchSlaTargets = {};
+  if (params && params.branchSlaTargets) {
+    try { var pt = JSON.parse(params.branchSlaTargets); if (pt && typeof pt === "object") branchSlaTargets = pt; } catch (eT) {}
+  }
+  var dateFrom = (params && params.dateFrom) ? params.dateFrom : "";
+  var dateTo = (params && params.dateTo) ? params.dateTo : "";
+  var forceRefresh = debugMode || (params && (params.refresh === "1" || params.refresh === "true"));
+
+  // Cache key mirrors the single-month scheme exactly (same helper, same
+  // "every calculation-affecting input" rule) — sheet slot is the sentinel.
+  var cacheKey = "dash_v3_" + ALL_MONTHS_SENTINEL + "_p_" + summaryHashKey(
+    JSON.stringify(requestedFilters) + "|" + dateFrom + "|" + dateTo + "|" +
+    attemptT1 + "|" + attemptT2 + "|" + slaTargetDefault + "|" + JSON.stringify(branchSlaTargets)
+  );
+  var cache = CacheService.getScriptCache();
+  if (!forceRefresh) {
+    var cached = cacheGetChunked(cache, cacheKey);
+    if (cached) {
+      var cachedObj = JSON.parse(cached);
+      cachedObj.cached = true;
+      console.log("[CACHE HIT]" + (params.__requestId ? (" " + JSON.stringify({ requestId: params.__requestId, sheet: ALL_MONTHS_SENTINEL })) : ""));
+      return cachedObj;
+    }
+  }
+
+  var includedMonths = [];
+  var emptyMonths = [];
+  var missingSnapshotMonths = [];
+  var skippedMonths = [];
+  var perMonthSummaries = [];
+
+  for (var i = 0; i < MONTH_ORDER.length; i++) {
+    var month = MONTH_ORDER[i];
+
+    if (!hasServerFilters) {
+      // FAST PATH (the normal case): reads ONLY the persisted per-month
+      // snapshot — never raw rows, never a live aggregation triggered
+      // inline. A month without a snapshot yet is reported, not guessed at
+      // (use the "Update All 12 Month Summaries" menu to backfill it).
+      var snap = getSavedMonthSummary_(month);
+      if (!snap) { missingSnapshotMonths.push(month); continue; }
+      if (snap.empty || snap.noData) { emptyMonths.push(month); continue; }
+      perMonthSummaries.push(snap);
+      includedMonths.push(month);
+    } else {
+      // FILTERED PATH: persisted snapshots are always unfiltered, so a
+      // filtered All-Months view needs each month's OWN filtered
+      // aggregation — the exact same live-or-CacheService-cached path a
+      // single-month filtered request already uses (still Compact Summary
+      // only). Bounded by a wall-clock budget: never stacks unlimited
+      // 100k-row live computations in one request.
+      var elapsed = new Date().getTime() - t0;
+      if (elapsed > ALL_MONTHS_TIME_BUDGET_MS) { skippedMonths.push(month); continue; }
+      var monthParams = {};
+      for (var pk in params) { if (params.hasOwnProperty(pk)) monthParams[pk] = params[pk]; }
+      monthParams.sheet = month;
+      var monthSummary;
+      try { monthSummary = getMonthDashboardSummary(month, monthParams); }
+      catch (eMonth) { skippedMonths.push(month); continue; }
+      if (!monthSummary || monthSummary.success === false) { skippedMonths.push(month); continue; }
+      if (monthSummary.empty || monthSummary.noData) { emptyMonths.push(month); continue; }
+      perMonthSummaries.push(monthSummary);
+      includedMonths.push(month);
+    }
+  }
+
+  if (!includedMonths.length) {
+    return {
+      success: true, sheet: ALL_MONTHS_SENTINEL, source: "ALL", empty: true, noData: true,
+      totalRows: 0, grandTotal: 0,
+      attemptSummary: { first:0, second:0, other:0, na:0, total:0 },
+      timeSeries: { daily:[], weekly:[], monthly:[] },
+      dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false },
+      facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} },
+      colMap: {}, allMonths: true, includedMonths: [], emptyMonths: emptyMonths,
+      missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths, partial: !!skippedMonths.length,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  var kpis = summaryMergeTopKpis(perMonthSummaries.map(function (s) { return s.kpis; }));
+  var branchSummary = summaryMergeGroupLists(perMonthSummaries.map(function (s) { return s.branchSummary||[]; }), 3000);
+  var customerSummary = summaryMergeGroupLists(perMonthSummaries.map(function (s) { return s.customerSummary||[]; }), 3000);
+  var provinceSummary = summaryMergeGroupLists(perMonthSummaries.map(function (s) { return s.provinceSummary||[]; }), 1000);
+  var areaSummary = summaryMergeGroupLists(perMonthSummaries.map(function (s) { return s.areaSummary||[]; }), 1000);
+  var statusSummary = summaryMergeCountMaps(perMonthSummaries.map(function (s) { return s.statusSummary||{}; }));
+  var finalStatusSummary = summaryMergeCountMaps(perMonthSummaries.map(function (s) { return s.finalStatusSummary||{}; }));
+  var attemptAcc = { first:0, second:0, other:0, na:0, total:0 };
+  for (var am = 0; am < perMonthSummaries.length; am++) {
+    var a = perMonthSummaries[am].attemptSummary || {};
+    attemptAcc.first += a.first||0; attemptAcc.second += a.second||0; attemptAcc.other += a.other||0;
+    attemptAcc.na += a.na||0; attemptAcc.total += a.total||0;
+  }
+  var timeSeries = {
+    daily: summaryMergeTimeSeriesList(perMonthSummaries.map(function (s) { return (s.timeSeries&&s.timeSeries.daily)||[]; })),
+    weekly: summaryMergeTimeSeriesList(perMonthSummaries.map(function (s) { return (s.timeSeries&&s.timeSeries.weekly)||[]; })),
+    monthly: summaryMergeTimeSeriesList(perMonthSummaries.map(function (s) { return (s.timeSeries&&s.timeSeries.monthly)||[]; }))
+  };
+  var trend = summaryMergeTrendList(perMonthSummaries.map(function (s) { return s.trend||[]; }));
+  var dataQuality = summaryMergeDataQuality(perMonthSummaries.map(function (s) { return s.dataQuality; }));
+  var facets = summaryMergeFacets(perMonthSummaries.map(function (s) { return s.facets; }));
+  var grandTotal = 0, totalCod = 0, totalShipCost = 0, totalRowsSum = 0;
+  var colMap = {};
+  for (var gm = 0; gm < perMonthSummaries.length; gm++) {
+    var s = perMonthSummaries[gm];
+    grandTotal += s.grandTotal||0; totalCod += s.totalCod||0; totalShipCost += s.totalShipCost||0; totalRowsSum += s.totalRows||0;
+    if (!Object.keys(colMap).length && s.colMap) colMap = s.colMap;
+  }
+
+  var result = {
+    success: true, sheet: ALL_MONTHS_SENTINEL, source: "ALL",
+    empty: false, noData: false,
+    totalRows: totalRowsSum, grandTotal: grandTotal,
+    generatedAt: new Date().toISOString(),
+    kpis: kpis, attemptSummary: attemptAcc,
+    dq: { totalRows: kpis.total, distinctAwb: kpis.total, dupAwbCount: dataQuality.dupAwbCount, invalidDates: dataQuality.invalidDates },
+    totalCod: totalCod, totalShipCost: totalShipCost,
+    branchSummary: branchSummary, customerSummary: customerSummary,
+    provinceSummary: provinceSummary, areaSummary: areaSummary,
+    statusSummary: statusSummary, finalStatusSummary: finalStatusSummary,
+    trend: trend, timeSeries: timeSeries, dataQuality: dataQuality, colMap: colMap, facets: facets,
+    allMonths: true,
+    includedMonths: includedMonths, emptyMonths: emptyMonths,
+    missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths,
+    partial: !!skippedMonths.length,
+    cached: false
+  };
+
+  try {
+    var serialized = JSON.stringify(result);
+    if (serialized.length < 3000000) cachePutChunked(cache, cacheKey, serialized, DASHBOARD_CACHE_TTL_SECONDS);
+  } catch (cacheErr) { /* non-fatal */ }
+
+  var tTotal = new Date().getTime() - t0;
+  console.log("[TIMING] " + JSON.stringify({
+    requestId: params.__requestId || null, sheet: ALL_MONTHS_SENTINEL, totalMs: tTotal,
+    includedMonths: includedMonths.length, missingSnapshotMonths: missingSnapshotMonths.length,
+    skippedMonths: skippedMonths.length, filtered: hasServerFilters
+  }));
+  if (debugMode) {
+    result.debug = {
+      totalMs: tTotal, includedMonths: includedMonths, missingSnapshotMonths: missingSnapshotMonths,
+      skippedMonths: skippedMonths, filtered: hasServerFilters
+    };
   }
 
   return result;

@@ -1023,9 +1023,15 @@ let runtimeConfig = { WEBAPP_URL: '', SHEET_NAME: '' };
 let autoRefreshMinutes = 5;
 let autoRefreshTimer = null;
 let hasLiveDataOnce = false;
-let availableMonths = [];       // sheet/tab names discovered via ?action=listSheets
-let selectedMonth = '';         // the ONE month currently driving STATE/KPIs/Charts/Tables
+let availableMonths = [];       // sheet/tab names discovered via ?action=listSheets — REAL months only, never includes the All Months sentinel
+let selectedMonth = '';         // the ONE month (or the ALL_MONTHS sentinel) currently driving STATE/KPIs/Charts/Tables
 let monthSwitchInFlight = false;
+// A virtual "month" combining every available Compact Summary — never a real
+// sheet tab, never sent to fetchSheetRows(). See ALL_MONTHS_SENTINEL in Code.gs.
+const ALL_MONTHS_SENTINEL = 'ALL_MONTHS';
+function monthDisplayName(month){
+  return month === ALL_MONTHS_SENTINEL ? 'كل الشهور' : (month || '');
+}
 
 // Every network call to Apps Script goes through this — AbortController-based
 // hard timeout (default 15s) so NO fetch can ever hang the UI indefinitely.
@@ -1708,7 +1714,7 @@ function applyLoadedSummary(summary, month){
   STATE.serverOverviewFilters = {};
   STATE.dq = summary.dataQuality || null;
   STATE.columnMap = summary.colMap || {};
-  STATE.fileName = `Google Sheets — Apps Script (${month})`;
+  STATE.fileName = `Google Sheets — Apps Script (${monthDisplayName(month)})`;
   STATE.lastUpdated = new Date(summary.generatedAt || Date.now());
   STATE.rowsLoaded = summary.dataQuality ? summary.dataQuality.totalRows : (summary.grandTotal || 0);
   STATE.grandTotalShipments = summary.grandTotal || 0;
@@ -1729,6 +1735,44 @@ function applyLoadedSummary(summary, month){
   document.getElementById('app').classList.remove('hidden');
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(refreshBtn) refreshBtn.classList.remove('hidden');
+}
+
+// Shown when a newly-selected month/All-Months view has NO successful
+// summary anywhere (live or cached). Never fabricates zero KPIs and never
+// leaves a different selection's numbers on screen under this one: every
+// chart and table is cleared, STATE.serverOverviewSummary is nulled (so
+// exports and hasUsableServerSummary() correctly see "no data"), and the
+// KPI/Alerts area shows an explicit message with its own retry action.
+function renderMonthUnavailableState(month, message){
+  STATE.serverOverviewSummary = null;
+  STATE.serverOverviewFilters = null;
+  STATE.grandTotalShipments = 0;
+  STATE.dq = null;
+  STATE.rowsLoaded = 0;
+
+  const kpiGrid = document.getElementById('kpiGrid');
+  if(kpiGrid){
+    kpiGrid.innerHTML = `<div style="grid-column:1/-1; text-align:center; padding:40px 16px; color:var(--text-faint);">
+      <div style="font-size:15px; margin-bottom:14px;">⚠️ لا توجد بيانات متاحة لـ"${monthDisplayName(month)}"</div>
+      <div style="font-size:13px; margin-bottom:16px;">${message}</div>
+      <button type="button" class="btn-secondary btn-sm" id="monthUnavailableRetryBtn">إعادة المحاولة</button>
+    </div>`;
+    document.getElementById('monthUnavailableRetryBtn')?.addEventListener('click', ()=> switchToMonth(month, { force:true }));
+  }
+  const alertsGrid = document.getElementById('alertsGrid');
+  if(alertsGrid) alertsGrid.innerHTML = '';
+
+  // Clear every chart currently rendered (any tab) — none of them belong to
+  // this selection, so none of them may keep showing their previous numbers.
+  Object.keys(STATE.charts).forEach(destroyChart);
+  document.querySelectorAll('.tab-panel table[id]').forEach(t=>{ t.innerHTML = ''; });
+
+  document.getElementById('metaRowCount').textContent = '-';
+  document.getElementById('metaPeriod').textContent = '-';
+  const badge = document.getElementById('validityBadge');
+  if(badge){ badge.textContent = '● لا توجد بيانات'; badge.style.color = 'var(--text-faint)'; badge.style.background = 'transparent'; }
+  renderExecFilterTag();
+  hideRefreshBanner();
 }
 
 function showGsheetBoot(on){
@@ -1802,30 +1846,30 @@ function sortMonths(list){
   return [...numbered.map(x=>x.name), ...other];
 }
 function pickDefaultMonth(sortedList){
-  if(!sortedList.length) return '';
   const saved = loadSelectedMonthFromStorage();
-  if(saved && sortedList.includes(saved)) return saved;
-  return sortedList[0]; // latest available
+  if(saved && (saved === ALL_MONTHS_SENTINEL || sortedList.includes(saved))) return saved;
+  return ALL_MONTHS_SENTINEL; // default selection on first open
 }
 
 function populateMonthSelector(){
   const sel = document.getElementById('monthSelect');
   if(!sel) return;
-  sel.innerHTML = availableMonths.map(m=>`<option value="${m.replace(/"/g,'&quot;')}">${m}</option>`).join('');
+  const monthOptions = availableMonths.map(m=>`<option value="${m.replace(/"/g,'&quot;')}">${m}</option>`).join('');
+  sel.innerHTML = `<option value="${ALL_MONTHS_SENTINEL}">📊 All Months</option>` + monthOptions;
   // ROOT-CAUSE FIX: `selectedMonth` (the global) is sometimes still empty or
   // stale at the exact moment this runs — e.g. during the cache-first boot
   // path, refreshMonthList() resolves and calls this in the background
   // before the async chain that finally assigns `selectedMonth` has
   // completed. Setting <select>.value to something that matches NO <option>
   // sets selectedIndex to -1, which renders as a visually BLANK dropdown —
-  // even though all 12 <option> elements are genuinely present in the DOM.
+  // even though all <option> elements are genuinely present in the DOM.
   // Always land on a real, visible option instead of leaving it unmatched.
-  if(availableMonths.includes(selectedMonth)){
+  if(selectedMonth === ALL_MONTHS_SENTINEL || availableMonths.includes(selectedMonth)){
     sel.value = selectedMonth;
-  }else if(availableMonths.length){
-    sel.value = availableMonths[0];
+  }else{
+    sel.value = ALL_MONTHS_SENTINEL;
   }
-  sel.disabled = availableMonths.length <= 1;
+  sel.disabled = false; // All Months is always a second choice, so there's always something to switch to
 }
 
 // Fetches (and caches) the list of month tabs. Never blocks the dashboard if
@@ -1871,20 +1915,29 @@ async function switchToMonth(month, opts){
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(!background){
     if(sel){ sel.value = month; sel.disabled = true; }
-    if(refreshBtn && !silent){ refreshBtn.disabled = true; refreshBtn.textContent = force ? `⏳ جاري تحديث بيانات ${month}...` : '⏳ جاري التحميل...'; }
+    if(refreshBtn && !silent){ refreshBtn.disabled = true; refreshBtn.textContent = force ? `⏳ جاري تحديث بيانات ${monthDisplayName(month)}...` : '⏳ جاري التحميل...'; }
   }
 
-  const wasEmptyOnEntry = !STATE.serverOverviewSummary; // no month loaded yet this session
-  if(!silent && !background) showGsheetBoot(wasEmptyOnEntry); // only full-screen boot on the very first load
-  else if(!background && !wasEmptyOnEntry) setConnStatus('updating'); // data already on screen — "updating", not a blocking state
+  const priorMonth = selectedMonth;
+  const hadDataOnEntry = !!STATE.serverOverviewSummary; // something is already on screen (any month, or All Months)
+  const isMonthChange = !background && month !== priorMonth;
+  // Never blank/zero what's already on screen while a new request is in
+  // flight — the boot screen only appears on a truly empty dashboard;
+  // otherwise this is a non-blocking "updating" cue (existing KPIs/charts/
+  // tabs stay exactly as they are until we know the outcome).
+  if(!silent && !background){
+    if(hadDataOnEntry) setConnStatus('updating');
+    else showGsheetBoot(true);
+  }
 
   const loadStartTime = performance.now();
-  // PHASE 5: the ONLY normal-path month load. Checks IndexedDB for a cached
-  // compact summary; on a miss, requests ?action=dashboard&sheet=<month> and
-  // caches ONLY that compact summary. No fetchSheetRows(), no pagination, no
-  // raw rows — ever, in this function. `background` revalidation always
-  // bypasses the cache (same as `force`) so it actually re-checks the live
-  // sheet rather than just re-reading what's already cached.
+  // The ONLY normal-path month load (also used for the All Months sentinel —
+  // the backend routes ?sheet=ALL_MONTHS to the combined-summary endpoint).
+  // Checks IndexedDB for a cached compact summary; on a miss, requests
+  // ?action=dashboard&sheet=<month> and caches ONLY that compact summary.
+  // No fetchSheetRows(), no pagination, no raw rows — ever, in this function.
+  // `background` revalidation always bypasses the cache (same as `force`) so
+  // it actually re-checks the live sheet rather than just re-reading cache.
   try{
     const { summary, fromCache } = await getMonthFullSummary(month, { force: force || background });
 
@@ -1901,9 +1954,9 @@ async function switchToMonth(month, opts){
     // A tab that exists but has no data yet is a normal state, not a
     // connection failure — show a small persistent-until-changed notice
     // instead of either an error screen or silently blank KPIs.
-    if(summary.empty || summary.noData) showRefreshBanner('nodata', month); else hideRefreshBanner();
+    if(summary.empty || summary.noData) showRefreshBanner('nodata', monthDisplayName(month)); else hideRefreshBanner();
     hasLiveDataOnce = true;
-    console.info('[MONTH LOAD COMPLETE]', { month, totalRows: summary.totalRows, empty: !!(summary.empty||summary.noData), ms: Math.round(performance.now()-loadStartTime), fromCache });
+    console.info('[MONTH LOAD COMPLETE]', { month, totalRows: summary.totalRows, empty: !!(summary.empty||summary.noData), ms: Math.round(performance.now()-loadStartTime), fromCache, allMonths: !!summary.allMonths });
     if(!background && refreshBtn && !silent && force){
       refreshBtn.textContent = '✅ تم تحديث البيانات';
       setTimeout(()=>{ if(refreshBtn.textContent==='✅ تم تحديث البيانات') refreshBtn.textContent = '🔄 تحديث الآن'; }, 1800);
@@ -1916,39 +1969,69 @@ async function switchToMonth(month, opts){
     return true;
   }catch(err){
     if(background) return false; // a failed silent revalidation just keeps showing the cached view already on screen — no error UI for that
-    console.error('تعذر تحميل ملخص الشهر '+month+':', err);
+    console.error('تعذر تحميل ملخص '+monthDisplayName(month)+':', err);
     showGsheetBoot(false);
-    // The ONLY fallback allowed here: a previously-cached COMPACT SUMMARY for
-    // this exact month (IndexedDB) — never raw rows, never fetchSheetRows().
-    // Only attempted if nothing at all is currently on screen; a failed
-    // refresh of an already-visible month never falls back to anything, it
-    // just shows the retry banner below and keeps the last good render.
-    if(!STATE.serverOverviewSummary){
-      try{
-        const fallback = await loadMonthSummaryFromIDB(month);
-        if(fallback && fallback.summary){
-          selectedMonth = month;
-          saveSelectedMonthToStorage(month);
-          applyLoadedSummary(fallback.summary, month);
-          setConnStatus('demo');
-          showRefreshBanner('error');
-        }
-      }catch(e2){ /* fall through to the full error screen below */ }
-    }
-    if(!STATE.serverOverviewSummary){
-      document.getElementById('app').classList.add('hidden');
-      await showGsheetError(err.message || ('تعذر تحميل ملخص الشهر الحالي: ' + month));
-    }else{
-      // Never clear STATE/DOM on a failed refresh — keep showing the last
-      // good compact summary with a clear non-blocking retry notice.
+
+    // The ONLY fallback allowed here: a previously-cached COMPACT SUMMARY —
+    // and it must be scoped to the SELECTION ACTUALLY REQUESTED (a specific
+    // month, or the All Months sentinel), never to whatever was on screen
+    // before. Checking "is anything at all currently displayed" would
+    // conflate "some month is shown" with "THIS selection has real data" —
+    // exactly the mismatch that could show one month's numbers mislabeled
+    // as another. This checks IndexedDB for THIS selection specifically,
+    // every time — not just when nothing is on screen.
+    let fallbackAppliedForThisSelection = false;
+    try{
+      const fallback = await loadMonthSummaryFromIDB(month);
+      if(fallback && fallback.summary){
+        selectedMonth = month;
+        saveSelectedMonthToStorage(month);
+        applyLoadedSummary(fallback.summary, month);
+        setConnStatus('demo');
+        fallbackAppliedForThisSelection = true;
+      }
+    }catch(e2){ /* no usable fallback for this specific selection */ }
+
+    if(fallbackAppliedForThisSelection){
+      // A genuine previously-successful summary FOR THIS SELECTION exists —
+      // show it, with a clear non-blocking notice that refreshing it failed.
       _pendingRetryAction = () => switchToMonth(month, { force:true });
-      showRefreshBanner(err.kind === 'notfound' ? 'notfound' : (err.kind === 'empty' ? 'empty' : 'error'), month);
+      showRefreshBanner(err.kind === 'notfound' ? 'notfound' : (err.kind === 'empty' ? 'empty' : 'error'), monthDisplayName(month));
+    }else if(hadDataOnEntry && !isMonthChange){
+      // A same-selection REFRESH failed and nothing newer is cached for it —
+      // keep exactly what's already on screen, exact required wording.
+      _pendingRetryAction = () => switchToMonth(month, { force:true });
+      showRefreshBanner(err.kind === 'notfound' ? 'notfound' : (err.kind === 'empty' ? 'empty' : 'error'), monthDisplayName(month));
+    }else{
+      // A genuinely DIFFERENT selection was requested (a different month, or
+      // All Months) and NO successful summary exists for it anywhere (live
+      // or cached). Never show a different selection's numbers under this
+      // one, and never fake zeros. The selection IS this now — just with an
+      // explicit, unmistakable empty/error state instead of data.
+      selectedMonth = month;
+      saveSelectedMonthToStorage(month);
+      if(filtersInitialized){
+        // The dashboard shell already exists — replace its content with the
+        // explicit per-selection state, keeping navigation/filters/export usable.
+        renderMonthUnavailableState(month, err.message || 'تعذر تحميل البيانات.');
+        document.getElementById('app').classList.remove('hidden');
+      }else{
+        // Nothing has ever been shown this session (fresh boot, first visit,
+        // total failure, nothing cached anywhere) — the full-screen retry
+        // experience is the right fit; there is no shell to fall back into.
+        document.getElementById('app').classList.add('hidden');
+        await showGsheetError(err.message || ('تعذر تحميل البيانات: ' + monthDisplayName(month)));
+      }
+      _pendingRetryAction = () => switchToMonth(month, { force:true });
     }
     return false;
   }finally{
     if(!background){
       monthSwitchInFlight = false;
-      if(sel){ sel.value = selectedMonth || month; sel.disabled = availableMonths.length <= 1; }
+      if(sel){ sel.value = selectedMonth || month; sel.disabled = false; }
+      // The refresh button's loading text is unconditionally resolved here —
+      // success, failure, thrown exception, or timeout all funnel through
+      // this same finally, so it is never left spinning.
       if(refreshBtn && !silent && refreshBtn.textContent!=='✅ تم تحديث البيانات'){ refreshBtn.disabled = false; refreshBtn.textContent = '🔄 تحديث الآن'; }
       else if(refreshBtn && !silent){ refreshBtn.disabled = false; }
     }
@@ -1985,7 +2068,8 @@ async function bootDashboard(){
     // before switchToMonth runs — otherwise switchToMonth's own `sel.value =
     // month` (called on a still-empty <select>) would silently fail to
     // match anything and show blank until refreshMonthList() resolves later.
-    if(!availableMonths.length){ availableMonths = [cachedDefault]; populateMonthSelector(); }
+    if(!availableMonths.length && cachedDefault !== ALL_MONTHS_SENTINEL){ availableMonths = [cachedDefault]; }
+    populateMonthSelector();
     await switchToMonth(cachedDefault, { force:false, silent:true }); // instant cache render + silent background revalidation
 
     if(!effectiveWebAppUrl()){
@@ -2021,52 +2105,23 @@ async function bootDashboard(){
     return false;
   }
 
-  // Run month-list discovery AND a speculative compact-summary fetch of the
-  // configured default month IN PARALLEL (instead of sequentially), so the
-  // worst-case wait stays close to one timeout window rather than stacking
-  // two. PHASE 5: this "guess fetch" is now the SAME lightweight
-  // ?action=dashboard aggregation every other tab uses — never
-  // fetchSheetRows()/raw pagination — and its result is cached (compact
-  // summary only) exactly like any other month load.
+  // Discover the available months FIRST, then fetch the correct default
+  // ONCE. (The previous approach ran a speculative compact-summary fetch of
+  // a single configured "guess" month IN PARALLEL with listSheets — with
+  // All Months now the universal default, that guess is essentially always
+  // wrong/discarded, meaning it always wasted one full Apps Script
+  // invocation for nothing. Sequencing costs a little latency on the rare
+  // case the guess would have matched, in exchange for reliably avoiding
+  // duplicate/wasted requests on every other visit.)
   showGsheetBoot(true);
-  const listPromise = refreshMonthList();
-  const guessMonth = effectiveDefaultSheetName();
-  const [listResult, guessResult] = await Promise.allSettled([
-    listPromise,
-    guessMonth ? getMonthFullSummary(guessMonth, {}) : Promise.reject(new Error('no default month configured')),
-  ]);
-  const list = listResult.status === 'fulfilled' ? listResult.value : availableMonths;
-  populateMonthSelector();
-  const defaultMonth = pickDefaultMonth(list.length ? list : availableMonths) || guessMonth;
-
-  if(defaultMonth && defaultMonth === guessMonth){
-    // We already attempted exactly this month in the parallel guess above —
-    // never fetch it a second time. Use the result we already have (it was
-    // already cached — mem + IndexedDB — inside getMonthFullSummary itself).
-    if(guessResult.status === 'fulfilled' && guessResult.value && guessResult.value.summary){
-      try{
-        selectedMonth = guessMonth; saveSelectedMonthToStorage(guessMonth);
-        applyLoadedSummary(guessResult.value.summary, guessMonth);
-        showGsheetBoot(false); hideRefreshBanner(); hasLiveDataOnce = true; setConnStatus('live');
-        return true;
-      }catch(e){
-        // Rendering error on data we already fetched — not a connectivity
-        // issue, so no point retrying the network call either.
-        showGsheetBoot(false);
-        document.getElementById('app').classList.add('hidden');
-        await showGsheetError(e.message || 'تعذر معالجة ملخص الشهر الحالي.');
-        return false;
-      }
-    }else{
-      // Already know this exact request failed/timed out — surface that
-      // immediately instead of waiting through a second identical timeout.
-      showGsheetBoot(false);
-      document.getElementById('app').classList.add('hidden');
-      const reason = guessResult.status === 'rejected' ? guessResult.reason : new Error('تعذر معالجة ملخص الشهر الحالي.');
-      await showGsheetError((reason && reason.message) || 'تعذر الاتصال بمصدر البيانات.');
-      return false;
-    }
+  let list;
+  try{
+    list = await refreshMonthList();
+  }catch(e){
+    list = availableMonths;
   }
+  populateMonthSelector();
+  const defaultMonth = pickDefaultMonth(list.length ? list : availableMonths);
 
   if(!defaultMonth){
     showGsheetBoot(false);
@@ -2074,8 +2129,6 @@ async function bootDashboard(){
     await showGsheetError('لم يتم العثور على أي شهر/تبويب في المصدر. تأكد من اسم الشيت أو أضف تبويب شهر جديد.');
     return false;
   }
-  // defaultMonth is genuinely different from guessMonth (the real month list
-  // arrived with a different true default) — this is a fresh request, not a repeat.
   return switchToMonth(defaultMonth, { force:false });
 }
 
@@ -3976,6 +4029,10 @@ function renderBranchSlaTable(){
 // other local variable; nothing raw is left resident anywhere afterward.
 async function exportRawDataOnDemand(){
   if(!selectedMonth){ alert('اختر شهرًا أولاً.'); return; }
+  if(selectedMonth === ALL_MONTHS_SENTINEL){
+    alert('تصدير البيانات الخام غير متاح في وضع "كل الشهور" — اختر شهرًا محددًا أولًا من القائمة، ثم صدّر البيانات الخام له.');
+    return;
+  }
   const btn = document.getElementById('exportDataBtn');
   const originalLabel = btn ? btn.textContent : '';
   try{
