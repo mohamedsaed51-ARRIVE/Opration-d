@@ -3140,11 +3140,79 @@ function mgmtRenderInsights(months, branchSeries, customerSeries, showBranches, 
    real multi-page PDF with jsPDF and triggers an actual file download —
    no print dialog involved. A failure here is fully caught and reported via
    a simple alert; the live dashboard is never touched by this code path. */
+// Validates that a value is actually usable as a PNG data URL for jsPDF —
+// not just "truthy". A tainted or zero-size canvas's toDataURL() can, in
+// some browsers, silently return a blank/near-empty string instead of
+// throwing; feeding that straight to jsPDF is exactly what produces
+// "Incomplete or corrupt PNG file". Reject anything that doesn't look like a
+// real PNG payload before it ever reaches addImage.
+function isValidPngDataUrl(dataUrl){
+  if(!dataUrl || typeof dataUrl !== 'string') return false;
+  if(!dataUrl.startsWith('data:image/png;base64,')) return false;
+  const base64 = dataUrl.slice('data:image/png;base64,'.length);
+  // A real PNG's base64 payload is never trivially short — guards against
+  // the "blank/empty data URL" failure mode some browsers return for a
+  // tainted or truncated canvas capture, without being so strict it could
+  // reject a legitimately tiny real image.
+  return base64.length > 20;
+}
+
+// The requested safe wrapper around every actual pdf.addImage() call —
+// rejects anything invalid instead of letting jsPDF throw, and lets the
+// report continue (skipping just that image) rather than aborting entirely.
+function safeAddImageToPdf(pdf, dataUrl, format, x, y, w, h){
+  if(!isValidPngDataUrl(dataUrl)) return false;
+  if(!(w > 0) || !(h > 0)) return false;
+  try{
+    pdf.addImage(dataUrl, format, x, y, w, h);
+    return true;
+  }catch(e){
+    console.warn('[PDF] skipping an image — addImage failed:', e);
+    return false;
+  }
+}
+
+// Converts the header logo <img> (a plain, possibly cross-origin URL — NOT a
+// data URL) into a pre-validated PNG data URL via an isolated canvas
+// draw+toDataURL, BEFORE it ever gets embedded into the offscreen report
+// that html2canvas will screenshot. This is the actual root-cause fix: if
+// the logo is cross-origin without CORS headers (or simply never finished
+// loading), drawing it taints a canvas and toDataURL() throws a
+// SecurityError — catching that HERE, in isolation, means it can never
+// silently corrupt the ONE big screenshot the whole PDF is built from.
+// Returns null (never embeds the logo) on any failure — the report must
+// still be produced without it.
+function getSafeLogoDataUrl(imgEl){
+  if(!imgEl || !imgEl.complete || !imgEl.naturalWidth || !imgEl.naturalHeight) return null;
+  try{
+    const c = document.createElement('canvas');
+    c.width = imgEl.naturalWidth;
+    c.height = imgEl.naturalHeight;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(imgEl, 0, 0);
+    const dataUrl = c.toDataURL('image/png');
+    return isValidPngDataUrl(dataUrl) ? dataUrl : null;
+  }catch(e){
+    console.warn('[PDF] skipping logo — image could not be safely converted (likely cross-origin without CORS headers, or not fully loaded):', e);
+    return null;
+  }
+}
+
+// Captures a Chart.js canvas as a PNG data URL — but only once it has real
+// pixels to capture (width/height > 0) and the result actually validates as
+// a PNG, never a blank/corrupt one from a chart that hasn't finished
+// rendering (e.g. a canvas in a tab panel that was hidden a moment ago).
 function safeChartImage(canvasId){
   try{
     const c = document.getElementById(canvasId);
-    return c ? c.toDataURL('image/png', 1.0) : null;
-  }catch(e){ return null; }
+    if(!c || typeof c.getContext !== 'function') return null;
+    if(!c.width || !c.height) return null; // nothing drawn yet — never capture a zero-size canvas
+    const dataUrl = c.toDataURL('image/png', 1.0);
+    return isValidPngDataUrl(dataUrl) ? dataUrl : null;
+  }catch(e){
+    console.warn('[PDF] skipping chart image ('+canvasId+') — canvas capture failed:', e);
+    return null;
+  }
 }
 async function mgmtGeneratePdfReport(){
   const btn = document.getElementById('mgmtPdfBtn');
@@ -3165,7 +3233,7 @@ async function mgmtGeneratePdfReport(){
     const showBranches = MGMT.comparisonType !== 'customers';
     const showCustomers = MGMT.comparisonType !== 'branches';
     const logoImg = document.querySelector('.brand-mark-img');
-    const logoSrc = logoImg ? logoImg.src : '';
+    const logoSrc = getSafeLogoDataUrl(logoImg); // null if missing/broken/cross-origin — the logo is simply omitted, never lets a bad image reach html2canvas
     const periodLabel = months.length>1 ? `${months[0]} — ${months[months.length-1]}` : months[0];
     const branchLabel = MGMT.branch || 'كل الفروع';
     const customerLabel = MGMT.customer || 'كل العملاء';
@@ -3269,7 +3337,18 @@ async function mgmtGeneratePdfReport(){
     // Snapshot the off-screen report, then slice it across as many A4 pages
     // as needed — the standard html2canvas + jsPDF multi-page pattern.
     const canvas = await window.html2canvas(offscreen, { scale:2, useCORS:true, backgroundColor:'#ffffff' });
+    if(!canvas || !canvas.width || !canvas.height){
+      throw new Error('تعذر التقاط محتوى التقرير (Canvas فارغ) — أعد المحاولة.');
+    }
     const imgData = canvas.toDataURL('image/png');
+    if(!isValidPngDataUrl(imgData)){
+      // This is the exact failure mode that used to surface as jsPDF's cryptic
+      // "Incomplete or corrupt PNG file" — caught here with a clear cause
+      // instead. Almost always means an embedded image (logo/chart) tainted
+      // the canvas; getSafeLogoDataUrl/safeChartImage above should prevent
+      // this in normal operation.
+      throw new Error('تعذر إنشاء صورة صالحة لمحتوى التقرير — قد يكون أحد العناصر المرئية (كالشعار) غير صالح. أعد المحاولة، وإذا استمرت المشكلة أبلغ الدعم الفني.');
+    }
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF('p','pt','a4');
     const pageWidth = pdf.internal.pageSize.getWidth();
@@ -3278,12 +3357,18 @@ async function mgmtGeneratePdfReport(){
     const imgHeight = canvas.height * imgWidth / canvas.width;
     let heightLeft = imgHeight;
     let position = 0;
-    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+    if(!safeAddImageToPdf(pdf, imgData, 'PNG', 0, position, imgWidth, imgHeight)){
+      throw new Error('تعذر إضافة محتوى التقرير إلى ملف PDF.');
+    }
     heightLeft -= pageHeight;
     while(heightLeft > 0){
       position -= pageHeight;
       pdf.addPage();
-      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      if(!safeAddImageToPdf(pdf, imgData, 'PNG', 0, position, imgWidth, imgHeight)){
+        console.warn('[PDF] stopped adding further pages — the report up to this point is still saved.');
+        pdf.deletePage(pdf.internal.getNumberOfPages()); // drop the blank page we just added
+        break;
+      }
       heightLeft -= pageHeight;
     }
 
