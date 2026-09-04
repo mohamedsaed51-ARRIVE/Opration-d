@@ -82,6 +82,18 @@ var DEFAULT_PAGE_SIZE = 5000;
 
 var MAX_PAGE_SIZE = 5000;
 
+// ============================================================
+// 4A. PERSISTENT DASHBOARD SUMMARY STORAGE
+// ============================================================
+// Each Q1/Q2/Q3/Q4 spreadsheet gets one internal tab named
+// DASHBOARD_SUMMARY. It stores pre-built COMPACT summaries only.
+// The dashboard reads these snapshots instantly instead of rebuilding
+// a 100k+ row month during normal management viewing.
+var PERSISTENT_SUMMARY_SHEET = "DASHBOARD_SUMMARY";
+var PERSISTENT_SUMMARY_VERSION = "1";
+var PERSISTENT_SUMMARY_CHUNK_SIZE = 45000; // safely below cell-size limits
+
+
 
 // ============================================================
 // 5. MAIN ENTRY
@@ -116,6 +128,20 @@ function doGet(e) {
 
     if (action === "listSheets") {
       result = listSheetsPayload();
+    }
+
+    // --------------------------------------------------------
+    // BUILD / REFRESH PERSISTENT COMPACT SUMMARY
+    // Admin / Apps Script execution only. This is the ONLY path
+    // that performs the heavy raw-month aggregation for a snapshot.
+    // --------------------------------------------------------
+    else if (action === "buildSummary") {
+      if (!sheetName) result = { success:false, error:"لم يتم تحديد الشهر." };
+      else result = buildAndSaveMonthSummary(sheetName);
+    }
+
+    else if (action === "buildQuarterSummaries") {
+      result = buildQuarterSummaries(params.quarter || "");
     }
 
     // --------------------------------------------------------
@@ -647,7 +673,30 @@ function getMonthDashboardSummary(sheetName, params) {
     return { success: false, error: "شهر غير معروف: " + sheetName };
   }
 
-  var filters = summaryParseFilters(params);
+  // Normal dashboard viewing with NO active server-side filters uses the
+  // pre-built persistent snapshot. Refresh does NOT trigger raw aggregation.
+  // A build request explicitly sets __buildPersistentSummary=1 and bypasses this.
+  var isPersistentBuild = !!(params && params.__buildPersistentSummary);
+  var requestedFilters = summaryParseFilters(params);
+  // Snapshot is valid for the normal unfiltered month view. Runtime SLA/attempt
+  // settings are deliberately NOT treated as filters here; they are part of the
+  // snapshot build configuration. Actual dimension/date filters still use the
+  // existing live compact aggregation path so no raw rows ever reach the browser.
+  var hasServerFilters = Object.keys(requestedFilters).some(function(k){
+    return Array.isArray(requestedFilters[k]) && requestedFilters[k].length > 0;
+  }) || !!(params && (params.dateFrom || params.dateTo || params.branch));
+
+  if (!isPersistentBuild && !hasServerFilters) {
+    var savedSnapshot = getSavedMonthSummary_(sheetName);
+    if (savedSnapshot) {
+      savedSnapshot.cached = true;
+      savedSnapshot.persistent = true;
+      savedSnapshot.snapshot = true;
+      return savedSnapshot;
+    }
+  }
+
+  var filters = requestedFilters;
   var attemptT1 = (params && params.attemptT1 !== undefined && params.attemptT1 !== "") ? parseFloat(params.attemptT1) : 1;
   var attemptT2 = (params && params.attemptT2 !== undefined && params.attemptT2 !== "") ? parseFloat(params.attemptT2) : 2;
   if (isNaN(attemptT1)) attemptT1 = 1;
@@ -1498,6 +1547,160 @@ function getMonthPage(sheetName, params) {
 
   };
 
+}
+
+
+// ============================================================
+// 6A. PERSISTENT COMPACT SUMMARY STORAGE
+// ============================================================
+
+function getPersistentSummarySheet_(quarter) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS[quarter]);
+  var sh = ss.getSheetByName(PERSISTENT_SUMMARY_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(PERSISTENT_SUMMARY_SHEET);
+    sh.getRange(1,1,1,9).setValues([[
+      "Month","Version","Generated At","Total Rows","Grand Total",
+      "Chunk Index","Chunk Count","JSON Chunk","Updated By"
+    ]]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function getSavedMonthSummary_(sheetName) {
+  if (!MONTH_SOURCE.hasOwnProperty(sheetName)) return null;
+  var quarter = MONTH_SOURCE[sheetName];
+  var sh = getPersistentSummarySheet_(quarter);
+  var last = sh.getLastRow();
+  if (last < 2) return null;
+  var rows = sh.getRange(2,1,last-1,9).getValues();
+  var matches = [];
+  for (var i=0;i<rows.length;i++) {
+    if (String(rows[i][0] || "").trim() === sheetName &&
+        String(rows[i][1] || "") === PERSISTENT_SUMMARY_VERSION) {
+      matches.push(rows[i]);
+    }
+  }
+  if (!matches.length) return null;
+  matches.sort(function(a,b){ return Number(a[5]) - Number(b[5]); });
+  var expected = Number(matches[0][6]) || 0;
+  if (!expected || matches.length !== expected) return null;
+  var json = "";
+  for (var j=0;j<matches.length;j++) {
+    if (Number(matches[j][5]) !== j) return null;
+    json += String(matches[j][7] || "");
+  }
+  try {
+    var obj = JSON.parse(json);
+    obj.success = obj.success !== false;
+    obj.persistent = true;
+    obj.snapshot = true;
+    return obj;
+  } catch (err) {
+    console.log("[PERSISTENT SUMMARY INVALID] " + sheetName + " " + String(err));
+    return null;
+  }
+}
+
+function saveMonthSummary_(sheetName, summary) {
+  var quarter = MONTH_SOURCE[sheetName];
+  if (!quarter) throw new Error("شهر غير معروف: " + sheetName);
+  var sh = getPersistentSummarySheet_(quarter);
+  var json = JSON.stringify(summary);
+  var chunks = [];
+  for (var i=0;i<json.length;i+=PERSISTENT_SUMMARY_CHUNK_SIZE) {
+    chunks.push(json.substring(i, i + PERSISTENT_SUMMARY_CHUNK_SIZE));
+  }
+  if (!chunks.length) chunks.push("{}");
+
+  var last = sh.getLastRow();
+  if (last >= 2) {
+    var existing = sh.getRange(2,1,last-1,1).getValues();
+    for (var r=existing.length-1;r>=0;r--) {
+      if (String(existing[r][0] || "").trim() === sheetName) sh.deleteRow(r+2);
+    }
+  }
+
+  var who = "";
+  try { who = Session.getActiveUser().getEmail() || ""; } catch(e) {}
+  var now = new Date().toISOString();
+  var values = [];
+  for (var c=0;c<chunks.length;c++) {
+    values.push([
+      sheetName,
+      PERSISTENT_SUMMARY_VERSION,
+      now,
+      Number(summary.totalRows || 0),
+      Number(summary.grandTotal || 0),
+      c,
+      chunks.length,
+      chunks[c],
+      who
+    ]);
+  }
+  sh.getRange(sh.getLastRow()+1,1,values.length,9).setValues(values);
+  SpreadsheetApp.flush();
+  console.log("[PERSISTENT SUMMARY SAVED] " + JSON.stringify({month:sheetName,quarter:quarter,chunks:chunks.length,totalRows:summary.totalRows || 0}));
+  return { success:true, month:sheetName, quarter:quarter, chunks:chunks.length };
+}
+
+function buildAndSaveMonthSummary(sheetName) {
+  if (!MONTH_SOURCE.hasOwnProperty(sheetName)) {
+    return { success:false, error:"شهر غير معروف: " + sheetName };
+  }
+  var started = new Date().getTime();
+  var params = { __buildPersistentSummary:true, refresh:"1" };
+  var summary = getMonthDashboardSummary(sheetName, params);
+  if (!summary || summary.success === false) return summary || {success:false,error:"فشل بناء Summary"};
+  summary.persistent = true;
+  summary.snapshot = true;
+  summary.generatedAt = summary.generatedAt || new Date().toISOString();
+  var saved = saveMonthSummary_(sheetName, summary);
+  return {
+    success:true,
+    month:sheetName,
+    source:MONTH_SOURCE[sheetName],
+    totalRows:Number(summary.totalRows || 0),
+    grandTotal:Number(summary.grandTotal || 0),
+    empty:!!(summary.empty || summary.noData),
+    generatedAt:summary.generatedAt,
+    durationMs:new Date().getTime()-started,
+    chunks:saved.chunks
+  };
+}
+
+function buildQuarterSummaries(quarter) {
+  if (!SPREADSHEET_IDS[quarter]) return {success:false,error:"ربع غير معروف: " + quarter};
+  var results = [];
+  for (var i=0;i<MONTH_ORDER.length;i++) {
+    var month = MONTH_ORDER[i];
+    if (MONTH_SOURCE[month] !== quarter) continue;
+    try { results.push(buildAndSaveMonthSummary(month)); }
+    catch(err) { results.push({success:false,month:month,error:String(err && err.message ? err.message : err)}); }
+  }
+  return {success:true,quarter:quarter,results:results};
+}
+
+function buildAllDashboardSummaries() {
+  var out = [];
+  for (var i=0;i<MONTH_ORDER.length;i++) out.push(buildAndSaveMonthSummary(MONTH_ORDER[i]));
+  return {success:true,results:out};
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu("ARRIVE Dashboard")
+    .addItem("Update Current Quarter Summaries", "updateCurrentQuarterSummaries")
+    .addItem("Update All 12 Month Summaries", "buildAllDashboardSummaries")
+    .addToUi();
+}
+
+function updateCurrentQuarterSummaries() {
+  var activeId = SpreadsheetApp.getActiveSpreadsheet().getId();
+  for (var q in SPREADSHEET_IDS) {
+    if (SPREADSHEET_IDS[q] === activeId) return buildQuarterSummaries(q);
+  }
+  throw new Error("هذا الملف ليس أحد ملفات Q1/Q2/Q3/Q4.");
 }
 
 
