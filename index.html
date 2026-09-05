@@ -1034,6 +1034,18 @@ const AUTO_REFRESH_STORAGE_KEY = 'arrive_ops_dashboard_auto_refresh_minutes';
 const FETCH_TIMEOUT_MS = 15000; // generic default — used for raw-row page requests (on-demand Raw Export only)
 const LIST_SHEETS_TIMEOUT_MS = 30000; // month-tab discovery — can be slow on a cold Apps Script deployment
 const DASHBOARD_SUMMARY_TIMEOUT_MS = 90000; // full-sheet aggregation (e.g. July's ~117k rows) legitimately needs much longer than a quick call
+// LOCAL CACHE TTL (see docs/audit.md — Bug #2): a cached compact summary
+// (single month OR All Months) persisted in memory/IndexedDB is only ever
+// trusted as-is for this long. Past this age it is treated exactly like a
+// "partial" cache already is — a live refresh is attempted first, and only
+// on live failure is the old cache shown again, explicitly marked stale.
+// Without this, a cache saved back when a month was legitimately still
+// empty (so correctly NOT flagged partial at the time) would otherwise be
+// shown as complete forever, even after real data was added later.
+const SUMMARY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+function isCacheFresh(savedAt){
+  return !!savedAt && (Date.now() - savedAt) < SUMMARY_CACHE_TTL_MS;
+}
 
 let runtimeConfig = { WEBAPP_URL: '', SHEET_NAME: '' };
 let autoRefreshMinutes = 5;
@@ -1233,6 +1245,10 @@ async function hasCachedSummary(month){
 // In-memory: month -> full server summary object (a few KB — not raw rows —
 // so no eviction/size limit is needed here, unlike the old raw-row cache).
 const monthSummaryMemCache = new Map();
+// month -> savedAt (ms epoch), mirroring the IndexedDB record's own savedAt
+// for whatever is currently held in the in-memory cache above — used only
+// for the SUMMARY_CACHE_TTL_MS freshness check (see isCacheFresh()).
+const monthSummaryMemCacheSavedAt = new Map();
 
 // Single fetch+cache pipeline for a month's UNFILTERED compact summary — mem
 // → IndexedDB → network, in that order. This is the ONLY place a month's
@@ -1253,7 +1269,10 @@ function normalizeEmptySummary(summary){
 // isn't partial — a result missing some months' data (no snapshot yet, or
 // skipped for time/error reasons) must never be treated as equivalent to a
 // complete cache hit, even though it's technically present in storage.
-// Single-month summaries have no such concept and are always usable.
+// Single-month summaries have no such concept and are always structurally
+// usable — but this only checks SHAPE (partial or not), not AGE; callers
+// must separately check isCacheFresh(savedAt) (SUMMARY_CACHE_TTL_MS) before
+// treating either kind of cache as good enough to skip a live check.
 function isUsableCachedSummary(summary, month){
   if(month !== ALL_MONTHS_SENTINEL) return true;
   if(!summary) return false;
@@ -1267,22 +1286,24 @@ async function ensureMonthSummaryCached(month, opts){
   opts = opts || {};
   if(!opts.force && monthSummaryMemCache.has(month)){
     const cachedVal = monthSummaryMemCache.get(month);
-    if(isUsableCachedSummary(cachedVal, month)){
+    const cachedSavedAt = monthSummaryMemCacheSavedAt.get(month);
+    if(isUsableCachedSummary(cachedVal, month) && isCacheFresh(cachedSavedAt)){
       console.info('[CACHE HIT]', { month, source:'memory' });
       return { summary: normalizeEmptySummary(cachedVal), fromCache: true };
     }
-    console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
+    console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', reason: isUsableCachedSummary(cachedVal, month) ? 'stale-ttl' : 'partial', savedAt: cachedSavedAt, missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
   }
   if(!opts.force){
     const cachedIdb = await loadMonthSummaryFromIDB(month);
     if(cachedIdb && cachedIdb.summary){
-      if(isUsableCachedSummary(cachedIdb.summary, month)){
+      if(isUsableCachedSummary(cachedIdb.summary, month) && isCacheFresh(cachedIdb.savedAt)){
         normalizeEmptySummary(cachedIdb.summary);
         monthSummaryMemCache.set(month, cachedIdb.summary);
+        monthSummaryMemCacheSavedAt.set(month, cachedIdb.savedAt);
         console.info('[CACHE HIT]', { month, source:'IndexedDB', savedAt: cachedIdb.savedAt });
         return { summary: cachedIdb.summary, fromCache: true };
       }
-      console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'IndexedDB', missingSnapshotMonths: cachedIdb.summary.missingSnapshotMonths, skippedMonths: cachedIdb.summary.skippedMonths });
+      console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'IndexedDB', reason: isUsableCachedSummary(cachedIdb.summary, month) ? 'stale-ttl' : 'partial', savedAt: cachedIdb.savedAt, missingSnapshotMonths: cachedIdb.summary.missingSnapshotMonths, skippedMonths: cachedIdb.summary.skippedMonths });
     }
   }
   console.info('[CACHE MISS]', { month });
@@ -1294,7 +1315,9 @@ async function ensureMonthSummaryCached(month, opts){
       throw new Error((serverSummary && serverSummary.error) || 'تعذر تحميل ملخص الشهر.');
     }
     normalizeEmptySummary(serverSummary);
+    const savedNowAt = Date.now();
     monthSummaryMemCache.set(month, serverSummary);
+    monthSummaryMemCacheSavedAt.set(month, savedNowAt);
     await saveMonthSummaryToIDB(month, serverSummary);
     console.info('[MONTH LOAD COMPLETE]', { month, context:'dashboard-summary', totalRows: serverSummary.totalRows, ms: Math.round(performance.now()-t0) });
     return { summary: serverSummary, fromCache: false };
@@ -1429,6 +1452,7 @@ function showRefreshBanner(kind, monthLabel){
     'empty': 'تم الاتصال بالشيت بنجاح، ولكن لم يتم العثور على بيانات كافية.',
     'nodata': `لا توجد بيانات لشهر "${monthLabel||selectedMonth}" بعد — التبويب موجود لكنه لسه فاضي. هذا ليس خطأ اتصال.`,
     'nourl': 'يتم عرض آخر بيانات محفوظة — لم يتم ضبط مصدر البيانات. افتح ⚙️ لضبط رابط Apps Script.',
+    'stale': `البيانات المعروضة حاليًا لشهر "${monthLabel||selectedMonth}" محفوظة من زيارة سابقة (قد تكون قديمة) — تعذّر تحديثها الآن. اضغط "إعادة المحاولة الآن" لإعادة المحاولة.`,
     'chartlib': 'تعذر تحميل مكتبة الرسوم البيانية (Chart.js) — البيانات والجداول والفلاتر تعمل بشكل طبيعي، لكن الرسوم البيانية غير متاحة حاليًا. حاول تحديث الصفحة.',
   };
   // The chart-library warning is a persistent, session-level condition (Chart.js
@@ -1439,7 +1463,7 @@ function showRefreshBanner(kind, monthLabel){
   currentBannerKind = kind;
   if(msg) msg.textContent = presets[kind] || presets['error'];
   banner.classList.remove('hidden');
-  if(!['nourl','chartlib','nodata'].includes(kind)) setConnStatus('error'); // these are informational, not connectivity failures
+  if(!['nourl','chartlib','nodata','stale'].includes(kind)) setConnStatus('error'); // these are informational, not connectivity failures — 'stale' already got its own 'demo' chip from the caller (a cache fallback, not a hard connectivity error)
 }
 function hideRefreshBanner(){
   // Never let a routine success (cache hit, background revalidation, refresh
@@ -2004,7 +2028,14 @@ async function switchToMonth(month, opts){
     // A tab that exists but has no data yet is a normal state, not a
     // connection failure — show a small persistent-until-changed notice
     // instead of either an error screen or silently blank KPIs.
-    if(summary.empty || summary.noData) showRefreshBanner('nodata', monthDisplayName(month)); else hideRefreshBanner();
+    // A stale-by-TTL (or partial) cache that had to fall back after a failed
+    // live retry (see ensureMonthSummaryCached / SUMMARY_CACHE_TTL_MS) must
+    // never look identical to a normal fresh/cache-hit render — this is the
+    // single-month equivalent of renderAllMonthsCompletenessWarning(), which
+    // already covers the All Months case with its own in-page banner below.
+    if(summary.empty || summary.noData) showRefreshBanner('nodata', monthDisplayName(month));
+    else if(summary.staleCacheFallback && !summary.allMonths) showRefreshBanner('stale', monthDisplayName(month));
+    else hideRefreshBanner();
     hasLiveDataOnce = true;
     console.info('[MONTH LOAD COMPLETE]', { month, totalRows: summary.totalRows, empty: !!(summary.empty||summary.noData), ms: Math.round(performance.now()-loadStartTime), fromCache, allMonths: !!summary.allMonths });
     if(!background && refreshBtn && !silent && force){
@@ -5148,6 +5179,18 @@ function initExportButtons(){
 }
 
 let APP_INITIALIZED = false; // guards against init() running twice (double DOMContentLoaded, hot reload, etc.)
+// WHITE SCREEN PROTECTION (see docs/audit.md — Bug #1): #gsheetBootScreen and
+// #app are BOTH `class="hidden"` by default in the static HTML — nothing
+// becomes visible until JS explicitly unhides one of them. Previously, an
+// uncaught exception anywhere in the init*Handlers() calls below (a missing
+// DOM element, a library not ready yet, etc.) would stop init() before
+// bootDashboard() ever ran, leaving every screen hidden — a genuine blank
+// page with no error, no retry, nothing in the console a normal user would
+// notice. Each step below now runs independently (one failing must never
+// block the others or block bootDashboard()), and bootDashboard() itself is
+// wrapped so that even a genuinely unexpected throw there (beyond the
+// network-failure handling it already does internally) still surfaces the
+// existing error screen instead of a blank one.
 async function init(){
   if(APP_INITIALIZED) return;
   APP_INITIALIZED = true;
@@ -5157,18 +5200,18 @@ async function init(){
   // bootDashboard(), and ONLY when there is no cache to fall back on; chart
   // rendering itself is also guarded (chartLibUnavailable()) so cached
   // KPIs/tables/filters keep working even if Chart.js specifically failed.
-  initTabs();
-  initSettingsHandlers();
-  initConnectionSettingsHandlers();
-  initMonthSelectorHandlers();
-  initClientSort();
-  initTrendControl();
-  initExportButtons();
-  initManagementHandlers();
-  initGsheetErrorRetry();
+  const initSteps = [
+    initTabs, initSettingsHandlers, initConnectionSettingsHandlers,
+    initMonthSelectorHandlers, initClientSort, initTrendControl,
+    initExportButtons, initManagementHandlers, initGsheetErrorRetry
+  ];
+  for(const step of initSteps){
+    try{ step(); }
+    catch(stepErr){ console.error('[INIT STEP FAILED] — continuing with the remaining steps', step.name, stepErr); }
+  }
 
-  loadRuntimeConfigFromStorage();
-  loadAutoRefreshFromStorage();
+  try{ loadRuntimeConfigFromStorage(); }catch(cfgErr){ console.error('[INIT] loadRuntimeConfigFromStorage failed', cfgErr); }
+  try{ loadAutoRefreshFromStorage(); }catch(refErr){ console.error('[INIT] loadAutoRefreshFromStorage failed', refErr); }
   // Month cache now lives in IndexedDB as a compact summary only (see
   // openDashboardDB/getMonthFullSummary) — no eager bulk load needed here;
   // bootDashboard() below checks it directly, on demand, for exactly the one
@@ -5177,8 +5220,21 @@ async function init(){
   // Automatic opening flow: discover month tabs, pick the default month,
   // connect to Apps Script, read that one month's data, normalize it, build
   // dimensions, init filters, render — fully automatic, no button required.
-  await bootDashboard();
-  setupAutoRefresh();
+  try{
+    await bootDashboard();
+    setupAutoRefresh();
+  }catch(bootErr){
+    // Last-resort net: bootDashboard() already handles normal network/API
+    // failures internally (error screen + retry). Reaching this catch means
+    // something unexpected slipped through it — never leave a blank screen
+    // for that; log the real error and show the exact same error screen a
+    // normal connection failure would use, with an honest message.
+    console.error('[INIT] bootDashboard() threw unexpectedly — showing error screen instead of a blank page', bootErr);
+    try{ showGsheetBoot(false); }catch(e2){}
+    try{
+      await showGsheetError('حدث خطأ غير متوقع أثناء تشغيل لوحة التحكم: ' + (bootErr && bootErr.message ? bootErr.message : String(bootErr)));
+    }catch(e3){ console.error('[INIT] showGsheetError itself failed', e3); }
+  }
 }
 function initConnectionSettingsHandlers(){
   document.getElementById('headerSettingsBtn')?.addEventListener('click', openSettingsModal);

@@ -2498,6 +2498,49 @@ function listSheetsPayload() {
     } catch (eList) { /* corrupted cache entry — fall through and recompute */ }
   }
 
+  // CONCURRENCY GUARD (see docs/audit.md — Bug #3): without this, every
+  // request that lands while the cache is cold (right after the 10-minute
+  // TTL expires, or several people opening the dashboard around the same
+  // moment) independently opens all 4 Q1-Q4 spreadsheets in parallel,
+  // multiplying load on Google Sheets exactly when it is already slowest —
+  // a direct contributor to the >30s client-side listSheets timeout. A
+  // short script lock serializes the (rare) cold-cache computation: only
+  // the first request actually rebuilds the list; every other concurrent
+  // request waits briefly, then re-checks the cache (now populated by
+  // whichever request got there first) instead of redoing the same work.
+  var lock = LockService.getScriptLock();
+  var haveLock = false;
+  try {
+    haveLock = lock.tryLock(20000); // wait up to 20s — stays comfortably under the frontend's 30s listSheets timeout
+  } catch (eLock) {
+    haveLock = false; // LockService itself failing must never block listSheets entirely — fall through and compute directly
+  }
+
+  try {
+    // Another request may have finished building + caching the list while
+    // we were waiting for the lock — use that instead of recomputing.
+    var cachedAfterLock = listCache.get(listCacheKey);
+    if (cachedAfterLock) {
+      try {
+        var parsedAfterLock = JSON.parse(cachedAfterLock);
+        parsedAfterLock.cached = true;
+        return parsedAfterLock;
+      } catch (eList2) { /* corrupted — fall through and recompute below */ }
+    }
+    return buildSheetsListAndCache_(listCache, listCacheKey);
+  } finally {
+    if (haveLock) {
+      try { lock.releaseLock(); } catch (eRelease) { /* non-fatal */ }
+    }
+  }
+}
+
+// Does the actual 4-spreadsheet scan, builds the result, and writes it to
+// CacheService. Split out of listSheetsPayload() only so the lock/re-check
+// logic above has one place to call — the scan itself is byte-for-byte
+// identical to before this change.
+function buildSheetsListAndCache_(listCache, listCacheKey) {
+
   var allMonths = [];
 
   var sources = {};
