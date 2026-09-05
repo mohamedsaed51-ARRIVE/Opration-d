@@ -2761,7 +2761,8 @@ function mgmtBuildSeries(field, months, opts){
       if(!byName.has(s.name)) byName.set(s.name, { name:s.name, byMonth:{} });
       byName.get(s.name).byMonth[m] = { count: s.shipments, sr: s.successRate,
         delivered: s.delivered, returned: s.returned, rejected: s.rejected,
-        withinSla: s.withinSla, slaBreach: s.slaBreach };
+        withinSla: s.withinSla, slaBreach: s.slaBreach,
+        deliveryRate: s.deliveryRate, returnRate: s.returnRate, rejectedRate: s.rejectedRate, slaPct: s.slaPct };
     }
   }
   return byName;
@@ -3138,6 +3139,71 @@ function mgmtRenderInsights(months, branchSeries, customerSeries, showBranches, 
 
 function pct1(n){ return (n===null||n===undefined||isNaN(n)) ? null : Number(n.toFixed(1)); }
 
+// Cleans entity names (branch/customer/etc.) coming from the raw sheet data
+// for display in Excel — decodes HTML entities iteratively (handles
+// double/triple-encoding such as "&amp;amp;" -> "&") and collapses immediate
+// consecutive duplicate words (e.g. "فرع فرع البحيرة" -> "فرع البحيرة").
+// Never invents or guesses a name — only removes literal encoding/duplication
+// artifacts already present in the string.
+function mgmtCleanEntityName(name){
+  if(!name || typeof name !== 'string') return name;
+  let s = name;
+  for(let i=0;i<5;i++){
+    const decoded = s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&apos;/g,"'");
+    if(decoded === s) break;
+    s = decoded;
+  }
+  const tokens = s.split(/\s+/).filter(Boolean);
+  const cleaned = [];
+  for(let i=0;i<tokens.length;i++){
+    if(i>0 && tokens[i] === tokens[i-1]) continue;
+    cleaned.push(tokens[i]);
+  }
+  return cleaned.join(' ').trim() || name;
+}
+
+// Asymmetric-direction status tag: higher is better for delivery/SLA, but
+// LOWER is better for return/reject/in-progress — never the same direction
+// for every KPI. Returns '' when the value is null (never guesses a status
+// for a rate that could not be computed).
+function mgmtStatusTag(value, kpiType){
+  if(value===null || value===undefined || isNaN(value)) return '';
+  const T = {
+    delivery: {good:85, warn:70, higherBetter:true},
+    sla:      {good:85, warn:70, higherBetter:true},
+    return:   {good:8,  warn:15, higherBetter:false},
+    reject:   {good:3,  warn:7,  higherBetter:false},
+    inprogress:{good:5, warn:10, higherBetter:false},
+  }[kpiType];
+  if(!T) return '';
+  if(T.higherBetter){
+    if(value>=T.good) return '🟢';
+    if(value>=T.warn) return '🟡';
+    return '🔴';
+  }else{
+    if(value<=T.good) return '🟢';
+    if(value<=T.warn) return '🟡';
+    return '🔴';
+  }
+}
+function mgmtRateCell(value, kpiType){
+  if(value===null || value===undefined || isNaN(value)) return '—'; // rate genuinely not computable (denominator was zero) — never blank, never a fake 0%
+  const tag = mgmtStatusTag(value, kpiType);
+  return `${pct1(value)}%${tag?' '+tag:''}`;
+}
+// Explicit state for a missing count/rate cell — distinguishes WHY it's
+// missing instead of leaving a blank or silently showing 0. `reason` is one
+// of: 'nodata' | 'inactive' | 'new' | 'nodeliveries' | 'incomplete'.
+function mgmtBlankState(reason){
+  return ({
+    nodata: 'لا توجد بيانات',
+    inactive: 'غير نشط',
+    new: 'جديد',
+    nodeliveries: 'لا توجد عمليات تسليم',
+    incomplete: 'بيانات غير مكتملة',
+  })[reason] || 'لا توجد بيانات';
+}
+
 // Minimum-volume threshold for "worst performer" rankings — per the explicit
 // requirement, so a customer/branch with e.g. 1 shipment at 100% return rate
 // never dominates a ranking. Uses the given formula literally: no existing
@@ -3159,8 +3225,8 @@ function mgmtComputeFindings(months, overall, branchEntries, customerEntries){
   const findings = [];
   const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
   const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
-  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol);
-  const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol);
+  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol).map(e=>({...e, name: mgmtCleanEntityName(e.name)}));
+  const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol).map(e=>({...e, name: mgmtCleanEntityName(e.name)}));
 
   // .text/.action are Arabic (the report's primary language) — .category/
   // .issue stay as short English tags for easy filtering in the Excel sheet.
@@ -3248,15 +3314,19 @@ function mgmtEntryMonthRates(entry, month){
   const v = entry.byMonth && entry.byMonth[month];
   if(!v) return null;
   const resolved = (v.delivered||0)+(v.returned||0)+(v.rejected||0);
+  // "pending" itself is the one figure the persisted per-entity summary does
+  // not expose as a raw count — derived here for count/in-progress-rate
+  // display only. Documented, real limitation (see final report); it does
+  // NOT feed deliveryRate/returnRate/rejectRate/slaPct below, which use the
+  // exact values Code.gs already computed for this entity.
   const pending = Math.max(0, (v.count||0) - resolved);
-  const dwd = (v.withinSla||0)+(v.slaBreach||0);
   return {
     count: v.count||0, delivered: v.delivered||0, returned: v.returned||0, rejected: v.rejected||0, pending,
-    deliveryRate: v.count>0 ? v.delivered/v.count*100 : null,
-    returnRate: resolved>0 ? v.returned/resolved*100 : null,
-    rejectRate: resolved>0 ? v.rejected/resolved*100 : null,
+    deliveryRate: v.deliveryRate,
+    returnRate: v.returnRate,
+    rejectRate: v.rejectedRate,
     inProgressRate: v.count>0 ? pending/v.count*100 : null,
-    slaPct: dwd>0 ? v.withinSla/dwd*100 : null,
+    slaPct: v.slaPct,
   };
 }
 
@@ -3279,13 +3349,13 @@ function mgmtEntryMovement(entry, months){
   const wasActiveFirstOverallMonth = !!(entry.byMonth && entry.byMonth[months[0]]);
   const isActiveLastOverallMonth = !!(entry.byMonth && entry.byMonth[months[months.length-1]]);
 
-  let status = 'مستقر (Stable)';
-  if(!wasActiveFirstOverallMonth && isActiveLastOverallMonth && activeMonths.length < months.length) status = 'عميل جديد (New)';
-  else if(wasActiveFirstOverallMonth && !isActiveLastOverallMonth) status = 'متوقف (Inactive)';
-  else if(deliveryRateChange!==null && deliveryRateChange <= -5) status = 'تراجع أداء (Performance Declined)';
-  else if(deliveryRateChange!==null && deliveryRateChange >= 5) status = 'تحسن أداء (Performance Improved)';
-  else if(volumeChangePct!==null && volumeChangePct <= -20) status = 'تراجع حجم (Declining)';
-  else if(volumeChangePct!==null && volumeChangePct >= 20) status = 'نمو حجم (Growing)';
+  let status = 'مستقر';
+  if(!wasActiveFirstOverallMonth && isActiveLastOverallMonth && activeMonths.length < months.length) status = 'جديد';
+  else if(wasActiveFirstOverallMonth && !isActiveLastOverallMonth) status = 'متوقف';
+  else if(deliveryRateChange!==null && deliveryRateChange <= -5) status = 'تراجع أداء';
+  else if(deliveryRateChange!==null && deliveryRateChange >= 5) status = 'تحسن أداء';
+  else if(volumeChangePct!==null && volumeChangePct <= -20) status = 'تراجع حجم';
+  else if(volumeChangePct!==null && volumeChangePct >= 20) status = 'نمو حجم';
 
   return { firstMonth, lastMonth, firstRates, lastRates, volumeChange, volumeChangePct, deliveryRateChange, returnRateChange, status };
 }
@@ -3367,17 +3437,22 @@ function pdfKpiGrid(doc, font, y, cards){
     doc.rect(bx, by, boxW, boxH);
     doc.setFontSize(8); doc.setFont(font,'normal'); doc.setTextColor(90,96,105);
     doc.text(String(c.label), bx+boxW-8, by+16, {align:'right', isInputRtl:true});
-    doc.setFontSize(15); doc.setFont(font,'bold'); doc.setTextColor(20,20,20);
+    doc.setFontSize(15); doc.setFont(font,'bold');
+    const vcol = c.valueColor || [20,20,20];
+    doc.setTextColor(vcol[0],vcol[1],vcol[2]);
     doc.text(String(c.value), bx+boxW-8, by+34, {align:'right', isInputRtl:true});
     if(c.sub){
-      doc.setFontSize(9.5); doc.setFont(font,'bold'); doc.setTextColor(14,124,85);
+      const col = c.subColor || [14,124,85];
+      doc.setFontSize(9.5); doc.setFont(font,'bold'); doc.setTextColor(col[0],col[1],col[2]);
       doc.text(String(c.sub), bx+8, by+34, {align:'left'});
     }
   });
   return startY + Math.ceil(cards.length/cols)*(boxH+gap);
 }
 // columns[0] is drawn at the RIGHT edge of the table (natural Arabic reading
-// order) — column layout is computed right-to-left.
+// order) — column layout is computed right-to-left. A cell may be a plain
+// string/number (default black text, unchanged behavior) or a
+// {text, color:[r,g,b]} object for status-colored rate cells.
 function pdfDrawTable(doc, font, y, columns, rows){
   const rowH = 15, headerH = 18, fontSize = 7.3;
   let colXFromRight = [PDF_RIGHT];
@@ -3410,14 +3485,46 @@ function pdfDrawTable(doc, font, y, columns, rows){
     row.forEach((cell,ci)=>{
       const align = columns[ci].align||'center';
       const cx = align==='right'?cellRightEdge(ci)-3 : align==='left'?cellLeftEdge(ci)+3 : (cellLeftEdge(ci)+cellRightEdge(ci))/2;
-      let text = String(cell===null||cell===undefined?'-':cell);
+      const isColored = cell && typeof cell === 'object' && 'text' in cell;
+      const rawVal = isColored ? cell.text : cell;
+      let text = String(rawVal===null||rawVal===undefined?'-':rawVal);
       const maxChars = Math.max(3, Math.floor(columns[ci].width/(fontSize*0.55)));
       if(text.length>maxChars) text = text.slice(0,maxChars-1)+'…';
+      if(isColored && cell.color){ doc.setTextColor(cell.color[0],cell.color[1],cell.color[2]); }
       doc.text(text, cx, y+rowH/2+3, {align, isInputRtl:true});
+      if(isColored && cell.color){ doc.setTextColor(20,20,20); } // restore default for the next cell
     });
     y += rowH;
   });
   return y + 14;
+}
+// Draws a bold label immediately followed by its table, checking that BOTH
+// fit together before starting either — never leaves the label orphaned at
+// the bottom of a page with its table beginning on the next one.
+function pdfLabelAndTable(doc, font, y, label, columns, rows){
+  const estRowH = 15, estHeaderH = 18, estLabelH = 13+4;
+  const estTableH = estHeaderH + estRowH*Math.max(1, Math.min(rows.length,3));
+  y = pdfCheckPageBreak(doc, y, estLabelH + estTableH);
+  y = pdfParagraph(doc, font, y, label, {bold:true, gap:4});
+  return pdfDrawTable(doc, font, y, columns, rows);
+}
+// Reuses mgmtStatusTag's EXACT thresholds (same function Excel's conditional
+// formatting uses) mapped to a professional, muted RGB instead of an emoji —
+// the embedded Arabic text font has no emoji glyphs, so native text color is
+// the correct PDF equivalent, and guarantees identical thresholds to Excel.
+function pdfStatusColor(value, kpiType){
+  const tag = mgmtStatusTag(value, kpiType);
+  if(tag==='🟢') return [16,129,79];
+  if(tag==='🟡') return [180,130,10];
+  if(tag==='🔴') return [178,34,34];
+  return null;
+}
+// PDF-side equivalent of mgmtRateCell — a colored {text,color} cell, or an
+// explicit non-numeric state (never a blank, never a fake 0%) when the rate
+// could not be computed.
+function pdfRateCell(value, kpiType){
+  if(value===null || value===undefined || isNaN(value)) return { text:'—', color:null };
+  return { text: fmtPct(value), color: pdfStatusColor(value, kpiType) };
 }
 
 function mgmtCompanyAvgSentence(name, count, rate, companyAvg, verb){
@@ -3453,7 +3560,7 @@ async function mgmtGenerateExecutivePdfReport(){
     const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
     const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume>=minBranchVol);
     const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume>=minCustVol);
-    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'كل الشهور (All Months)' : (months.length>1 ? `${months[0]} — ${months[months.length-1]}` : months[0]);
+    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'كل الشهور' : (months.length>1 ? `${months[0]} — ${months[months.length-1]}` : months[0]);
 
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF('p','pt','a4');
@@ -3471,11 +3578,11 @@ async function mgmtGenerateExecutivePdfReport(){
     y = pdfSectionTitle(doc, font, y, 'الملخص التنفيذي');
     y = pdfKpiGrid(doc, font, y, [
       {label:'إجمالي الشحنات', value:fmtInt(overall.total)},
-      {label:'تم التسليم', value:fmtInt(overall.delivered), sub:fmtPct(overall.deliveryRate)},
-      {label:'المرتجعات', value:fmtInt(overall.returned), sub:fmtPct(overall.returnRate)},
-      {label:'الرفض', value:fmtInt(overall.rejected), sub:fmtPct(overall.rejectedRate)},
-      {label:'قيد التشغيل', value:fmtInt(overall.pending), sub:fmtPct(overall.inProgressRate)},
-      {label:'SLA %', value:fmtPct(overall.slaAchievement)},
+      {label:'تم التسليم', value:fmtInt(overall.delivered), sub:fmtPct(overall.deliveryRate), subColor:pdfStatusColor(overall.deliveryRate,'delivery')||[14,124,85]},
+      {label:'المرتجعات', value:fmtInt(overall.returned), sub:fmtPct(overall.returnRate), subColor:pdfStatusColor(overall.returnRate,'return')||[14,124,85]},
+      {label:'الرفض', value:fmtInt(overall.rejected), sub:fmtPct(overall.rejectedRate), subColor:pdfStatusColor(overall.rejectedRate,'reject')||[14,124,85]},
+      {label:'قيد التشغيل', value:fmtInt(overall.pending), sub:fmtPct(overall.inProgressRate), subColor:pdfStatusColor(overall.inProgressRate,'inprogress')||[14,124,85]},
+      {label:'SLA %', value:fmtPct(overall.slaAchievement), valueColor:pdfStatusColor(overall.slaAchievement,'sla')||[20,20,20]},
     ]);
     y += 6;
     y = pdfParagraph(doc, font, y, `خلال الفترة المختارة (${periodLabel})، بلغ إجمالي الشحنات ${fmtInt(overall.total)} شحنة، بنسبة تسليم ${fmtPct(overall.deliveryRate)} والتزام SLA بنسبة ${fmtPct(overall.slaAchievement)}. يستعرض هذا التقرير ${findings.length} من أهم الملاحظات التشغيلية مع التوصيات المقترحة في الصفحات التالية.`, {gap:10});
@@ -3485,32 +3592,37 @@ async function mgmtGenerateExecutivePdfReport(){
     y = pdfSectionTitle(doc, font, y, 'مقارنة الأداء الشهري');
     const monthlyData = months.map(m=>{
       const md = MGMT.monthsData[m]; const k = md && md.summary && md.summary.kpis;
-      if(!k) return null;
-      const pending=k.pending||0; const ipr = k.total>0?pending/k.total*100:null;
-      return { month:m, total:k.total, delivered:k.delivered, deliveryRate:k.deliveryRate, returned:k.returned, returnRate:k.returnRate,
-        rejected:k.rejected, rejectedRate:k.rejectedRate, pending, ipr, sla:k.slaAchievement };
-    }).filter(Boolean);
+      return { month:m, k };
+    });
     y = pdfDrawTable(doc, font, y, [
       {header:'الشهر',width:56,align:'right'},{header:'الإجمالي',width:46},{header:'تم التسليم',width:46},{header:'التسليم %',width:42},
       {header:'مرتجعات',width:46},{header:'المرتجعات %',width:44},{header:'رفض',width:40},{header:'الرفض %',width:40},
       {header:'قيد التشغيل',width:44},{header:'SLA %',width:40},
-    ], monthlyData.map(r=>[r.month, fmtInt(r.total), fmtInt(r.delivered), fmtPct(r.deliveryRate), fmtInt(r.returned), fmtPct(r.returnRate),
-      fmtInt(r.rejected), fmtPct(r.rejectedRate), fmtInt(r.pending), r.sla!==null?fmtPct(r.sla):'-']));
+    ], monthlyData.map(r=>{
+      if(!r.k) return [r.month, 'لا توجد بيانات','','','','','','','',''];
+      const k = r.k;
+      if(!k.total) return [r.month, 0, 'لا توجد عمليات تسليم','',0,'',0,'',0,''];
+      const pending = k.pending||0; const ipr = k.total>0?pending/k.total*100:null;
+      return [r.month, fmtInt(k.total), fmtInt(k.delivered), pdfRateCell(k.deliveryRate,'delivery'),
+        fmtInt(k.returned), pdfRateCell(k.returnRate,'return'), fmtInt(k.rejected), pdfRateCell(k.rejectedRate,'reject'),
+        fmtInt(pending), pdfRateCell(k.slaAchievement,'sla')];
+    }));
 
-    if(hasComparisonPeriod && monthlyData.length>1){
-      const bestDelivery = [...monthlyData].sort((a,b)=>(b.deliveryRate??-1)-(a.deliveryRate??-1))[0];
-      const worstDelivery = [...monthlyData].sort((a,b)=>(a.deliveryRate??999)-(b.deliveryRate??999))[0];
-      const worstReturn = [...monthlyData].sort((a,b)=>(b.returnRate??-1)-(a.returnRate??-1))[0];
-      const first = monthlyData[0], last = monthlyData[monthlyData.length-1];
-      const deliveryImprovement = (first.deliveryRate!==null && last.deliveryRate!==null) ? last.deliveryRate-first.deliveryRate : null;
+    const monthsWithData = monthlyData.filter(r=>r.k);
+    if(hasComparisonPeriod && monthsWithData.length>1){
+      const bestDelivery = [...monthsWithData].sort((a,b)=>(b.k.deliveryRate??-1)-(a.k.deliveryRate??-1))[0];
+      const worstDelivery = [...monthsWithData].sort((a,b)=>(a.k.deliveryRate??999)-(b.k.deliveryRate??999))[0];
+      const worstReturn = [...monthsWithData].sort((a,b)=>(b.k.returnRate??-1)-(a.k.returnRate??-1))[0];
+      const first = monthsWithData[0], last = monthsWithData[monthsWithData.length-1];
+      const deliveryImprovement = (first.k.deliveryRate!==null && last.k.deliveryRate!==null) ? last.k.deliveryRate-first.k.deliveryRate : null;
       y += 4;
-      y = pdfParagraph(doc, font, y, `أفضل شهر من حيث نسبة التسليم: ${bestDelivery.month} بنسبة ${fmtPct(bestDelivery.deliveryRate)}.`, {gap:4});
-      y = pdfParagraph(doc, font, y, `أقل شهر من حيث نسبة التسليم: ${worstDelivery.month} بنسبة ${fmtPct(worstDelivery.deliveryRate)}.`, {gap:4});
-      y = pdfParagraph(doc, font, y, `أعلى شهر في نسبة المرتجعات: ${worstReturn.month} بنسبة ${fmtPct(worstReturn.returnRate)}.`, {gap:4});
+      y = pdfParagraph(doc, font, y, `أفضل شهر من حيث نسبة التسليم: ${bestDelivery.month} بنسبة ${fmtPct(bestDelivery.k.deliveryRate)}.`, {gap:4});
+      y = pdfParagraph(doc, font, y, `أقل شهر من حيث نسبة التسليم: ${worstDelivery.month} بنسبة ${fmtPct(worstDelivery.k.deliveryRate)}.`, {gap:4});
+      y = pdfParagraph(doc, font, y, `أعلى شهر في نسبة المرتجعات: ${worstReturn.month} بنسبة ${fmtPct(worstReturn.k.returnRate)}.`, {gap:4});
       if(deliveryImprovement!==null){
         y = pdfParagraph(doc, font, y, deliveryImprovement>=0
-          ? `أكبر تحسن على مستوى الفترة: ارتفعت نسبة التسليم من ${fmtPct(first.deliveryRate)} في ${first.month} إلى ${fmtPct(last.deliveryRate)} في ${last.month} (+${fmtPct(deliveryImprovement,1)} نقطة).`
-          : `أكبر تراجع على مستوى الفترة: انخفضت نسبة التسليم من ${fmtPct(first.deliveryRate)} في ${first.month} إلى ${fmtPct(last.deliveryRate)} في ${last.month} (${fmtPct(deliveryImprovement,1)} نقطة).`, {gap:4});
+          ? `أكبر تحسن على مستوى الفترة: ارتفعت نسبة التسليم من ${fmtPct(first.k.deliveryRate)} في ${first.month} إلى ${fmtPct(last.k.deliveryRate)} في ${last.month} (+${fmtPct(deliveryImprovement,1)} نقطة).`
+          : `أكبر تراجع على مستوى الفترة: انخفضت نسبة التسليم من ${fmtPct(first.k.deliveryRate)} في ${first.month} إلى ${fmtPct(last.k.deliveryRate)} في ${last.month} (${fmtPct(deliveryImprovement,1)} نقطة).`, {gap:4});
       }
     }else{
       y = pdfParagraph(doc, font, y, 'لا توجد فترة مقارنة متاحة (شهر واحد فقط محدد).', {gap:4});
@@ -3525,22 +3637,22 @@ async function mgmtGenerateExecutivePdfReport(){
         {header:'مرتجعات',width:42},{header:'المرتجعات %',width:40},{header:'رفض',width:36},{header:'الرفض %',width:36},
         {header:'قيد التشغيل',width:38},{header:'SLA %',width:36},
       ];
-      const branchRow = e => [e.name, fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), fmtPct(e.stats.deliveryRate),
-        fmtInt(e.stats.returned), fmtPct(e.stats.returnRate), fmtInt(e.stats.rejected), fmtPct(e.stats.rejectRate),
-        fmtInt(e.stats.pending), e.stats.slaPct!==null?fmtPct(e.stats.slaPct):'-'];
-      y = pdfParagraph(doc, font, y, `أفضل 5 فروع حسب نسبة التسليم (بحد أدنى ${fmtInt(minBranchVol)} شحنة)`, {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, branchCols, [...eligibleBranches].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1)).slice(0,5).map(branchRow));
-      y = pdfParagraph(doc, font, y, 'أقل 5 فروع حسب نسبة التسليم', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, branchCols, [...eligibleBranches].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(branchRow));
-      y = pdfParagraph(doc, font, y, 'أعلى 5 فروع في نسبة المرتجعات', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, branchCols, [...eligibleBranches].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(branchRow));
-      y = pdfParagraph(doc, font, y, 'أعلى 5 فروع في نسبة الرفض', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, branchCols, [...eligibleBranches].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1)).slice(0,5).map(branchRow));
+      const branchRow = e => [mgmtCleanEntityName(e.name), fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), pdfRateCell(e.stats.deliveryRate,'delivery'),
+        fmtInt(e.stats.returned), pdfRateCell(e.stats.returnRate,'return'), fmtInt(e.stats.rejected), pdfRateCell(e.stats.rejectRate,'reject'),
+        fmtInt(e.stats.pending), pdfRateCell(e.stats.slaPct,'sla')];
+      y = pdfLabelAndTable(doc, font, y, `أفضل 5 فروع حسب نسبة التسليم (بحد أدنى ${fmtInt(minBranchVol)} شحنة)`, branchCols,
+        [...eligibleBranches].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1)).slice(0,5).map(branchRow));
+      y = pdfLabelAndTable(doc, font, y, 'أقل 5 فروع حسب نسبة التسليم', branchCols,
+        [...eligibleBranches].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(branchRow));
+      y = pdfLabelAndTable(doc, font, y, 'أعلى 5 فروع في نسبة المرتجعات', branchCols,
+        [...eligibleBranches].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(branchRow));
+      y = pdfLabelAndTable(doc, font, y, 'أعلى 5 فروع في نسبة الرفض', branchCols,
+        [...eligibleBranches].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1)).slice(0,5).map(branchRow));
       const withSlaB = eligibleBranches.filter(e=>e.stats.slaPct!==null);
-      y = pdfParagraph(doc, font, y, 'أقل 5 فروع في SLA', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, branchCols, [...withSlaB].sort((a,b)=>a.stats.slaPct-b.stats.slaPct).slice(0,5).map(branchRow));
+      y = pdfLabelAndTable(doc, font, y, 'أقل 5 فروع في SLA', branchCols,
+        [...withSlaB].sort((a,b)=>a.stats.slaPct-b.stats.slaPct).slice(0,5).map(branchRow));
 
-      const branchFindings = findings.filter(f=>['Returns','Rejects','Delivery','SLA','Performance'].includes(f.category) && branchEntries.some(be=>be.name===f.entity));
+      const branchFindings = findings.filter(f=>['Returns','Rejects','Delivery','SLA','Performance'].includes(f.category) && branchEntries.some(be=>mgmtCleanEntityName(be.name)===f.entity));
       if(branchFindings.length){
         y += 4;
         branchFindings.forEach(f=> { y = pdfParagraph(doc, font, y, f.text, {gap:4}); });
@@ -3548,19 +3660,19 @@ async function mgmtGenerateExecutivePdfReport(){
 
       // PAGE — حركة الفروع
       doc.addPage(); y = PDF_MARGIN;
-      y = pdfSectionTitle(doc, font, y, 'حركة الفروع (Branch Movement)');
+      y = pdfSectionTitle(doc, font, y, 'حركة الفروع');
       if(!hasComparisonPeriod){
         y = pdfParagraph(doc, font, y, 'لا توجد فترة مقارنة متاحة (شهر واحد فقط محدد).', {gap:4});
       }else{
-        const movements = eligibleBranches.map(e=>({name:e.name, mv:mgmtEntryMovement(e, months)})).filter(m=>m.mv);
-        y = pdfParagraph(doc, font, y, 'أ) حركة الحجم (Volume Movement)', {bold:true, gap:6, color:[44,66,87]});
+        const movements = eligibleBranches.map(e=>({name:mgmtCleanEntityName(e.name), mv:mgmtEntryMovement(e, months)})).filter(m=>m.mv);
+        y = pdfParagraph(doc, font, y, 'أ) حركة الحجم', {bold:true, gap:6, color:[44,66,87]});
         const byVolChange = [...movements].filter(m=>m.mv.volumeChangePct!==null).sort((a,b)=>b.mv.volumeChangePct-a.mv.volumeChangePct);
         if(byVolChange.length){
           const top = byVolChange[0], bottom = byVolChange[byVolChange.length-1];
           y = pdfParagraph(doc, font, y, `أكبر نمو في الحجم: ${top.name} من ${fmtInt(top.mv.firstRates.count)} إلى ${fmtInt(top.mv.lastRates.count)} شحنة (${fmtPct(top.mv.volumeChangePct,1)}).`, {gap:4});
           y = pdfParagraph(doc, font, y, `أكبر تراجع في الحجم: ${bottom.name} من ${fmtInt(bottom.mv.firstRates.count)} إلى ${fmtInt(bottom.mv.lastRates.count)} شحنة (${fmtPct(bottom.mv.volumeChangePct,1)}).`, {gap:8});
         }
-        y = pdfParagraph(doc, font, y, 'ب) حركة الأداء (Performance Movement) — منفصلة عن حركة الحجم', {bold:true, gap:6, color:[44,66,87]});
+        y = pdfParagraph(doc, font, y, 'ب) حركة الأداء — منفصلة عن حركة الحجم', {bold:true, gap:6, color:[44,66,87]});
         const byDelChange = [...movements].filter(m=>m.mv.deliveryRateChange!==null).sort((a,b)=>b.mv.deliveryRateChange-a.mv.deliveryRateChange);
         if(byDelChange.length){
           const top = byDelChange[0], bottom = byDelChange[byDelChange.length-1];
@@ -3585,27 +3697,27 @@ async function mgmtGenerateExecutivePdfReport(){
         {header:'مرتجعات',width:40},{header:'المرتجعات %',width:38},{header:'رفض',width:34},{header:'الرفض %',width:34},
         {header:'قيد التشغيل',width:36},{header:'SLA %',width:34},
       ];
-      const custRow = e => [e.name, fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), fmtPct(e.stats.deliveryRate),
-        fmtInt(e.stats.returned), fmtPct(e.stats.returnRate), fmtInt(e.stats.rejected), fmtPct(e.stats.rejectRate),
-        fmtInt(e.stats.pending), e.stats.slaPct!==null?fmtPct(e.stats.slaPct):'-'];
-      y = pdfParagraph(doc, font, y, 'أكبر العملاء من حيث الحجم', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, custCols, [...customerEntries].sort((a,b)=>b.stats.totalVolume-a.stats.totalVolume).slice(0,10).map(custRow));
-      y = pdfParagraph(doc, font, y, `أفضل العملاء في نسبة التسليم (بحد أدنى ${fmtInt(minCustVol)} شحنة)`, {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, custCols, [...eligibleCustomers].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1)).slice(0,5).map(custRow));
-      y = pdfParagraph(doc, font, y, 'أعلى العملاء في نسبة المرتجعات', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, custCols, [...eligibleCustomers].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(custRow));
-      y = pdfParagraph(doc, font, y, 'أعلى العملاء في نسبة الرفض', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, custCols, [...eligibleCustomers].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1)).slice(0,5).map(custRow));
-      y = pdfParagraph(doc, font, y, 'عملاء يحتاجون متابعة (أقل نسبة تسليم)', {bold:true, gap:4});
-      y = pdfDrawTable(doc, font, y, custCols, [...eligibleCustomers].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(custRow));
+      const custRow = e => [mgmtCleanEntityName(e.name), fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), pdfRateCell(e.stats.deliveryRate,'delivery'),
+        fmtInt(e.stats.returned), pdfRateCell(e.stats.returnRate,'return'), fmtInt(e.stats.rejected), pdfRateCell(e.stats.rejectRate,'reject'),
+        fmtInt(e.stats.pending), pdfRateCell(e.stats.slaPct,'sla')];
+      y = pdfLabelAndTable(doc, font, y, 'أكبر العملاء من حيث الحجم', custCols,
+        [...customerEntries].sort((a,b)=>b.stats.totalVolume-a.stats.totalVolume).slice(0,10).map(custRow));
+      y = pdfLabelAndTable(doc, font, y, `أفضل العملاء في نسبة التسليم (بحد أدنى ${fmtInt(minCustVol)} شحنة)`, custCols,
+        [...eligibleCustomers].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1)).slice(0,5).map(custRow));
+      y = pdfLabelAndTable(doc, font, y, 'أعلى العملاء في نسبة المرتجعات', custCols,
+        [...eligibleCustomers].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(custRow));
+      y = pdfLabelAndTable(doc, font, y, 'أعلى العملاء في نسبة الرفض', custCols,
+        [...eligibleCustomers].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1)).slice(0,5).map(custRow));
+      y = pdfLabelAndTable(doc, font, y, 'عملاء يحتاجون متابعة (أقل نسبة تسليم)', custCols,
+        [...eligibleCustomers].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(custRow));
 
       // PAGE — حركة العملاء (إلزامية)
       doc.addPage(); y = PDF_MARGIN;
-      y = pdfSectionTitle(doc, font, y, 'حركة العملاء (Customer Movement)');
+      y = pdfSectionTitle(doc, font, y, 'حركة العملاء');
       if(!hasComparisonPeriod){
         y = pdfParagraph(doc, font, y, 'لا توجد فترة مقارنة متاحة (شهر واحد فقط محدد).', {gap:4});
       }else{
-        const custMovements = eligibleCustomers.map(e=>({name:e.name, mv:mgmtEntryMovement(e, months)})).filter(m=>m.mv);
+        const custMovements = eligibleCustomers.map(e=>({name:mgmtCleanEntityName(e.name), mv:mgmtEntryMovement(e, months)})).filter(m=>m.mv);
         const newCustomers = custMovements.filter(m=>m.mv.status.includes('جديد'));
         const stopped = custMovements.filter(m=>m.mv.status.includes('متوقف'));
         const grown = [...custMovements].filter(m=>m.mv.volumeChangePct!==null && m.mv.volumeChangePct>0).sort((a,b)=>b.mv.volumeChangePct-a.mv.volumeChangePct);
@@ -3646,6 +3758,16 @@ async function mgmtGenerateExecutivePdfReport(){
       y = pdfParagraph(doc, font, y, 'لا توجد توصيات محددة — لم يتم رصد ملاحظات ذات دلالة خلال هذه الفترة.');
     }
 
+    // Page numbers + footer (report period) — applied last, once the final
+    // page count is known, to every page including the first.
+    const totalPages = doc.internal.getNumberOfPages();
+    for(let p=1; p<=totalPages; p++){
+      doc.setPage(p);
+      doc.setFont(font,'normal'); doc.setFontSize(8); doc.setTextColor(140,146,155);
+      doc.text(`تقرير الأداء الإداري — ${periodLabel}`, PDF_MARGIN, PDF_PAGE_H-20, {align:'left'});
+      doc.text(`صفحة ${p} من ${totalPages}`, PDF_RIGHT, PDF_PAGE_H-20, {align:'right', isInputRtl:true});
+    }
+
     const safePeriod = periodLabel.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_');
     doc.save(`Management_Executive_Report_${safePeriod}.pdf`);
   }catch(err){
@@ -3672,28 +3794,38 @@ async function mgmtGenerateExecutivePdfReport(){
 // movement sections and the Overall/Movement sheet below use, so all three
 // can never disagree. A month with no data for that entity is left BLANK
 // (never an assumed zero), per the existing missing-data rule.
+// ROTATED comparison matrix: KPI names down column A, each entity is a
+// merged column-group header with its selected months as sub-columns
+// beneath it (never repeating the entity name once per month). Uses
+// mgmtEntryMonthRates() per entity/month — the SAME authoritative rate
+// fields (deliveryRate/returnRate/rejectedRate/slaPct) Code.gs already
+// computed for that entity, not a frontend re-derivation — this is what
+// guarantees this sheet, the Executive Summary, and the PDF can never show
+// different numbers for the same entity/month. Every missing cell shows an
+// explicit reason (see mgmtBlankState) instead of a silent blank or a
+// fabricated zero. Rate cells include a status tag (see mgmtStatusTag) —
+// the intended visual replacement for real Excel conditional formatting,
+// which the community edition of the loaded xlsx library cannot reliably
+// persist to a written .xlsx file (see final report).
 function mgmtBuildRotatedComparisonSheet(entries, months, entityLabel){
   const kpiDefs = [
-    {label:'إجمالي الشحنات', isPct:false, get:r=>r?r.count:null},
-    {label:'تم التسليم', isPct:false, get:r=>r?r.delivered:null},
-    {label:'نسبة التسليم', isPct:true, get:r=>r?r.deliveryRate:null},
-    {label:'المرتجعات', isPct:false, get:r=>r?r.returned:null},
-    {label:'نسبة المرتجعات', isPct:true, get:r=>r?r.returnRate:null},
-    {label:'الرفض', isPct:false, get:r=>r?r.rejected:null},
-    {label:'نسبة الرفض', isPct:true, get:r=>r?r.rejectRate:null},
-    {label:'قيد التشغيل', isPct:false, get:r=>r?r.pending:null},
-    {label:'نسبة قيد التشغيل', isPct:true, get:r=>r?r.inProgressRate:null},
-    {label:'SLA %', isPct:true, get:r=>r?r.slaPct:null},
+    {label:'إجمالي الشحنات', kind:'count', get:r=>r?r.count:null},
+    {label:'تم التسليم', kind:'count', get:r=>r?r.delivered:null},
+    {label:'نسبة التسليم', kind:'rate', tag:'delivery', get:r=>r?r.deliveryRate:null},
+    {label:'المرتجعات', kind:'count', get:r=>r?r.returned:null},
+    {label:'نسبة المرتجعات', kind:'rate', tag:'return', get:r=>r?r.returnRate:null},
+    {label:'الرفض', kind:'count', get:r=>r?r.rejected:null},
+    {label:'نسبة الرفض', kind:'rate', tag:'reject', get:r=>r?r.rejectRate:null},
+    {label:'قيد التشغيل', kind:'count', get:r=>r?r.pending:null},
+    {label:'نسبة قيد التشغيل', kind:'rate', tag:'inprogress', get:r=>r?r.inProgressRate:null},
+    {label:'SLA %', kind:'rate', tag:'sla', get:r=>r?r.slaPct:null},
   ];
 
-  // Row 1: entity name once, spanning its month columns. Row 2: months
-  // under that entity. Single-month mode naturally produces one column per
-  // entity (no empty month columns), since `months` is already exactly the
-  // selected period's month list either way.
   const headerRow1 = [entityLabel];
   const headerRow2 = [''];
   entries.forEach(e=>{
-    headerRow1.push(e.name, ...Array(Math.max(0, months.length-1)).fill(''));
+    const name = mgmtCleanEntityName(e.name);
+    headerRow1.push(name, ...Array(Math.max(0, months.length-1)).fill(''));
     headerRow2.push(...months);
   });
 
@@ -3702,17 +3834,18 @@ function mgmtBuildRotatedComparisonSheet(entries, months, entityLabel){
     entries.forEach(e=>{
       months.forEach(m=>{
         const r = mgmtEntryMonthRates(e.entry || e, m);
+        if(!r){ row.push(mgmtBlankState('nodata')); return; }
         const v = def.get(r);
-        row.push(v===null||v===undefined ? '' : (def.isPct ? pct1(v) : v));
+        if(def.kind === 'rate'){ row.push(mgmtRateCell(v, def.tag)); return; }
+        // count cell: 0 is a real, valid value (e.g. zero rejections) — only
+        // a genuinely missing/null value gets an explicit blank state.
+        row.push(v===null||v===undefined ? mgmtBlankState('incomplete') : v);
       });
     });
     return row;
   });
 
   const ws = XLSX.utils.aoa_to_sheet([headerRow1, headerRow2, ...dataRows]);
-
-  // Merge each entity's name across its month columns (row 0), and the KPI
-  // label column across both header rows (column 0).
   const merges = [{s:{r:0,c:0}, e:{r:1,c:0}}];
   let col = 1;
   entries.forEach(()=>{
@@ -3720,37 +3853,69 @@ function mgmtBuildRotatedComparisonSheet(entries, months, entityLabel){
     col += months.length;
   });
   ws['!merges'] = merges;
-  // Freeze BOTH the KPI label column and the two header rows, so scrolling
-  // horizontally through many branches/customers still keeps the KPI names
-  // and month/entity headers visible.
   ws['!freeze'] = { xSplit:1, ySplit:2 };
-  ws['!cols'] = [{wch:20}, ...Array(Math.max(0, col-1)).fill({wch:11})];
+  ws['!cols'] = [{wch:20}, ...Array(Math.max(0, col-1)).fill({wch:13})];
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:1,c:0}, e:{r:1,c:col-1}}) };
   return ws;
 }
 
-// Entity rows (one per branch/customer) with ONLY overall period totals and
-// movement — kept as a SEPARATE sheet from the monthly matrix above so that
-// sheet stays a clean, uncluttered KPI-by-month grid.
-function mgmtBuildOverallMovementSheet(entries, months, entityLabel){
-  const hasComparison = months.length > 1;
-  const header = [entityLabel, 'Overall Total','Overall Delivery %','Overall Return %','Overall Reject %','Overall In Progress %','Overall SLA %'];
-  if(hasComparison) header.push('Volume Change','Volume Change %','Delivery Rate Change','Return Rate Change');
-  const rows = [header];
-  entries.forEach(e=>{
-    const s = e.stats;
-    const row = [e.name, s.totalVolume, pct1(s.deliveryRate), pct1(s.returnRate), pct1(s.rejectRate), pct1(s.inProgressRate), pct1(s.slaPct)];
-    if(hasComparison){
-      const mv = mgmtEntryMovement(e.entry || e, months);
-      if(mv) row.push(mv.volumeChange, pct1(mv.volumeChangePct), pct1(mv.deliveryRateChange), pct1(mv.returnRateChange));
-      else row.push('','','','لا توجد فترة مقارنة متاحة');
-    }
-    rows.push(row);
-  });
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!freeze'] = { xSplit:1, ySplit:1 };
-  ws['!cols'] = [{wch:22}, ...Array(header.length-1).fill({wch:14})];
-  return ws;
+// Converts branch/customer movement into the SAME {priority, category,
+// entity, issue, count, rate, text, action} shape mgmtComputeFindings
+// produces, so movement insights fold into the single "النتائج والتوصيات"
+// sheet instead of needing their own tabs. Only produced when a real
+// comparison period exists (months.length > 1) — never a fabricated
+// movement finding for a single selected month.
+function mgmtComputeMovementFindings(months, branchEntries, customerEntries){
+  const findings = [];
+  if(months.length <= 1) return findings;
+  const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
+  const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
+  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol);
+  const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol);
+
+  const branchMoves = eligibleBranches.map(e=>({name:mgmtCleanEntityName(e.name), mv:mgmtEntryMovement(e.entry||e, months)})).filter(m=>m.mv);
+  const custMoves = eligibleCustomers.map(e=>({name:mgmtCleanEntityName(e.name), mv:mgmtEntryMovement(e.entry||e, months)})).filter(m=>m.mv);
+
+  const newCustomers = custMoves.filter(m=>m.mv.status==='جديد');
+  if(newCustomers.length){
+    findings.push({priority:'Info', category:'Growth', entity: newCustomers.map(c=>c.name).slice(0,3).join('، '),
+      issue:'New Customers', count:newCustomers.length, rate:null,
+      text:`ظهر ${newCustomers.length} عميل جديد خلال الفترة المختارة (منهم: ${newCustomers.slice(0,3).map(c=>c.name).join('، ')}).`,
+      action:'متابعة استمرارية العملاء الجدد والتأكد من جودة خدمتهم في الفترة القادمة.'});
+  }
+  const stopped = custMoves.filter(m=>m.mv.status==='متوقف');
+  if(stopped.length){
+    findings.push({priority:'High', category:'Growth', entity: stopped.map(c=>c.name).slice(0,3).join('، '),
+      issue:'Stopped Customers', count:stopped.length, rate:null,
+      text:`توقف ${stopped.length} عميل عن النشاط خلال الفترة المختارة (منهم: ${stopped.slice(0,3).map(c=>c.name).join('، ')}).`,
+      action:'يتطلب مراجعة تشغيلية لمعرفة سبب توقف هؤلاء العملاء والتواصل معهم.'});
+  }
+  const decliningVol = [...branchMoves, ...custMoves].filter(m=>m.mv.volumeChangePct!==null && m.mv.volumeChangePct<=-20).sort((a,b)=>a.mv.volumeChangePct-b.mv.volumeChangePct);
+  if(decliningVol.length){
+    const worst = decliningVol[0];
+    findings.push({priority:'Medium', category:'Growth', entity:worst.name, issue:'Volume Decline', count:worst.mv.volumeChange, rate:worst.mv.volumeChangePct,
+      text:`انخفض حجم "${worst.name}" من ${fmtInt(worst.mv.firstRates.count)} إلى ${fmtInt(worst.mv.lastRates.count)} شحنة (${fmtPct(worst.mv.volumeChangePct,1)}) بين ${worst.mv.firstMonth} و${worst.mv.lastMonth}.`,
+      action:`يتطلب مراجعة تشغيلية لتحديد سبب تراجع حجم "${worst.name}".`});
+  }
+  const decliningPerf = [...branchMoves, ...custMoves].filter(m=>m.mv.deliveryRateChange!==null && m.mv.deliveryRateChange<=-5).sort((a,b)=>a.mv.deliveryRateChange-b.mv.deliveryRateChange);
+  if(decliningPerf.length){
+    const worst = decliningPerf[0];
+    findings.push({priority:'High', category:'Delivery', entity:worst.name, issue:'Performance Decline', count:null, rate:worst.mv.deliveryRateChange,
+      text:`تراجعت نسبة التسليم لـ"${worst.name}" من ${fmtPct(worst.mv.firstRates.deliveryRate)} إلى ${fmtPct(worst.mv.lastRates.deliveryRate)} بين ${worst.mv.firstMonth} و${worst.mv.lastMonth} — ملاحظة: هذا تراجع في الأداء منفصل عن أي تغيّر في حجم الشحنات.`,
+      action:`يتطلب مراجعة تشغيلية لتحديد سبب تراجع أداء التسليم لـ"${worst.name}".`});
+  }
+  const improvingPerf = [...branchMoves, ...custMoves].filter(m=>m.mv.deliveryRateChange!==null && m.mv.deliveryRateChange>=5).sort((a,b)=>b.mv.deliveryRateChange-a.mv.deliveryRateChange);
+  if(improvingPerf.length){
+    const best = improvingPerf[0];
+    findings.push({priority:'Info', category:'Performance', entity:best.name, issue:'Performance Improvement', count:null, rate:best.mv.deliveryRateChange,
+      text:`تحسّنت نسبة التسليم لـ"${best.name}" من ${fmtPct(best.mv.firstRates.deliveryRate)} إلى ${fmtPct(best.mv.lastRates.deliveryRate)} بين ${best.mv.firstMonth} و${best.mv.lastMonth}.`,
+      action:`دراسة أسباب التحسن في "${best.name}" وإمكانية تعميمها.`});
+  }
+  return findings;
 }
+
+const CAT_AR = {Returns:'مرتجعات', Rejects:'رفض', Delivery:'تسليم', SLA:'SLA', Growth:'نمو', Performance:'أداء'};
+const PRIORITY_AR = {High:'عاجل', Medium:'متوسط', Info:'معلومة'};
 
 async function mgmtGenerateExcelReport(){
   const btn = document.getElementById('mgmtExcelBtn');
@@ -3768,123 +3933,97 @@ async function mgmtGenerateExcelReport(){
     if(!overall || !overall.total){
       throw new Error('لا توجد بيانات فعلية ضمن الفترة المختارة — لن يتم تصدير ملف بأرقام صفرية.');
     }
-    const hasComparisonPeriod = months.length > 1;
 
     const branchSeriesMap = mgmtBuildSeries('branch', months, {});
     const customerSeriesMap = mgmtBuildSeries('client', months, {});
-    const provinceSeriesMap = mgmtBuildSeries('province', months, {});
-    const areaSeriesMap = mgmtBuildSeries('area', months, {});
     const branchEntries = mgmtSortedEntries(branchSeriesMap, months);
     const customerEntries = mgmtSortedEntries(customerSeriesMap, months);
-    const provinceEntries = mgmtSortedEntries(provinceSeriesMap, months);
-    const areaEntries = mgmtSortedEntries(areaSeriesMap, months);
-    const findings = mgmtComputeFindings(months, overall, branchEntries, customerEntries);
-    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'All Months' : (months.length>1 ? `${months[0]} - ${months[months.length-1]}` : months[0]);
-
-    // mgmtSortedEntries() entries carry {name, stats} but not the raw
-    // byMonth map needed for per-month/movement columns — pair each with its
-    // original Map entry (same name) so mgmtEntryMonthRates/mgmtEntryMovement
-    // (which read .byMonth) can be used directly.
     function withRawEntry(sortedEntries, seriesMap){
       return sortedEntries.map(e => ({ name:e.name, stats:e.stats, entry: seriesMap.get(e.name) }));
     }
     const branchForSheet = withRawEntry(branchEntries, branchSeriesMap);
     const customerForSheet = withRawEntry(customerEntries, customerSeriesMap);
 
+    // Sanity check available to the console/tests: SUM(branch totals) must
+    // equal the company grand total — Code.gs now buckets any shipment with
+    // an empty branch/client/province/area under "غير محدد" instead of
+    // silently dropping it (see Code.gs summaryAccumulateRow call sites).
+    const branchSum = branchForSheet.reduce((a,e)=>a+e.stats.totalVolume, 0);
+    if(branchSum !== overall.total){
+      console.warn('[Excel] SUM(branch totals) != grand total — '+branchSum+' vs '+overall.total+'. This should not happen after the Code.gs "غير محدد" bucket fix; if it does, a persisted DASHBOARD_SUMMARY snapshot may predate the fix and needs rebuilding.');
+    }
+
+    const regularFindings = mgmtComputeFindings(months, overall, branchEntries, customerEntries);
+    const movementFindings = mgmtComputeMovementFindings(months, branchEntries, customerEntries);
+    const allFindings = [...regularFindings, ...movementFindings];
+
     const wb = XLSX.utils.book_new();
-    wb.Workbook = { Views: [{ RTL: true }] }; // Arabic content — display the workbook right-to-left where the library supports it
+    wb.Workbook = { Views: [{ RTL: true }] };
 
-    // Sheet 1: Executive KPI
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
-      ['KPI','Count','Rate'],
-      ['Total Shipments', overall.total, ''],
-      ['Delivered', overall.delivered, pct1(overall.deliveryRate)],
-      ['Returned', overall.returned, pct1(overall.returnRate)],
-      ['Rejected', overall.rejected, pct1(overall.rejectedRate)],
-      ['In Progress', overall.pending, pct1(overall.inProgressRate)],
-      ['SLA', '', pct1(overall.slaAchievement)],
-    ]), 'Executive KPI');
+    // === 1) الملخص التنفيذي ===
+    const execRows = [
+      ['المؤشر','العدد','النسبة'],
+      ['إجمالي الشحنات', overall.total, ''],
+      ['تم التسليم', overall.delivered, mgmtRateCell(overall.deliveryRate,'delivery')],
+      ['المرتجعات', overall.returned, mgmtRateCell(overall.returnRate,'return')],
+      ['الرفض', overall.rejected, mgmtRateCell(overall.rejectedRate,'reject')],
+      ['قيد التشغيل', overall.pending, mgmtRateCell(overall.inProgressRate,'inprogress')],
+      ['SLA', '', mgmtRateCell(overall.slaAchievement,'sla')],
+    ];
+    const wsExec = XLSX.utils.aoa_to_sheet(execRows);
+    wsExec['!freeze'] = { xSplit:0, ySplit:1 };
+    wsExec['!cols'] = [{wch:20},{wch:14},{wch:16}];
+    XLSX.utils.book_append_sheet(wb, wsExec, 'الملخص التنفيذي');
 
-    // Sheet 2: Monthly Performance
-    const monthlyRows = [['Month','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','In Progress %','SLA %']];
+    // === 2) الأداء الشهري ===
+    const monthlyHeader = ['الشهر','إجمالي الشحنات','تم التسليم','نسبة التسليم','المرتجعات','نسبة المرتجعات','الرفض','نسبة الرفض','قيد التشغيل','نسبة قيد التشغيل','SLA %'];
+    const monthlyRows = [monthlyHeader];
     months.forEach(m=>{
       const md = MGMT.monthsData[m]; const k = md && md.summary && md.summary.kpis;
-      if(!k) return;
+      if(!k){ monthlyRows.push([m, mgmtBlankState('nodata'),'','','','','','','','','']); return; }
+      if(!k.total){ monthlyRows.push([m, 0, mgmtBlankState('nodeliveries'),'',0,'',0,'',0,'','']); return; }
       const pending = k.pending||0; const ipr = k.total>0?pending/k.total*100:null;
-      monthlyRows.push([m, k.total, k.delivered, pct1(k.deliveryRate), k.returned, pct1(k.returnRate),
-        k.rejected, pct1(k.rejectedRate), pending, pct1(ipr), pct1(k.slaAchievement)]);
+      monthlyRows.push([m, k.total, k.delivered, mgmtRateCell(k.deliveryRate,'delivery'), k.returned, mgmtRateCell(k.returnRate,'return'),
+        k.rejected, mgmtRateCell(k.rejectedRate,'reject'), pending, mgmtRateCell(ipr,'inprogress'), mgmtRateCell(k.slaAchievement,'sla')]);
     });
     const wsMonthly = XLSX.utils.aoa_to_sheet(monthlyRows);
     wsMonthly['!freeze'] = { xSplit:0, ySplit:1 };
-    wsMonthly['!cols'] = [{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:12},{wch:8}];
-    XLSX.utils.book_append_sheet(wb, wsMonthly, 'Monthly Performance');
+    wsMonthly['!cols'] = [{wch:14},{wch:14},{wch:12},{wch:12},{wch:11},{wch:13},{wch:9},{wch:10},{wch:12},{wch:14},{wch:9}];
+    wsMonthly['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:0,c:monthlyHeader.length-1}}) };
+    XLSX.utils.book_append_sheet(wb, wsMonthly, 'الأداء الشهري');
 
-    // Branch Comparison — rotated matrix (KPI rows x Branch/month column groups) + separate Overall & Movement sheet
-    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(branchForSheet, months, 'Branch'), 'Branch Comparison');
-    XLSX.utils.book_append_sheet(wb, mgmtBuildOverallMovementSheet(branchForSheet, months, 'Branch'), 'Branch Overall & Movement');
-    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(customerForSheet, months, 'Customer'), 'Customer Comparison');
-    XLSX.utils.book_append_sheet(wb, mgmtBuildOverallMovementSheet(customerForSheet, months, 'Customer'), 'Customer Overall & Movement');
+    // === 3) مقارنة الفروع ===
+    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(branchForSheet, months, 'الفرع'), 'مقارنة الفروع');
 
-    // Sheet 5: Governorate Performance (if data exists)
-    if(provinceEntries.length){
-      const provRows = [['Governorate','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','SLA %']];
-      provinceEntries.forEach(e=>{
-        const s = e.stats;
-        provRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
-          s.rejected, pct1(s.rejectRate), s.pending, pct1(s.slaPct)]);
-      });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(provRows), 'Governorate Performance');
-    }
+    // === 4) مقارنة العملاء ===
+    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(customerForSheet, months, 'العميل'), 'مقارنة العملاء');
 
-    // Sheet 6: Area Performance (if data exists)
-    if(areaEntries.length){
-      const areaRows = [['Area','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','SLA %']];
-      areaEntries.forEach(e=>{
-        const s = e.stats;
-        areaRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
-          s.rejected, pct1(s.rejectRate), s.pending, pct1(s.slaPct)]);
-      });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(areaRows), 'Area Performance');
-    }
-
-    // Sheet 7: Management Findings
-    const findingRows = [['Priority','Category','Entity','Issue','Count','Rate','Recommended Action']];
-    findings.forEach(f=>{
-      findingRows.push([f.priority, f.category, f.entity, f.issue, f.count===null?'':f.count, f.rate!==null&&f.rate!==undefined?pct1(f.rate):'', f.action]);
-    });
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(findingRows), 'Management Findings');
-
-    // Sheet 8: Customer Movement Analysis
-    const custMoveRows = [['Customer','First Active Month','Last Active Month','First Month Volume','Last Month Volume','Volume Change','Volume Change %','First Month Delivery %','Last Month Delivery %','Delivery Rate Change','Status']];
-    if(!hasComparisonPeriod){
-      custMoveRows.push(['لا توجد فترة مقارنة متاحة (شهر واحد فقط محدد)']);
+    // === 5) النتائج والتوصيات (merges regular + movement findings — no separate Movement/Overall tabs) ===
+    const findingHeader = ['الأولوية','الفئة','الجهة','المشكلة','الإجراء المقترح'];
+    const findingRows = [findingHeader];
+    if(!allFindings.length){
+      findingRows.push(['—','—','—', 'لا توجد نتائج ذات دلالة ضمن الفترة المختارة (بعد تطبيق الحد الأدنى للحجم).', '—']);
     }else{
-      customerForSheet.forEach(e=>{
-        const mv = mgmtEntryMovement(e.entry, months);
-        if(!mv) return;
-        custMoveRows.push([e.name, mv.firstMonth, mv.lastMonth, mv.firstRates.count, mv.lastRates.count, mv.volumeChange, pct1(mv.volumeChangePct),
-          pct1(mv.firstRates.deliveryRate), pct1(mv.lastRates.deliveryRate), pct1(mv.deliveryRateChange), mv.status]);
+      allFindings.forEach(f=>{
+        findingRows.push([PRIORITY_AR[f.priority]||f.priority, CAT_AR[f.category]||f.category, mgmtCleanEntityName(f.entity), f.text, f.action]);
       });
     }
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(custMoveRows), 'Customer Movement');
-
-    // Sheet 9: Branch Movement Analysis
-    const branchMoveRows = [['Branch','First Month Volume','Last Month Volume','Volume Change','Volume Change %','First Month Delivery %','Last Month Delivery %','Delivery Rate Change','First Month Return %','Last Month Return %','Return Rate Change','Status']];
-    if(!hasComparisonPeriod){
-      branchMoveRows.push(['لا توجد فترة مقارنة متاحة (شهر واحد فقط محدد)']);
-    }else{
-      branchForSheet.forEach(e=>{
-        const mv = mgmtEntryMovement(e.entry, months);
-        if(!mv) return;
-        branchMoveRows.push([e.name, mv.firstRates.count, mv.lastRates.count, mv.volumeChange, pct1(mv.volumeChangePct),
-          pct1(mv.firstRates.deliveryRate), pct1(mv.lastRates.deliveryRate), pct1(mv.deliveryRateChange),
-          pct1(mv.firstRates.returnRate), pct1(mv.lastRates.returnRate), pct1(mv.returnRateChange), mv.status]);
-      });
+    const wsFindings = XLSX.utils.aoa_to_sheet(findingRows);
+    wsFindings['!freeze'] = { xSplit:0, ySplit:1 };
+    wsFindings['!cols'] = [{wch:10},{wch:10},{wch:22},{wch:70},{wch:55}];
+    // Wrap the long free-text columns so rows stay readable instead of one
+    // extremely wide unreadable line.
+    for(let r=1;r<findingRows.length;r++){
+      const addr3 = XLSX.utils.encode_cell({r, c:3}), addr4 = XLSX.utils.encode_cell({r, c:4});
+      if(wsFindings[addr3]) wsFindings[addr3].s = { alignment: { wrapText: true, vertical: 'top' } };
+      if(wsFindings[addr4]) wsFindings[addr4].s = { alignment: { wrapText: true, vertical: 'top' } };
     }
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(branchMoveRows), 'Branch Movement');
+    wsFindings['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:0,c:findingHeader.length-1}}) };
+    XLSX.utils.book_append_sheet(wb, wsFindings, 'النتائج والتوصيات');
 
+    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'All_Months' : (months.length>1 ? `${months[0]}-${months[months.length-1]}` : months[0]);
     const safePeriod = periodLabel.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_');
-    XLSX.writeFile(wb, `Management_Detailed_Report_${safePeriod}.xlsx`);
+    XLSX.writeFile(wb, `Management_Detailed_Report_${safePeriod}.xlsx`, { cellStyles: true });
   }catch(err){
     console.error('Excel report generation failed:', err);
     alert('تعذر إصدار ملف Excel: ' + (err.message || err));
@@ -3893,6 +4032,7 @@ async function mgmtGenerateExcelReport(){
     if(statusEl) statusEl.classList.add('hidden');
   }
 }
+
 
 /* ---------- Orchestration ---------- */
 function mgmtRenderAll(months){
