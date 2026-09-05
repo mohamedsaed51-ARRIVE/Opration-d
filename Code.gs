@@ -1070,6 +1070,7 @@ function getMonthDashboardSummary(sheetName, params) {
   var dqTotalRows = 0, missingBranch = 0, missingClient = 0, missingProvince = 0, negativeCod = 0, unknownStatusCount = 0;
   var unknownStatusSet = {};
   var seenAwbCount = {}; // awb -> occurrence count
+  var fullyBlankRowCount = 0, blankAwbRowCount = 0;
 
   var DQ_MAX_DUPLICATE_RECORDS = 1000;
   var duplicateRecords = [];
@@ -1084,10 +1085,10 @@ function getMonthDashboardSummary(sheetName, params) {
 
   for (var ri = 0; ri < dataRows.length; ri++) {
     var row = dataRows[ri];
-    if (summaryRowIsAllEmpty(row)) continue;
+    if (summaryRowIsAllEmpty(row)) { fullyBlankRowCount++; continue; }
 
     var awb = summaryNormText(summaryGetField(row, idx, "awb"));
-    if (!awb) continue;
+    if (!awb) { blankAwbRowCount++; continue; }
 
     dqTotalRows++;
     seenAwbCount[awb] = (seenAwbCount[awb] || 0) + 1;
@@ -1169,9 +1170,11 @@ function getMonthDashboardSummary(sheetName, params) {
     areasByProvince: areasByProvinceOut
   };
 
+  var distinctAwbCount = Object.keys(seenAwbCount).length;
+  var duplicateExtraRows = dqTotalRows - distinctAwbCount; // rows beyond the first occurrence for each repeated AWB
   var dataQuality = {
     totalRows: dqTotalRows,
-    distinctAwb: Object.keys(seenAwbCount).length,
+    distinctAwb: distinctAwbCount,
     dupAwbCount: dupCount > 0 ? (function () { var c = 0; for (var k in seenAwbCount) { if (seenAwbCount.hasOwnProperty(k) && seenAwbCount[k] > 1) c++; } return c; })() : 0,
     invalidDates: invalidDates,
     missingBranch: missingBranch,
@@ -1181,7 +1184,18 @@ function getMonthDashboardSummary(sheetName, params) {
     unknownStatusList: summaryObjKeysSorted(unknownStatusSet),
     negativeCod: negativeCod,
     duplicateRecords: duplicateRecords,
-    duplicateRecordsTruncated: duplicateRecordsTruncated
+    duplicateRecordsTruncated: duplicateRecordsTruncated,
+    // Full reconciliation chain — every quantity is a plain count, never a
+    // guess: physicalRows === fullyBlankRows + blankAwbRows + validAwbRows,
+    // and validAwbRows === duplicateExtraRows + uniqueShipments.
+    reconciliation: {
+      physicalRows: dataRows.length,
+      fullyBlankRows: fullyBlankRowCount,
+      blankAwbRows: blankAwbRowCount,
+      validAwbRows: dqTotalRows,
+      duplicateExtraRows: duplicateExtraRows,
+      uniqueShipments: distinctAwbCount
+    }
   };
   var tNormalizeEnd = new Date().getTime();
 
@@ -1600,6 +1614,7 @@ function summaryMergeDataQuality(dqList) {
   var allDupRecords = [];
   var truncated = false;
   var DQ_ALL_MONTHS_CAP = 1000;
+  var recon = { physicalRows:0, fullyBlankRows:0, blankAwbRows:0, validAwbRows:0, duplicateExtraRows:0, uniqueShipments:0 };
   for (var i = 0; i < dqList.length; i++) {
     var dq = dqList[i]; if (!dq) continue;
     totalRows += dq.totalRows||0; distinctAwb += dq.distinctAwb||0; dupAwbCount += dq.dupAwbCount||0;
@@ -1613,13 +1628,20 @@ function summaryMergeDataQuality(dqList) {
       if (allDupRecords.length < DQ_ALL_MONTHS_CAP) allDupRecords.push(recs[r]);
       else { truncated = true; break; }
     }
+    var rc = dq.reconciliation;
+    if (rc) {
+      recon.physicalRows += rc.physicalRows||0; recon.fullyBlankRows += rc.fullyBlankRows||0;
+      recon.blankAwbRows += rc.blankAwbRows||0; recon.validAwbRows += rc.validAwbRows||0;
+      recon.duplicateExtraRows += rc.duplicateExtraRows||0; recon.uniqueShipments += rc.uniqueShipments||0;
+    }
   }
   allDupRecords.sort(function (a, b) { return a.awb < b.awb ? -1 : (a.awb > b.awb ? 1 : 0); });
   return {
     totalRows: totalRows, distinctAwb: distinctAwb, dupAwbCount: dupAwbCount, invalidDates: invalidDates,
     missingBranch: missingBranch, missingClient: missingClient, missingProvince: missingProvince,
     unknownStatusCount: unknownStatusCount, unknownStatusList: summaryObjKeysSorted(unknownStatusSet),
-    negativeCod: negativeCod, duplicateRecords: allDupRecords, duplicateRecordsTruncated: truncated
+    negativeCod: negativeCod, duplicateRecords: allDupRecords, duplicateRecordsTruncated: truncated,
+    reconciliation: recon
   };
 }
 function summaryMergeFacets(facetsList) {
@@ -1697,15 +1719,68 @@ function getAllMonthsDashboardSummary(params) {
     var month = MONTH_ORDER[i];
 
     if (!hasServerFilters) {
-      // FAST PATH (the normal case): reads ONLY the persisted per-month
-      // snapshot — never raw rows, never a live aggregation triggered
-      // inline. A month without a snapshot yet is reported, not guessed at
-      // (use the "Update All 12 Month Summaries" menu to backfill it).
+      // FAST PATH — but "no dimension filter" does NOT mean "any snapshot is
+      // safe": attemptT1/attemptT2/slaTargetDefault/branchSlaTargets affect
+      // attemptCat/withinSla/slaBreach/attemptSummary independently of any
+      // dimension filter, and those are frozen into the snapshot at build
+      // time. Each month's OWN snapshot buildConfig is checked against the
+      // CURRENT request before it is trusted — never assumed compatible
+      // just because zero UI filters are active.
       var snap = getSavedMonthSummary_(month);
       if (!snap) { missingSnapshotMonths.push(month); continue; }
       if (snap.empty || snap.noData) { emptyMonths.push(month); continue; }
-      perMonthSummaries.push(snap);
+
+      var snapBc = snap.filterCube && snap.filterCube.buildConfig;
+      var snapCompatible = snapBc &&
+        Number(snapBc.attemptT1) === Number(attemptT1) &&
+        Number(snapBc.attemptT2) === Number(attemptT2) &&
+        Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
+        summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
+      // A snapshot with no buildConfig at all predates this check — only
+      // treated as compatible when the request itself uses the plain
+      // defaults (matches the same leniency getMonthDashboardSummary
+      // applies to its own unfiltered-snapshot path); any non-default
+      // request against such a snapshot still falls through below.
+      var legacyDefaultsRequested = !snapBc && Number(attemptT1) === 1 && Number(attemptT2) === 2 &&
+        Number(slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS && summaryBranchTargetsEqual_({}, branchSlaTargets);
+
+      if (snapCompatible || legacyDefaultsRequested) {
+        perMonthSummaries.push(snap);
+        includedMonths.push(month);
+        console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+          month: month, rowCount: snap.dataQuality ? snap.dataQuality.totalRows : null,
+          total: snap.kpis ? snap.kpis.total : null, delivered: snap.kpis ? snap.kpis.delivered : null,
+          returned: snap.kpis ? snap.kpis.returned : null, rejected: snap.kpis ? snap.kpis.rejected : null,
+          pending: snap.kpis ? snap.kpis.pending : null, unknown: snap.kpis ? snap.kpis.unknown : null,
+          fromSnapshot: true
+        }));
+        continue;
+      }
+
+      // Incompatible: never silently use this snapshot's frozen attempt/SLA
+      // classification. Fall through to the exact same per-month path the
+      // filtered branch uses below — it has its own correct compatibility
+      // check and live-aggregation fallback.
+      console.log("[ALL MONTHS SNAPSHOT INCOMPATIBLE] " + JSON.stringify({ month: month, snapshotConfig: snapBc || null, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
+      var elapsedNoFilter = new Date().getTime() - t0;
+      if (elapsedNoFilter > ALL_MONTHS_TIME_BUDGET_MS) { skippedMonths.push(month); continue; }
+      var monthParamsNoFilter = {};
+      for (var pkNf in params) { if (params.hasOwnProperty(pkNf)) monthParamsNoFilter[pkNf] = params[pkNf]; }
+      monthParamsNoFilter.sheet = month;
+      var monthSummaryNoFilter;
+      try { monthSummaryNoFilter = getMonthDashboardSummary(month, monthParamsNoFilter); }
+      catch (eMonthNf) { skippedMonths.push(month); continue; }
+      if (!monthSummaryNoFilter || monthSummaryNoFilter.success === false) { skippedMonths.push(month); continue; }
+      if (monthSummaryNoFilter.empty || monthSummaryNoFilter.noData) { emptyMonths.push(month); continue; }
+      perMonthSummaries.push(monthSummaryNoFilter);
       includedMonths.push(month);
+      console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+        month: month, rowCount: monthSummaryNoFilter.dq ? monthSummaryNoFilter.dq.totalRows : null,
+        total: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.total : null, delivered: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.delivered : null,
+        returned: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.returned : null, rejected: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.rejected : null,
+        pending: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.pending : null, unknown: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.unknown : null,
+        fromSnapshot: false, fallbackReason: "config-incompatible"
+      }));
     } else {
       // FILTERED PATH: persisted snapshots are always unfiltered, so a
       // filtered All-Months view needs each month's OWN filtered
@@ -1725,6 +1800,13 @@ function getAllMonthsDashboardSummary(params) {
       if (monthSummary.empty || monthSummary.noData) { emptyMonths.push(month); continue; }
       perMonthSummaries.push(monthSummary);
       includedMonths.push(month);
+      console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+        month: month, rowCount: monthSummary.dq ? monthSummary.dq.totalRows : null,
+        total: monthSummary.kpis ? monthSummary.kpis.total : null, delivered: monthSummary.kpis ? monthSummary.kpis.delivered : null,
+        returned: monthSummary.kpis ? monthSummary.kpis.returned : null, rejected: monthSummary.kpis ? monthSummary.kpis.rejected : null,
+        pending: monthSummary.kpis ? monthSummary.kpis.pending : null, unknown: monthSummary.kpis ? monthSummary.kpis.unknown : null,
+        fromCube: !!monthSummary.filteredFromCube
+      }));
     }
   }
 
