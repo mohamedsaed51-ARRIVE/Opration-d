@@ -26,3 +26,25 @@ TEST 1–8 كلها PASSED (منطق منسوخ حرفياً من الملفات
 
 ### Not verified
 - لا يوجد Live Apps Script Validation ولا اختبار متصفح حقيقي — انظر قسم "ما لم أستطع اختباره" في `docs/production-debug-fixes.md` والخطوات المطلوبة من Mohamed هناك.
+
+## [Unreleased] — Bug #4: تعامل الفلاتر الفارغة (`branch:[""]`) كفلتر حقيقي (انظر docs/production-debug-fixes.md)
+### Fixed
+- **Bug #4 (مؤكَّد بـ Diagnostic إنتاج فعلي):** `summaryParseFilters()` في `Code.gs` أصبحت تُعيد `sanitizeFilters_(filters)` بدل `filters` الخام. دالة جديدة `sanitizeFilters_()` تحذف من كل بُعد القيم `""`/فراغ فقط/`null`/`undefined` (مع الحفاظ على `0`/`false`/أي قيمة حقيقية أخرى كما هي). إصلاح جانبي: فحص `hasServerFilters` للمُعامل القديم `params.branch` أصبح يستخدم `summaryNormText(params.branch)` بدل القيمة الخام. هذه نقطة عنق واحدة تغطي تلقائياً: `hasServerFilters` في كلا الدالتين، Filter Cube، `summaryRowMatchesFilters`، ومسار All Months المفلتر لكل شهر.
+
+### Verified (Code-level — نُفِّذت فعلياً بالكود الحقيقي المنسوخ من Code.gs)
+- كل أمثلة التطبيع الثمانية من الطلب + الاختبارات الثلاثة المطلوبة (Request A مقابل B، فلاتر متعددة فارغة، فلتر مختلط Cairo) + اختبار عدم-Regression لـ `dateFrom` — كلها PASSED. Syntax Check PASSED.
+
+### Not verified
+- لا يوجد Live Google Validation لرقم `total` الفعلي (870509) — يتطلب تنفيذ Mohamed لنفس أداة التشخيص بعد رفع `Code.gs`.
+- لم يُعثر على مسار Frontend حالي يُنتج فعلياً `filters:{branch:[""]}` (كل المسارات المفحوصة محمية بالفعل) — لم يُعدَّل أي شيء في `index.html` لعدم وجود دليل.
+
+## [Unreleased] — Bug #5: أداء August (aggregatePassMs) — انظر docs/production-debug-fixes.md
+### Fixed
+- **Bug #5 (أداء، مؤكَّد بحساب رياضي من القياس الفعلي):** `getMonthDashboardSummary()` في `Code.gs` — دالة جديدة `formatDayKeyCached(d)` تحفظ نتيجة `Utilities.formatDate` بمفتاح "ساعة UTC" بدل استدعائها لكل صف. استبدال استدعاءي `Utilities.formatDate` داخل حلقة الـ aggregate (لـ `dayKey` و `cubeDayKey`) بالدالة الجديدة. لا تغيير في أي رقم Summary/KPI/فلتر/All Months.
+
+### Verified (Code-level — بمنسّق توقيت Intl حقيقي على Africa/Cairo، وليس Mock مبسّط)
+- 106,767 صف اختبار (شاملة نافذة 22:00–24:00 UTC الحرجة) → صفر اختلاف في القيمة الناتجة، وانخفاض استدعاءات `Utilities.formatDate` الحقيقية من 106,767 إلى 744 (99.30%-). اكتُشف وأُصلح Bug حقيقي في محاولة أولى بنسخة Cache يومية (بدل الساعة) أثناء هذا الاختبار نفسه، قبل وصولها لملف الإنتاج.
+- كل اختبارات Bug #1–#4 السابقة أُعيد تشغيلها: لا Regression.
+
+### Not verified
+- الرقم الفعلي الحقيقي لـ `aggregatePassMs` بعد الإصلاح على August — يتطلب رفع الكود وتشغيل نفس أداة التشخيص. September–December: لا تغيير، بناءً على توجيه صريح بحصر النطاق في August فقط.

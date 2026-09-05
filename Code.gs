@@ -505,6 +505,46 @@ function summaryBuildTimeSeries(dedupRows, granularity) {
 // entirely (used to compute the attempt-distribution baseline the same way
 // the client's getFilteredRowsExcluding('attemptCategory') does).
 // ------------------------------------------------------------
+// CANONICAL FILTER SANITIZATION (see docs/production-debug-fixes.md — Bug
+// #4): a filter value list like [""] or [null] or ["  "] must be treated
+// as NO filter on that dimension, never as an active filter that (because
+// no real row has an empty-string branch) matches nothing. Every server
+// routing decision downstream — hasServerFilters in both
+// getMonthDashboardSummary and getAllMonthsDashboardSummary, Filter Cube
+// usage (getMonthDashboardSummaryFromCube_ / summaryComputeFromCube_ /
+// summaryCubeRecordMatchesFilters_), and the live per-row predicate
+// (summaryRowMatchesFilters) — all read whatever summaryParseFilters()
+// returns, so sanitizing once here is the single choke point; every caller
+// gets the fix automatically without being touched individually.
+// Rules: strings are trimmed; "", whitespace-only, null and undefined
+// entries are dropped from each dimension's array. Every other value is
+// kept exactly as-is — including legitimate values that merely look falsy
+// (0, false) — this only ever drops entries that are empty/absent, never
+// values that happen to be falsy.
+function sanitizeFilters_(filters) {
+  var out = {};
+  if (!filters || typeof filters !== "object") return out;
+  var keys = Object.keys(filters);
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var val = filters[key];
+    if (!Array.isArray(val)) { out[key] = val; continue; } // non-array filter values (if any) pass through untouched
+    var cleaned = [];
+    for (var j = 0; j < val.length; j++) {
+      var item = val[j];
+      if (item === null || item === undefined) continue;
+      if (typeof item === "string") {
+        var trimmed = summaryNormText(item);
+        if (trimmed === "") continue;
+        cleaned.push(trimmed);
+        continue;
+      }
+      cleaned.push(item); // non-string (number incl. 0, boolean incl. false, etc.) — never dropped
+    }
+    out[key] = cleaned;
+  }
+  return out;
+}
 function summaryParseFilters(params) {
   var filters = {};
   if (params && params.filters) {
@@ -519,7 +559,7 @@ function summaryParseFilters(params) {
   if ((!filters.branch || !filters.branch.length) && params && params.branch) {
     filters.branch = [summaryNormText(params.branch)];
   }
-  return filters;
+  return sanitizeFilters_(filters);
 }
 
 function summaryClassifyAttempt(slaDays, t1, t2) {
@@ -911,7 +951,7 @@ function getMonthDashboardSummary(sheetName, params) {
   // existing live compact aggregation path so no raw rows ever reach the browser.
   var hasServerFilters = Object.keys(requestedFilters).some(function(k){
     return Array.isArray(requestedFilters[k]) && requestedFilters[k].length > 0;
-  }) || !!(params && (params.dateFrom || params.dateTo || params.branch));
+  }) || !!(params && (params.dateFrom || params.dateTo || summaryNormText(params.branch)));
 
   var filters = requestedFilters;
   var attemptT1 = (params && params.attemptT1 !== undefined && params.attemptT1 !== "") ? parseFloat(params.attemptT1) : 1;
@@ -1250,6 +1290,38 @@ function getMonthDashboardSummary(sheetName, params) {
 
   var tz = Session.getScriptTimeZone() || "Africa/Cairo";
 
+  // PERFORMANCE FIX (see docs/production-debug-fixes.md — Bug #5): the loop
+  // below used to call Utilities.formatDate(pr.pickup, tz, "yyyy-MM-dd")
+  // for EVERY row (once for dayKey, and again for cubeDayKey during a
+  // persistent-build) — up to ~212,000 calls for a 106k-row month. Each
+  // Utilities.* call crosses the Apps Script host bridge and costs roughly
+  // sub-millisecond-to-a-millisecond on its own; multiplied by that many
+  // calls this alone accounted for the bulk of the ~88s aggregatePassMs
+  // measured on August.
+  // The formatted string is memoized per bucket instead of recomputed per
+  // row. IMPORTANT: the bucket is by UTC HOUR (3,600,000ms), not by UTC day
+  // — an earlier draft of this fix bucketed by day and had a real bug: a
+  // day-wide bucket in UTC time does not line up with a calendar day in
+  // Africa/Cairo (UTC+2), so two different rows landing in the same UTC day
+  // could legitimately format to two different Cairo dates, and whichever
+  // was cached first would silently poison the other's result. A 1-hour
+  // bucket cannot straddle a midnight boundary in any fixed whole-hour
+  // offset timezone (Africa/Cairo has had no DST since 2015 and is a clean
+  // UTC+2), so every row in the same bucket is provably on the same
+  // Cairo calendar day — this was verified with a dedicated test covering
+  // the exact 22:00–24:00 UTC boundary window for every day of the month.
+  // A month still has well under a thousand distinct hour-buckets, so this
+  // still cuts the real Utilities.formatDate call count by well over 99%.
+  var dayKeyCache = {};
+  function formatDayKeyCached(d) {
+    var bucket = Math.floor(d.getTime() / 3600000); // UTC-hour bucket — see note above on why this (not a day bucket) is the safe choice
+    var cached = dayKeyCache[bucket];
+    if (cached !== undefined) return cached;
+    var formatted = Utilities.formatDate(d, tz, "yyyy-MM-dd");
+    dayKeyCache[bucket] = formatted;
+    return formatted;
+  }
+
   // ------------------------------------------------------------
   // FILTERABLE SUMMARY V2 — a compact, dictionary-encoded cube built ONLY
   // during a persistent-build request (isPersistentBuild), fused into this
@@ -1304,7 +1376,7 @@ function getMonthDashboardSummary(sheetName, params) {
     var target = (branchSlaTargets && branchSlaTargets[pr.branch] !== undefined) ? branchSlaTargets[pr.branch] : slaTargetDefault;
 
     if (isPersistentBuild) {
-      var cubeDayKey = pr.pickup ? Utilities.formatDate(pr.pickup, tz, "yyyy-MM-dd") : "";
+      var cubeDayKey = pr.pickup ? formatDayKeyCached(pr.pickup) : "";
       var cubeAttemptIdx = CUBE_ATTEMPT_KEYS.indexOf(pr.attemptCat);
       if (cubeAttemptIdx < 0) cubeAttemptIdx = 3; // "na"
       var cubeKey = cubeDictIndex("province", pr.province || "غير محدد") + "\u0001" +
@@ -1351,7 +1423,7 @@ function getMonthDashboardSummary(sheetName, params) {
     totalShipCost += pr.shipCost;
 
     if (pr.pickup) {
-      var dayKey = Utilities.formatDate(pr.pickup, tz, "yyyy-MM-dd");
+      var dayKey = formatDayKeyCached(pr.pickup);
       if (!trendMapFiltered[dayKey]) trendMapFiltered[dayKey] = { date: dayKey, count: 0, delivered: 0 };
       trendMapFiltered[dayKey].count++;
       if (pr.bucket === "delivered") trendMapFiltered[dayKey].delivered++;
@@ -1676,7 +1748,7 @@ function getAllMonthsDashboardSummary(params) {
   var requestedFilters = summaryParseFilters(params);
   var hasServerFilters = Object.keys(requestedFilters).some(function (k) {
     return Array.isArray(requestedFilters[k]) && requestedFilters[k].length > 0;
-  }) || !!(params && (params.dateFrom || params.dateTo || params.branch));
+  }) || !!(params && (params.dateFrom || params.dateTo || summaryNormText(params.branch)));
 
   var attemptT1 = (params && params.attemptT1 !== undefined && params.attemptT1 !== "") ? parseFloat(params.attemptT1) : 1;
   var attemptT2 = (params && params.attemptT2 !== undefined && params.attemptT2 !== "") ? parseFloat(params.attemptT2) : 2;
