@@ -106,7 +106,7 @@ var ALL_MONTHS_TIME_BUDGET_MS = 260000;
 // The dashboard reads these snapshots instantly instead of rebuilding
 // a 100k+ row month during normal management viewing.
 var PERSISTENT_SUMMARY_SHEET = "DASHBOARD_SUMMARY";
-var PERSISTENT_SUMMARY_VERSION = "1";
+var PERSISTENT_SUMMARY_VERSION = "2";
 var PERSISTENT_SUMMARY_CHUNK_SIZE = 45000; // safely below cell-size limits
 
 
@@ -640,6 +640,209 @@ function summaryFinalizeTimeSeries(map, order) {
   }
   return out;
 }
+
+// ------------------------------------------------------------
+// FILTERABLE SUMMARY V2 — query engine over a saved cube (Code.gs
+// filterCube, built once per persistent-build; see getMonthDashboardSummary
+// above). Record shape: [provinceIdx, areaIdx, branchIdx, clientIdx,
+// statusIdx, attemptIdx, pickupDateStr, count, withinSla, slaBreach,
+// sumSlaDays, deliveredWithDate, maxSlaDays, sumCod, sumShipCost].
+// ------------------------------------------------------------
+var CUBE_ATTEMPT_KEYS = ["first", "second", "other", "na"];
+
+function summaryCubeRecordMatchesFilters_(rec, dict, filters, excludeDim, fromTime, toTime) {
+  function active(dim) { return dim !== excludeDim && filters[dim] && filters[dim].length; }
+  if (active("province") && !summaryFilterListMatches(dict.province[rec[0]], filters.province)) return false;
+  if (active("area") && !summaryFilterListMatches(dict.area[rec[1]], filters.area)) return false;
+  if (active("branch") && !summaryFilterListMatches(dict.branch[rec[2]], filters.branch)) return false;
+  if (active("client") && !summaryFilterListMatches(dict.client[rec[3]], filters.client)) return false;
+  if (active("status") && !summaryFilterListMatches(dict.status[rec[4]], filters.status)) return false;
+  if (active("attempt") && !summaryFilterListMatches(CUBE_ATTEMPT_KEYS[rec[5]], filters.attempt)) return false;
+  if (excludeDim !== "date" && (fromTime !== null || toTime !== null)) {
+    if (!rec[6]) return false; // record has no pickup date — excluded from any date-bounded query, same as a raw row with no pickup date
+    var t = new Date(rec[6] + "T00:00:00").getTime();
+    if (fromTime !== null && t < fromTime) return false;
+    if (toTime !== null && t > toTime) return false;
+  }
+  return true;
+}
+function summaryAccumulateCubeRecord_(acc, rec, bucket) {
+  var n = rec[7];
+  acc.total += n;
+  if (bucket === "delivered") {
+    acc.delivered += n;
+    acc.deliveredWithDate += rec[11];
+    acc.sumSlaDays += rec[10];
+    acc.withinSla += rec[8];
+    acc.slaBreach += rec[9];
+  } else if (bucket === "returned") { acc.returned += n; }
+  else if (bucket === "rejected") { acc.rejected += n; }
+  else if (bucket === "pending") { acc.pending += n; }
+  else { acc.unknown += n; }
+}
+function summaryCubeWeekKey_(dateStr) {
+  return summaryWeekKey(new Date(dateStr + "T00:00:00"));
+}
+
+// cubes: array of {dict, records} — length 1 for a single month, length N
+// for an All-Months filtered query. Returns the FILTERED portion of the
+// dashboard-summary contract only (kpis/attemptSummary/branch-customer-
+// province-area summaries/statusSummary/trend/timeSeries/totalCod/
+// totalShipCost) — the caller overlays this on top of the snapshot's own
+// UNFILTERED grandTotal/totalRows/dataQuality/facets/colMap, exactly as the
+// live aggregation path already separates "filtered kpis.total" from
+// "unfiltered grandTotal" (used by the frontend to always anchor rates to
+// the whole month, not the filtered subset).
+function summaryComputeFromCube_(cubes, filters, dateFrom, dateTo) {
+  var fromTime = dateFrom ? new Date(dateFrom + "T00:00:00").getTime() : null;
+  var toTime = dateTo ? new Date(dateTo + "T23:59:59").getTime() : null;
+
+  var topAcc = summaryNewGroupAcc();
+  var topMaxDays = null;
+  var branchAccMap = {}, branchOrder = [];
+  var customerAccMap = {}, customerOrder = [];
+  var provinceAccMap = {}, provinceOrder = [];
+  var areaAccMap = {}, areaOrder = [];
+  var statusSummary = {};
+  var totalCod = 0, totalShipCost = 0;
+  var dailyMap = {}, dailyOrder = [];
+  var weeklyMap = {}, weeklyOrder = [];
+  var monthlyMap = {}, monthlyOrder = [];
+  var attemptSummary = { first: 0, second: 0, other: 0, na: 0, total: 0 };
+  var trendMapFiltered = {};
+
+  function ensureAcc(map, order, key) { if (!map[key]) { map[key] = summaryNewGroupAcc(); order.push(key); } return map[key]; }
+  function ensureTimeAcc(map, order, key) { if (!map[key]) { map[key] = { shipments: 0, delivered: 0, returned: 0, pending: 0 }; order.push(key); } return map[key]; }
+  function bumpTimeAcc(acc, bucket) {
+    acc.shipments++;
+    if (bucket === "delivered") acc.delivered++; else if (bucket === "returned") acc.returned++; else if (bucket === "pending") acc.pending++;
+  }
+  function bumpTimeAccBy(acc, bucket, n) {
+    acc.shipments += n;
+    if (bucket === "delivered") acc.delivered += n; else if (bucket === "returned") acc.returned += n; else if (bucket === "pending") acc.pending += n;
+  }
+
+  for (var ci = 0; ci < cubes.length; ci++) {
+    var dict = cubes[ci].dict, records = cubes[ci].records;
+    for (var ri = 0; ri < records.length; ri++) {
+      var rec = records[ri];
+      var attemptKey = CUBE_ATTEMPT_KEYS[rec[5]];
+
+      var baselineMatch = summaryCubeRecordMatchesFilters_(rec, dict, filters, "attempt", fromTime, toTime);
+      if (baselineMatch) { attemptSummary.total += rec[7]; attemptSummary[attemptKey] += rec[7]; }
+
+      if (!summaryCubeRecordMatchesFilters_(rec, dict, filters, null, fromTime, toTime)) continue;
+
+      var status = dict.status[rec[4]];
+      var bucket = summaryClassifyStatus(status);
+      var branchName = dict.branch[rec[2]], clientName = dict.client[rec[3]],
+        provinceName = dict.province[rec[0]], areaName = dict.area[rec[1]];
+
+      summaryAccumulateCubeRecord_(topAcc, rec, bucket);
+      if (bucket === "delivered" && (rec[8] + rec[9]) > 0 && (topMaxDays === null || rec[12] > topMaxDays)) topMaxDays = rec[12];
+
+      summaryAccumulateCubeRecord_(ensureAcc(branchAccMap, branchOrder, branchName), rec, bucket);
+      summaryAccumulateCubeRecord_(ensureAcc(customerAccMap, customerOrder, clientName), rec, bucket);
+      summaryAccumulateCubeRecord_(ensureAcc(provinceAccMap, provinceOrder, provinceName), rec, bucket);
+      summaryAccumulateCubeRecord_(ensureAcc(areaAccMap, areaOrder, areaName), rec, bucket);
+
+      statusSummary[status] = (statusSummary[status] || 0) + rec[7];
+      totalCod += rec[13]; totalShipCost += rec[14];
+
+      if (rec[6]) {
+        var dayKey = rec[6];
+        if (!trendMapFiltered[dayKey]) trendMapFiltered[dayKey] = { date: dayKey, count: 0, delivered: 0 };
+        trendMapFiltered[dayKey].count += rec[7];
+        if (bucket === "delivered") trendMapFiltered[dayKey].delivered += rec[7];
+
+        bumpTimeAccBy(ensureTimeAcc(dailyMap, dailyOrder, dayKey), bucket, rec[7]);
+        bumpTimeAccBy(ensureTimeAcc(weeklyMap, weeklyOrder, summaryCubeWeekKey_(dayKey)), bucket, rec[7]);
+        bumpTimeAccBy(ensureTimeAcc(monthlyMap, monthlyOrder, dayKey.slice(0, 7)), bucket, rec[7]);
+      }
+    }
+  }
+
+  var topEligible = topAcc.total - topAcc.pending;
+  var kpis = {
+    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, rejected: topAcc.rejected,
+    pending: topAcc.pending, unknown: topAcc.unknown, eligible: topEligible,
+    deliveryRate: topAcc.total > 0 ? (topAcc.delivered / topAcc.total * 100) : null,
+    returnRate: topEligible > 0 ? (topAcc.returned / topEligible * 100) : null,
+    rejectedRate: topEligible > 0 ? (topAcc.rejected / topEligible * 100) : null,
+    successRate: topAcc.total > 0 ? ((topAcc.delivered + topAcc.rejected) / topAcc.total * 100) : null,
+    withinSla: topAcc.withinSla, slaBreach: topAcc.slaBreach,
+    slaAchievement: topAcc.deliveredWithDate > 0 ? (topAcc.withinSla / topAcc.deliveredWithDate * 100) : null,
+    avgDays: topAcc.deliveredWithDate > 0 ? (topAcc.sumSlaDays / topAcc.deliveredWithDate) : null,
+    medianDays: null, // not reconstructable from grouped cube data (same documented limitation as the All-Months merge) — never faked
+    maxDays: topMaxDays,
+    deliveredWithDate: topAcc.deliveredWithDate
+  };
+
+  var trend = [];
+  for (var tKey in trendMapFiltered) { if (trendMapFiltered.hasOwnProperty(tKey)) trend.push(trendMapFiltered[tKey]); }
+  trend.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+
+  return {
+    kpis: kpis,
+    attemptSummary: attemptSummary,
+    branchSummary: summaryFinalizeGroupList(branchAccMap, branchOrder, 3000),
+    customerSummary: summaryFinalizeGroupList(customerAccMap, customerOrder, 3000),
+    provinceSummary: summaryFinalizeGroupList(provinceAccMap, provinceOrder, 1000),
+    areaSummary: summaryFinalizeGroupList(areaAccMap, areaOrder, 1000),
+    statusSummary: statusSummary,
+    trend: trend,
+    timeSeries: {
+      daily: summaryFinalizeTimeSeries(dailyMap, dailyOrder),
+      weekly: summaryFinalizeTimeSeries(weeklyMap, weeklyOrder),
+      monthly: summaryFinalizeTimeSeries(monthlyMap, monthlyOrder)
+    },
+    totalCod: totalCod, totalShipCost: totalShipCost
+  };
+}
+
+// Attempts the fast cube-based filtered path for ONE month. Returns null
+// (signal to fall back to live raw-row aggregation) when no compatible
+// (v2+) cube is available for this month — e.g. an old snapshot that
+// predates Filterable Summary V2, or a month never built yet.
+function summaryBranchTargetsEqual_(a, b) {
+  try { return JSON.stringify(a || {}) === JSON.stringify(b || {}); } catch (e) { return false; }
+}
+function getMonthDashboardSummaryFromCube_(sheetName, filters, dateFrom, dateTo, attemptT1, attemptT2, slaTargetDefault, branchSlaTargets) {
+  var snap = getSavedMonthSummary_(sheetName);
+  if (!snap || !snap.filterCube || !snap.filterCube.records) return null;
+  // Compatibility check (the actual fix): attemptCat and withinSla/slaBreach
+  // were classified ONCE, at build time, using the cube's own buildConfig.
+  // They cannot be exactly reclassified later from aggregated sums alone —
+  // a stale cube must never be used for a request with different settings.
+  var bc = snap.filterCube.buildConfig;
+  if (!bc ||
+      Number(bc.attemptT1) !== Number(attemptT1) ||
+      Number(bc.attemptT2) !== Number(attemptT2) ||
+      Number(bc.slaTargetDefault) !== Number(slaTargetDefault) ||
+      !summaryBranchTargetsEqual_(bc.branchSlaTargets, branchSlaTargets)) {
+    console.log("[FILTER CUBE INCOMPATIBLE] " + JSON.stringify({ sheet: sheetName, cubeConfig: bc, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
+    return null; // triggers the existing live-aggregation fallback — never a silently-wrong result
+  }
+  var computed = summaryComputeFromCube_([snap.filterCube], filters, dateFrom, dateTo);
+  var result = {
+    success: true, sheet: sheetName, source: MONTH_SOURCE[sheetName],
+    branchFilter: (filters.branch && filters.branch.length === 1) ? filters.branch[0] : null,
+    filtersApplied: filters, empty: false, noData: false,
+    totalRows: snap.totalRows, grandTotal: snap.grandTotal,
+    generatedAt: new Date().toISOString(),
+    kpis: computed.kpis, attemptSummary: computed.attemptSummary,
+    dq: { totalRows: computed.kpis.total, distinctAwb: computed.kpis.total, dupAwbCount: snap.dataQuality.dupAwbCount, invalidDates: snap.dataQuality.invalidDates },
+    totalCod: computed.totalCod, totalShipCost: computed.totalShipCost,
+    branchSummary: computed.branchSummary, customerSummary: computed.customerSummary,
+    provinceSummary: computed.provinceSummary, areaSummary: computed.areaSummary,
+    statusSummary: computed.statusSummary, finalStatusSummary: {}, // not tracked per cube record — documented limitation, not one of the required filter dimensions
+    trend: computed.trend, timeSeries: computed.timeSeries,
+    dataQuality: snap.dataQuality, colMap: snap.colMap, facets: snap.facets,
+    cached: false, filteredFromCube: true
+  };
+  return result;
+}
+
 // Single-row filter predicate — same semantics as summaryApplyFilters, but
 // evaluated once per row inline in the aggregation loop instead of
 // allocating a filtered copy of the array per call site. No inner closures
@@ -710,16 +913,6 @@ function getMonthDashboardSummary(sheetName, params) {
     return Array.isArray(requestedFilters[k]) && requestedFilters[k].length > 0;
   }) || !!(params && (params.dateFrom || params.dateTo || params.branch));
 
-  if (!isPersistentBuild && !hasServerFilters) {
-    var savedSnapshot = getSavedMonthSummary_(sheetName);
-    if (savedSnapshot) {
-      savedSnapshot.cached = true;
-      savedSnapshot.persistent = true;
-      savedSnapshot.snapshot = true;
-      return savedSnapshot;
-    }
-  }
-
   var filters = requestedFilters;
   var attemptT1 = (params && params.attemptT1 !== undefined && params.attemptT1 !== "") ? parseFloat(params.attemptT1) : 1;
   var attemptT2 = (params && params.attemptT2 !== undefined && params.attemptT2 !== "") ? parseFloat(params.attemptT2) : 2;
@@ -734,6 +927,34 @@ function getMonthDashboardSummary(sheetName, params) {
       if (parsedTargets && typeof parsedTargets === "object") branchSlaTargets = parsedTargets;
     } catch (eTargets) { /* malformed — fall back to {} (default target for every branch) */ }
   }
+
+  if (!isPersistentBuild && !hasServerFilters) {
+    var savedSnapshot = getSavedMonthSummary_(sheetName);
+    if (savedSnapshot) {
+      var snapBc = savedSnapshot.filterCube && savedSnapshot.filterCube.buildConfig;
+      var snapshotConfigMatches = snapBc &&
+        Number(snapBc.attemptT1) === Number(attemptT1) &&
+        Number(snapBc.attemptT2) === Number(attemptT2) &&
+        Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
+        summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
+      // A snapshot with no buildConfig at all predates this check (an old
+      // v2 snapshot saved before this fix) — treated as compatible only
+      // when the request uses the plain defaults, matching prior behavior;
+      // any non-default request still falls through to live aggregation.
+      var legacyDefaultsRequested = !snapBc && attemptT1 === 1 && attemptT2 === 2 &&
+        slaTargetDefault === SUMMARY_DEFAULT_SLA_DAYS && summaryBranchTargetsEqual_({}, branchSlaTargets);
+      if (snapshotConfigMatches || legacyDefaultsRequested) {
+        savedSnapshot.cached = true;
+        savedSnapshot.persistent = true;
+        savedSnapshot.snapshot = true;
+        return savedSnapshot;
+      }
+      console.log("[SNAPSHOT CONFIG INCOMPATIBLE] " + JSON.stringify({ sheet: sheetName, snapshotConfig: snapBc || null, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
+      // Falls through to live aggregation below — never returns the
+      // snapshot's stale attemptSummary/withinSla/slaBreach in this case.
+    }
+  }
+
   var dateFrom = (params && params.dateFrom) ? params.dateFrom : "";
   var dateTo = (params && params.dateTo) ? params.dateTo : "";
   var branchFilter = (filters.branch && filters.branch.length === 1) ? filters.branch[0] : ""; // kept for legacy response field only
@@ -760,6 +981,20 @@ function getMonthDashboardSummary(sheetName, params) {
       console.log("[CACHE HIT]" + (params.__requestId ? (" " + JSON.stringify({ requestId: params.__requestId, sheet: sheetName, cacheKey: cacheKey })) : ""));
       return cachedObj;
     }
+  }
+
+  if (!isPersistentBuild && hasServerFilters) {
+    var cubeResult = getMonthDashboardSummaryFromCube_(sheetName, filters, dateFrom, dateTo, attemptT1, attemptT2, slaTargetDefault, branchSlaTargets);
+    if (cubeResult) {
+      try {
+        var cubeSerialized = JSON.stringify(cubeResult);
+        if (cubeSerialized.length < 3000000) cachePutChunked(cache, cacheKey, cubeSerialized, DASHBOARD_CACHE_TTL_SECONDS);
+      } catch (eCubeCache) { /* non-fatal */ }
+      console.log("[FILTER CUBE HIT] " + JSON.stringify({ requestId: params.__requestId || null, sheet: sheetName, filters: filters }));
+      return cubeResult;
+    }
+    // No compatible cube for this month — fall through to live raw-row
+    // aggregation below exactly as before Filterable Summary V2 existed.
   }
 
   var quarter = MONTH_SOURCE[sheetName];
@@ -1001,6 +1236,31 @@ function getMonthDashboardSummary(sheetName, params) {
 
   var tz = Session.getScriptTimeZone() || "Africa/Cairo";
 
+  // ------------------------------------------------------------
+  // FILTERABLE SUMMARY V2 — a compact, dictionary-encoded cube built ONLY
+  // during a persistent-build request (isPersistentBuild), fused into this
+  // SAME aggregate pass. Each record represents every shipment sharing the
+  // same (province, area, branch, client, status, attemptCat, pickupDate)
+  // — never a raw row, never an AWB — with pre-aggregated counts. This is
+  // what lets a LATER filtered query answer instantly from the saved
+  // summary instead of re-reading the raw sheet. SLA within/breach counts
+  // and maxSlaDays are pre-classified here (using the SAME slaTargetDefault/
+  // branchSlaTargets this snapshot was built with) because they depend on
+  // each row's own slaDays value, which cannot be reconstructed later from
+  // grouped totals alone.
+  var cubeDict = { province: [], area: [], branch: [], client: [], status: [] };
+  var cubeDictIdx = { province: {}, area: {}, branch: {}, client: {}, status: {} };
+  var cubeRecordMap = {}, cubeRecordOrder = [];
+  var CUBE_ATTEMPT_KEYS = ["first", "second", "other", "na"];
+  function cubeDictIndex(dim, value) {
+    var idxMap = cubeDictIdx[dim], arr = cubeDict[dim];
+    if (idxMap.hasOwnProperty(value)) return idxMap[value];
+    var idx = arr.length;
+    arr.push(value);
+    idxMap[value] = idx;
+    return idx;
+  }
+
   function ensureAcc(map, order, key) {
     if (!map[key]) { map[key] = summaryNewGroupAcc(); order.push(key); }
     return map[key];
@@ -1029,13 +1289,44 @@ function getMonthDashboardSummary(sheetName, params) {
 
     var target = (branchSlaTargets && branchSlaTargets[pr.branch] !== undefined) ? branchSlaTargets[pr.branch] : slaTargetDefault;
 
+    if (isPersistentBuild) {
+      var cubeDayKey = pr.pickup ? Utilities.formatDate(pr.pickup, tz, "yyyy-MM-dd") : "";
+      var cubeAttemptIdx = CUBE_ATTEMPT_KEYS.indexOf(pr.attemptCat);
+      if (cubeAttemptIdx < 0) cubeAttemptIdx = 3; // "na"
+      var cubeKey = cubeDictIndex("province", pr.province || "غير محدد") + "\u0001" +
+        cubeDictIndex("area", pr.area || "غير محدد") + "\u0001" +
+        cubeDictIndex("branch", pr.branch || "غير محدد") + "\u0001" +
+        cubeDictIndex("client", pr.client || "غير محدد") + "\u0001" +
+        cubeDictIndex("status", pr.status || "غير محدد") + "\u0001" +
+        cubeAttemptIdx + "\u0001" + cubeDayKey;
+      if (!cubeRecordMap[cubeKey]) {
+        var newRec = {
+          p: cubeDictIdx.province[pr.province || "غير محدد"], a: cubeDictIdx.area[pr.area || "غير محدد"],
+          br: cubeDictIdx.branch[pr.branch || "غير محدد"], c: cubeDictIdx.client[pr.client || "غير محدد"],
+          s: cubeDictIdx.status[pr.status || "غير محدد"], at: cubeAttemptIdx, d: cubeDayKey,
+          n: 0, ws: 0, sb: 0, sd: 0, dwd: 0, mx: 0, cod: 0, sc: 0
+        };
+        cubeRecordMap[cubeKey] = newRec;
+        cubeRecordOrder.push(cubeKey);
+      }
+      var crec = cubeRecordMap[cubeKey];
+      crec.n++;
+      crec.cod += pr.cod; crec.sc += pr.shipCost;
+      if (pr.bucket === "delivered" && pr.slaDays !== null) {
+        crec.dwd++;
+        crec.sd += pr.slaDays;
+        if (pr.slaDays > crec.mx) crec.mx = pr.slaDays;
+        if (pr.slaDays <= target) crec.ws++; else crec.sb++;
+      }
+    }
+
     summaryAccumulateRow(topAcc, pr, target);
     if (pr.bucket === "delivered" && pr.slaDays !== null) topSlaDaysArr.push(pr.slaDays);
 
-    if (pr.branch) summaryAccumulateRow(ensureAcc(branchAccMap, branchOrder, pr.branch), pr, target);
-    if (pr.client) summaryAccumulateRow(ensureAcc(customerAccMap, customerOrder, pr.client), pr, target);
-    if (pr.province) summaryAccumulateRow(ensureAcc(provinceAccMap, provinceOrder, pr.province), pr, target);
-    if (pr.area) summaryAccumulateRow(ensureAcc(areaAccMap, areaOrder, pr.area), pr, target);
+    summaryAccumulateRow(ensureAcc(branchAccMap, branchOrder, pr.branch || "غير محدد"), pr, target);
+    summaryAccumulateRow(ensureAcc(customerAccMap, customerOrder, pr.client || "غير محدد"), pr, target);
+    summaryAccumulateRow(ensureAcc(provinceAccMap, provinceOrder, pr.province || "غير محدد"), pr, target);
+    summaryAccumulateRow(ensureAcc(areaAccMap, areaOrder, pr.area || "غير محدد"), pr, target);
 
     var st = pr.status || "غير محدد";
     statusSummary[st] = (statusSummary[st] || 0) + 1;
@@ -1135,6 +1426,15 @@ function getMonthDashboardSummary(sheetName, params) {
     facets: facets,
     cached: false
   };
+  if (isPersistentBuild) {
+    result.filterCube = { version: 2, dict: cubeDict, records: cubeRecordOrder.map(function(k){
+      var r = cubeRecordMap[k];
+      return [r.p, r.a, r.br, r.c, r.s, r.at, r.d, r.n, r.ws, r.sb, r.sd, r.dwd, r.mx, r.cod, r.sc];
+    }), buildConfig: {
+      attemptT1: attemptT1, attemptT2: attemptT2,
+      slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets
+    } };
+  }
   var tResponsePrepEnd = new Date().getTime();
 
   try {
