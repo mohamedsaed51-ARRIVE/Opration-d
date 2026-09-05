@@ -1711,9 +1711,48 @@ function getAllMonthsDashboardSummary(params) {
 
   var includedMonths = [];
   var emptyMonths = [];
-  var missingSnapshotMonths = [];
-  var skippedMonths = [];
+  var missingSnapshotMonths = []; // months genuinely excluded: no snapshot AND live fallback also failed/was skipped
+  var skippedMonths = []; // months genuinely excluded: time budget reached or an error occurred during live fallback
   var perMonthSummaries = [];
+  var monthSources = {}; // month -> 'snapshot' | 'live-fallback-missing-snapshot' | 'live-fallback-incompatible' | 'live-filtered'
+
+  // Shared by BOTH the "missing snapshot" and "incompatible snapshot" cases
+  // (Rule 2 — unify the logic): never exclude a month just because its
+  // snapshot isn't usable — always attempt the exact same live aggregation
+  // path a single-month request already uses. Only time budget exhaustion
+  // or a genuine live-aggregation failure lands the month in
+  // skippedMonths/missingSnapshotMonths; a successful live result is
+  // included in the total exactly like a snapshot would have been.
+  function tryLiveFallbackForMonth_(month, reason) {
+    var elapsedNow = new Date().getTime() - t0;
+    if (elapsedNow > ALL_MONTHS_TIME_BUDGET_MS) {
+      console.log("[ALL MONTHS LIVE FALLBACK SKIPPED — TIME BUDGET] " + JSON.stringify({ month: month, reason: reason, elapsedMs: elapsedNow }));
+      return { ok: false, dueToBudget: true };
+    }
+    var monthParamsFb = {};
+    for (var pkFb in params) { if (params.hasOwnProperty(pkFb)) monthParamsFb[pkFb] = params[pkFb]; }
+    monthParamsFb.sheet = month;
+    var monthSummaryFb;
+    try { monthSummaryFb = getMonthDashboardSummary(month, monthParamsFb); }
+    catch (eFb) {
+      console.log("[ALL MONTHS LIVE FALLBACK ERROR] " + JSON.stringify({ month: month, reason: reason, error: String(eFb) }));
+      return { ok: false, dueToBudget: false };
+    }
+    if (!monthSummaryFb || monthSummaryFb.success === false) {
+      console.log("[ALL MONTHS LIVE FALLBACK FAILED] " + JSON.stringify({ month: month, reason: reason, error: monthSummaryFb && monthSummaryFb.error }));
+      return { ok: false, dueToBudget: false };
+    }
+    if (monthSummaryFb.empty || monthSummaryFb.noData) {
+      return { ok: true, empty: true };
+    }
+    console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+      month: month, source: "live-fallback-" + reason, rowCount: monthSummaryFb.dq ? monthSummaryFb.dq.totalRows : null,
+      total: monthSummaryFb.kpis ? monthSummaryFb.kpis.total : null, delivered: monthSummaryFb.kpis ? monthSummaryFb.kpis.delivered : null,
+      returned: monthSummaryFb.kpis ? monthSummaryFb.kpis.returned : null, rejected: monthSummaryFb.kpis ? monthSummaryFb.kpis.rejected : null,
+      pending: monthSummaryFb.kpis ? monthSummaryFb.kpis.pending : null, unknown: monthSummaryFb.kpis ? monthSummaryFb.kpis.unknown : null
+    }));
+    return { ok: true, empty: false, summary: monthSummaryFb };
+  }
 
   for (var i = 0; i < MONTH_ORDER.length; i++) {
     var month = MONTH_ORDER[i];
@@ -1727,60 +1766,57 @@ function getAllMonthsDashboardSummary(params) {
       // CURRENT request before it is trusted — never assumed compatible
       // just because zero UI filters are active.
       var snap = getSavedMonthSummary_(month);
-      if (!snap) { missingSnapshotMonths.push(month); continue; }
-      if (snap.empty || snap.noData) { emptyMonths.push(month); continue; }
 
-      var snapBc = snap.filterCube && snap.filterCube.buildConfig;
-      var snapCompatible = snapBc &&
-        Number(snapBc.attemptT1) === Number(attemptT1) &&
-        Number(snapBc.attemptT2) === Number(attemptT2) &&
-        Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
-        summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
-      // A snapshot with no buildConfig at all predates this check — only
-      // treated as compatible when the request itself uses the plain
-      // defaults (matches the same leniency getMonthDashboardSummary
-      // applies to its own unfiltered-snapshot path); any non-default
-      // request against such a snapshot still falls through below.
-      var legacyDefaultsRequested = !snapBc && Number(attemptT1) === 1 && Number(attemptT2) === 2 &&
-        Number(slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS && summaryBranchTargetsEqual_({}, branchSlaTargets);
+      if (snap && (snap.empty || snap.noData)) { emptyMonths.push(month); continue; }
 
-      if (snapCompatible || legacyDefaultsRequested) {
-        perMonthSummaries.push(snap);
-        includedMonths.push(month);
-        console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
-          month: month, rowCount: snap.dataQuality ? snap.dataQuality.totalRows : null,
-          total: snap.kpis ? snap.kpis.total : null, delivered: snap.kpis ? snap.kpis.delivered : null,
-          returned: snap.kpis ? snap.kpis.returned : null, rejected: snap.kpis ? snap.kpis.rejected : null,
-          pending: snap.kpis ? snap.kpis.pending : null, unknown: snap.kpis ? snap.kpis.unknown : null,
-          fromSnapshot: true
-        }));
-        continue;
+      if (snap) {
+        var snapBc = snap.filterCube && snap.filterCube.buildConfig;
+        var snapCompatible = snapBc &&
+          Number(snapBc.attemptT1) === Number(attemptT1) &&
+          Number(snapBc.attemptT2) === Number(attemptT2) &&
+          Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
+          summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
+        // A snapshot with no buildConfig at all predates this check — only
+        // treated as compatible when the request itself uses the plain
+        // defaults (matches the same leniency getMonthDashboardSummary
+        // applies to its own unfiltered-snapshot path); any non-default
+        // request against such a snapshot still falls through to live
+        // fallback below.
+        var legacyDefaultsRequested = !snapBc && Number(attemptT1) === 1 && Number(attemptT2) === 2 &&
+          Number(slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS && summaryBranchTargetsEqual_({}, branchSlaTargets);
+
+        if (snapCompatible || legacyDefaultsRequested) {
+          perMonthSummaries.push(snap);
+          includedMonths.push(month);
+          monthSources[month] = "snapshot";
+          console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+            month: month, source: "snapshot", rowCount: snap.dataQuality ? snap.dataQuality.totalRows : null,
+            total: snap.kpis ? snap.kpis.total : null, delivered: snap.kpis ? snap.kpis.delivered : null,
+            returned: snap.kpis ? snap.kpis.returned : null, rejected: snap.kpis ? snap.kpis.rejected : null,
+            pending: snap.kpis ? snap.kpis.pending : null, unknown: snap.kpis ? snap.kpis.unknown : null
+          }));
+          continue;
+        }
+        // Incompatible: never silently use this snapshot's frozen
+        // attempt/SLA classification — fall through to the SAME unified
+        // live-fallback attempt used for a missing snapshot (Rule 2).
+        console.log("[ALL MONTHS SNAPSHOT INCOMPATIBLE] " + JSON.stringify({ month: month, snapshotConfig: snapBc || null, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
       }
 
-      // Incompatible: never silently use this snapshot's frozen attempt/SLA
-      // classification. Fall through to the exact same per-month path the
-      // filtered branch uses below — it has its own correct compatibility
-      // check and live-aggregation fallback.
-      console.log("[ALL MONTHS SNAPSHOT INCOMPATIBLE] " + JSON.stringify({ month: month, snapshotConfig: snapBc || null, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
-      var elapsedNoFilter = new Date().getTime() - t0;
-      if (elapsedNoFilter > ALL_MONTHS_TIME_BUDGET_MS) { skippedMonths.push(month); continue; }
-      var monthParamsNoFilter = {};
-      for (var pkNf in params) { if (params.hasOwnProperty(pkNf)) monthParamsNoFilter[pkNf] = params[pkNf]; }
-      monthParamsNoFilter.sheet = month;
-      var monthSummaryNoFilter;
-      try { monthSummaryNoFilter = getMonthDashboardSummary(month, monthParamsNoFilter); }
-      catch (eMonthNf) { skippedMonths.push(month); continue; }
-      if (!monthSummaryNoFilter || monthSummaryNoFilter.success === false) { skippedMonths.push(month); continue; }
-      if (monthSummaryNoFilter.empty || monthSummaryNoFilter.noData) { emptyMonths.push(month); continue; }
-      perMonthSummaries.push(monthSummaryNoFilter);
+      // Reached for EITHER "no snapshot at all" OR "incompatible snapshot" —
+      // Rule 1/Rule 2: always attempt live aggregation before excluding the
+      // month. Only a genuine failure (or time budget) excludes it.
+      var fbReason = snap ? "incompatible" : "missing-snapshot";
+      var fb = tryLiveFallbackForMonth_(month, fbReason);
+      if (!fb.ok) {
+        if (fbReason === "missing-snapshot") missingSnapshotMonths.push(month);
+        else skippedMonths.push(month);
+        continue;
+      }
+      if (fb.empty) { emptyMonths.push(month); continue; }
+      perMonthSummaries.push(fb.summary);
       includedMonths.push(month);
-      console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
-        month: month, rowCount: monthSummaryNoFilter.dq ? monthSummaryNoFilter.dq.totalRows : null,
-        total: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.total : null, delivered: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.delivered : null,
-        returned: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.returned : null, rejected: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.rejected : null,
-        pending: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.pending : null, unknown: monthSummaryNoFilter.kpis ? monthSummaryNoFilter.kpis.unknown : null,
-        fromSnapshot: false, fallbackReason: "config-incompatible"
-      }));
+      monthSources[month] = "live-fallback-" + fbReason;
     } else {
       // FILTERED PATH: persisted snapshots are always unfiltered, so a
       // filtered All-Months view needs each month's OWN filtered
@@ -1800,8 +1836,9 @@ function getAllMonthsDashboardSummary(params) {
       if (monthSummary.empty || monthSummary.noData) { emptyMonths.push(month); continue; }
       perMonthSummaries.push(monthSummary);
       includedMonths.push(month);
+      monthSources[month] = "live-filtered";
       console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
-        month: month, rowCount: monthSummary.dq ? monthSummary.dq.totalRows : null,
+        month: month, source: "live-filtered", rowCount: monthSummary.dq ? monthSummary.dq.totalRows : null,
         total: monthSummary.kpis ? monthSummary.kpis.total : null, delivered: monthSummary.kpis ? monthSummary.kpis.delivered : null,
         returned: monthSummary.kpis ? monthSummary.kpis.returned : null, rejected: monthSummary.kpis ? monthSummary.kpis.rejected : null,
         pending: monthSummary.kpis ? monthSummary.kpis.pending : null, unknown: monthSummary.kpis ? monthSummary.kpis.unknown : null,
@@ -1819,7 +1856,8 @@ function getAllMonthsDashboardSummary(params) {
       dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false },
       facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} },
       colMap: {}, allMonths: true, includedMonths: [], emptyMonths: emptyMonths,
-      missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths, partial: !!skippedMonths.length,
+      missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths, partial: !!(skippedMonths.length || missingSnapshotMonths.length),
+      monthSources: monthSources,
       generatedAt: new Date().toISOString()
     };
   }
@@ -1868,7 +1906,8 @@ function getAllMonthsDashboardSummary(params) {
     allMonths: true,
     includedMonths: includedMonths, emptyMonths: emptyMonths,
     missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths,
-    partial: !!skippedMonths.length,
+    partial: !!(skippedMonths.length || missingSnapshotMonths.length),
+    monthSources: monthSources,
     cached: false
   };
 

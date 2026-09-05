@@ -1249,33 +1249,73 @@ function normalizeEmptySummary(summary){
   if(zeroRows){ summary.empty = true; summary.noData = true; }
   return summary;
 }
+// A cached All-Months summary is only "good enough to show as-is" when it
+// isn't partial — a result missing some months' data (no snapshot yet, or
+// skipped for time/error reasons) must never be treated as equivalent to a
+// complete cache hit, even though it's technically present in storage.
+// Single-month summaries have no such concept and are always usable.
+function isUsableCachedSummary(summary, month){
+  if(month !== ALL_MONTHS_SENTINEL) return true;
+  if(!summary) return false;
+  if(summary.empty || summary.noData) return true; // genuinely empty is not "partial", nothing to complete
+  return !summary.partial &&
+    !(summary.missingSnapshotMonths && summary.missingSnapshotMonths.length) &&
+    !(summary.skippedMonths && summary.skippedMonths.length);
+}
+
 async function ensureMonthSummaryCached(month, opts){
   opts = opts || {};
   if(!opts.force && monthSummaryMemCache.has(month)){
-    console.info('[CACHE HIT]', { month, source:'memory' });
-    return { summary: normalizeEmptySummary(monthSummaryMemCache.get(month)), fromCache: true };
+    const cachedVal = monthSummaryMemCache.get(month);
+    if(isUsableCachedSummary(cachedVal, month)){
+      console.info('[CACHE HIT]', { month, source:'memory' });
+      return { summary: normalizeEmptySummary(cachedVal), fromCache: true };
+    }
+    console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
   }
   if(!opts.force){
     const cachedIdb = await loadMonthSummaryFromIDB(month);
     if(cachedIdb && cachedIdb.summary){
-      normalizeEmptySummary(cachedIdb.summary);
-      monthSummaryMemCache.set(month, cachedIdb.summary);
-      console.info('[CACHE HIT]', { month, source:'IndexedDB', savedAt: cachedIdb.savedAt });
-      return { summary: cachedIdb.summary, fromCache: true };
+      if(isUsableCachedSummary(cachedIdb.summary, month)){
+        normalizeEmptySummary(cachedIdb.summary);
+        monthSummaryMemCache.set(month, cachedIdb.summary);
+        console.info('[CACHE HIT]', { month, source:'IndexedDB', savedAt: cachedIdb.savedAt });
+        return { summary: cachedIdb.summary, fromCache: true };
+      }
+      console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'IndexedDB', missingSnapshotMonths: cachedIdb.summary.missingSnapshotMonths, skippedMonths: cachedIdb.summary.skippedMonths });
     }
   }
   console.info('[CACHE MISS]', { month });
   const t0 = performance.now();
   console.info('[MONTH LOAD START]', { month, context:'dashboard-summary' });
-  const serverSummary = await fetchMonthDashboardSummary(month, { forceRefresh: opts.force });
-  if(!serverSummary || serverSummary.success === false){
-    throw new Error((serverSummary && serverSummary.error) || 'تعذر تحميل ملخص الشهر.');
+  try{
+    const serverSummary = await fetchMonthDashboardSummary(month, { forceRefresh: opts.force });
+    if(!serverSummary || serverSummary.success === false){
+      throw new Error((serverSummary && serverSummary.error) || 'تعذر تحميل ملخص الشهر.');
+    }
+    normalizeEmptySummary(serverSummary);
+    monthSummaryMemCache.set(month, serverSummary);
+    await saveMonthSummaryToIDB(month, serverSummary);
+    console.info('[MONTH LOAD COMPLETE]', { month, context:'dashboard-summary', totalRows: serverSummary.totalRows, ms: Math.round(performance.now()-t0) });
+    return { summary: serverSummary, fromCache: false };
+  }catch(liveErr){
+    // The live attempt to get a COMPLETE result failed — fall back to
+    // whatever partial cache we already rejected above, rather than
+    // failing outright, but mark it explicitly so the UI shows a clear
+    // "outdated/incomplete cache" notice instead of presenting it as fresh.
+    if(!opts.force){
+      const staleFallback = monthSummaryMemCache.get(month) ||
+        (await loadMonthSummaryFromIDB(month).catch(()=>null))?.summary;
+      if(staleFallback){
+        const stale = normalizeEmptySummary(staleFallback);
+        stale.staleCacheFallback = true;
+        stale.staleCacheFallbackReason = String(liveErr && liveErr.message || liveErr);
+        console.warn('[CACHE PARTIAL FALLBACK — LIVE RETRY FAILED]', { month, reason: stale.staleCacheFallbackReason });
+        return { summary: stale, fromCache: true };
+      }
+    }
+    throw liveErr;
   }
-  normalizeEmptySummary(serverSummary);
-  monthSummaryMemCache.set(month, serverSummary);
-  await saveMonthSummaryToIDB(month, serverSummary);
-  console.info('[MONTH LOAD COMPLETE]', { month, context:'dashboard-summary', totalRows: serverSummary.totalRows, ms: Math.round(performance.now()-t0) });
-  return { summary: serverSummary, fromCache: false };
 }
 // Main dashboard's entry point — the FULL server response: kpis, branch/
 // customer/province/area summaries, attemptSummary, trend, timeSeries,
@@ -1728,11 +1768,8 @@ async function buildDashboardDataFromRows(rows, month, opts){
 function applyLoadedSummary(summary, month){
   STATE.serverOverviewSummary = summary;
   STATE.serverOverviewFilters = {};
-  STATE.dq = summary.dataQuality || null;
   STATE.columnMap = summary.colMap || {};
   STATE.fileName = `Google Sheets — Apps Script (${monthDisplayName(month)})`;
-  STATE.lastUpdated = new Date(summary.generatedAt || Date.now());
-  STATE.rowsLoaded = summary.dataQuality ? summary.dataQuality.totalRows : (summary.grandTotal || 0);
   STATE.grandTotalShipments = summary.grandTotal || 0;
   buildDimensionsFromFacets(summary.facets); // recomputes STATE.dims + resets STATE.filters selections for the new month
   if(!filtersInitialized){
@@ -1745,9 +1782,8 @@ function applyLoadedSummary(summary, month){
   // Do not call renderAll() here: renderAll() is used for filter changes and
   // requests another server summary, causing a duplicate request immediately
   // after a successful month load.
-  updateTopbar();
   renderExecFilterTag();
-  applyServerSummaryToDashboard(summary);
+  applyServerSummaryToDashboard(summary); // syncs STATE.dq/rowsLoaded/lastUpdated and refreshes the topbar (syncTopbarStateFromSummary), then renders KPIs/alerts/tabs
   document.getElementById('app').classList.remove('hidden');
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(refreshBtn) refreshBtn.classList.remove('hidden');
@@ -4337,7 +4373,11 @@ function updateTopbar(){
   document.getElementById('metaRowCount').textContent = fmtInt(STATE.rowsLoaded);
   const daily = (STATE.serverOverviewSummary && STATE.serverOverviewSummary.timeSeries && STATE.serverOverviewSummary.timeSeries.daily) || [];
   if(daily.length){
-    document.getElementById('metaPeriod').textContent = daily[0].label + ' → ' + daily[daily.length-1].label;
+    // Explicit min/max over every included label — never relies on the
+    // array already being in chronological order.
+    let earliest = daily[0].label, latest = daily[0].label;
+    for(const d of daily){ if(d.label < earliest) earliest = d.label; if(d.label > latest) latest = d.label; }
+    document.getElementById('metaPeriod').textContent = earliest + ' → ' + latest;
   }else{
     document.getElementById('metaPeriod').textContent = '-';
   }
@@ -4346,6 +4386,39 @@ function updateTopbar(){
   badge.textContent = hasIssues ? '● توجد ملاحظات جودة' : '● بيانات صالحة';
   badge.style.color = hasIssues ? '#F2B75B' : '#4ADE9C';
   badge.style.background = hasIssues ? 'rgba(242,183,91,.15)' : 'rgba(46,201,138,.18)';
+  renderAllMonthsCompletenessWarning(STATE.serverOverviewSummary);
+}
+
+// A "كل الشهور" (All Months) result can legitimately include FEWER than
+// every real month — a month whose persisted summary was never built (or
+// predates a PERSISTENT_SUMMARY_VERSION bump) is correctly excluded rather
+// than guessed at, per the backend's own contract. But that must never be
+// silently invisible: an incomplete total must never look identical to a
+// complete one. This renders (or clears) an explicit banner naming exactly
+// which months are missing whenever the current summary is flagged partial.
+function renderAllMonthsCompletenessWarning(summary){
+  let el = document.getElementById('allMonthsCompletenessWarning');
+  if(!summary || !summary.allMonths || (!summary.partial && !summary.staleCacheFallback)){
+    if(el) el.remove();
+    return;
+  }
+  const missing = summary.missingSnapshotMonths || [];
+  const skipped = summary.skippedMonths || [];
+  const parts = [];
+  if(summary.staleCacheFallback){
+    parts.push(`تعذّر تحديث البيانات (${summary.staleCacheFallbackReason || 'خطأ غير معروف'}) — المعروض حاليًا نسخة محفوظة قديمة وغير مكتملة`);
+  }
+  if(missing.length) parts.push(`لا يوجد ملخص محفوظ ولم تنجح محاولة الحساب المباشر لهذه الشهور: ${missing.map(monthDisplayName).join('، ')} (شغّل "تحديث ملخصات كل الشهور" من قائمة ARRIVE Dashboard في الشيت)`);
+  if(skipped.length) parts.push(`تم تخطي هذه الشهور بسبب الوقت أو خطأ: ${skipped.map(monthDisplayName).join('، ')} (أعد المحاولة)`);
+  const message = 'الإجمالي المعروض لا يشمل كل الشهور. ' + parts.join(' | ');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'allMonthsCompletenessWarning';
+    el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(242,183,91,.15);color:#B8842A;border:1px solid rgba(242,183,91,.4);font-size:13px;font-weight:600;';
+    const topbar = document.querySelector('.topbar') || document.getElementById('app');
+    if(topbar && topbar.parentNode) topbar.parentNode.insertBefore(el, topbar.nextSibling);
+  }
+  el.textContent = '⚠ ' + message;
 }
 
 function renderExecFilterTag(){
@@ -4365,6 +4438,13 @@ function renderKpiCards(k){
     {label:'رفض الاستلام', value:fmtInt(k.rejected), cls:'neg', sub:fmtPct(k.rejectedRate)+' Rejected Rate'},
     {label:'قيد التشغيل', value:fmtInt(k.pending), cls:'neu', sub:'شحنات مفتوحة'},
   ];
+  // Never silently drop shipments whose status doesn't map to one of the
+  // four buckets above — show them explicitly whenever there are any, so
+  // delivered+returned+rejected+pending+unknown always visibly reconciles
+  // to the Total card instead of leaving an unexplained gap.
+  if(k.unknown){
+    cards.push({label:'غير مصنف', value:fmtInt(k.unknown), cls:'warn', sub:'حالة شحن غير معروفة للنظام'});
+  }
   document.getElementById('kpiGrid').innerHTML = cards.map(c=>`
     <div class="kpi-card ${c.cls}">
       <div class="kpi-label">${c.label}</div>
@@ -4547,6 +4627,7 @@ async function refreshKpiAndOverviewFromServer(month, opts){
 }
 
 function applyServerSummaryToDashboard(serverSummary){
+  syncTopbarStateFromSummary(serverSummary);
   if(serverSummary.empty){
     STATE.grandTotalShipments = 0;
     renderKpiCards(ZERO_KPIS);
@@ -4557,6 +4638,20 @@ function applyServerSummaryToDashboard(serverSummary){
   renderAlertsFromServer(serverSummary); // always-visible, like KPI cards — not gated behind a tab click
   ['overview','branches','geo','clients','sla','trend','dq'].forEach(t=>dirtyTabs.add(t));
   renderActiveTabIfDirty();
+}
+
+// Single source of truth for syncing STATE's topbar-facing fields (row
+// count, quality flags, last-updated, completeness) from whichever summary
+// was just rendered, then refreshing the topbar from that freshly-synced
+// STATE. Must be called every time a summary is applied — the initial
+// month/All-Months load AND every filter-triggered refresh — otherwise the
+// topbar silently keeps showing the previous selection's numbers.
+function syncTopbarStateFromSummary(serverSummary){
+  if(!serverSummary) return;
+  STATE.dq = serverSummary.dataQuality || null;
+  STATE.rowsLoaded = serverSummary.dataQuality ? serverSummary.dataQuality.totalRows : (serverSummary.grandTotal || 0);
+  STATE.lastUpdated = new Date(serverSummary.generatedAt || Date.now());
+  updateTopbar();
 }
 
 /* =========================================================
