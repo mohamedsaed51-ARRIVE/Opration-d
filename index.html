@@ -3665,55 +3665,90 @@ async function mgmtGenerateExecutivePdfReport(){
    OVERALL and MOVEMENT column blocks. Dedicated movement-analysis sheets
    (8/9) use the same mgmtEntryMovement() the PDF's movement sections use.
    ========================================================= */
-function mgmtBuildEntityComparisonSheet(entries, months, entityLabel){
-  // Two-level header: row 1 has the month label spanning its metric block
-  // (merged), row 2 has the per-metric column labels — plus OVERALL and
-  // MOVEMENT blocks at the end (never merged with a month).
-  const metricLabels = ['Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','In Progress %','SLA %'];
+// ROTATED comparison matrix: KPI names down column A, each entity is a
+// merged column-group header with its selected months as sub-columns
+// beneath it (never repeating the entity name once per month). Uses
+// mgmtEntryMonthRates() per entity/month — the same values the PDF's
+// movement sections and the Overall/Movement sheet below use, so all three
+// can never disagree. A month with no data for that entity is left BLANK
+// (never an assumed zero), per the existing missing-data rule.
+function mgmtBuildRotatedComparisonSheet(entries, months, entityLabel){
+  const kpiDefs = [
+    {label:'إجمالي الشحنات', isPct:false, get:r=>r?r.count:null},
+    {label:'تم التسليم', isPct:false, get:r=>r?r.delivered:null},
+    {label:'نسبة التسليم', isPct:true, get:r=>r?r.deliveryRate:null},
+    {label:'المرتجعات', isPct:false, get:r=>r?r.returned:null},
+    {label:'نسبة المرتجعات', isPct:true, get:r=>r?r.returnRate:null},
+    {label:'الرفض', isPct:false, get:r=>r?r.rejected:null},
+    {label:'نسبة الرفض', isPct:true, get:r=>r?r.rejectRate:null},
+    {label:'قيد التشغيل', isPct:false, get:r=>r?r.pending:null},
+    {label:'نسبة قيد التشغيل', isPct:true, get:r=>r?r.inProgressRate:null},
+    {label:'SLA %', isPct:true, get:r=>r?r.slaPct:null},
+  ];
+
+  // Row 1: entity name once, spanning its month columns. Row 2: months
+  // under that entity. Single-month mode naturally produces one column per
+  // entity (no empty month columns), since `months` is already exactly the
+  // selected period's month list either way.
   const headerRow1 = [entityLabel];
   const headerRow2 = [''];
-  months.forEach(m=>{
-    headerRow1.push(m, ...Array(metricLabels.length-1).fill(''));
-    headerRow2.push(...metricLabels);
+  entries.forEach(e=>{
+    headerRow1.push(e.name, ...Array(Math.max(0, months.length-1)).fill(''));
+    headerRow2.push(...months);
   });
-  headerRow1.push('OVERALL', ...Array(metricLabels.length-1).fill(''));
-  headerRow2.push(...metricLabels);
-  const movementLabels = ['First Month Volume','Last Month Volume','Volume Change','Volume Change %','First Month Delivery %','Last Month Delivery %','Delivery Rate Change','First Month Return %','Last Month Return %','Return Rate Change'];
-  headerRow1.push('MOVEMENT', ...Array(movementLabels.length-1).fill(''));
-  headerRow2.push(...movementLabels);
 
-  const dataRows = entries.map(e=>{
-    const row = [e.name];
-    months.forEach(m=>{
-      const r = mgmtEntryMonthRates(e.entry || e, m); // e.entry only set for wrapped movement objects; mgmtSortedEntries() entries themselves have byMonth on .entry — see call site
-      if(!r){ row.push('','','','','','','','','',''); } // no data for this entity in this month — blank cells, never an assumed zero
-      else row.push(r.count, r.delivered, pct1(r.deliveryRate), r.returned, pct1(r.returnRate), r.rejected, pct1(r.rejectRate), r.pending, pct1(r.inProgressRate), r.slaPct!==null?pct1(r.slaPct):'');
+  const dataRows = kpiDefs.map(def=>{
+    const row = [def.label];
+    entries.forEach(e=>{
+      months.forEach(m=>{
+        const r = mgmtEntryMonthRates(e.entry || e, m);
+        const v = def.get(r);
+        row.push(v===null||v===undefined ? '' : (def.isPct ? pct1(v) : v));
+      });
     });
-    const s = e.stats;
-    row.push(s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate), s.rejected, pct1(s.rejectRate), s.pending, pct1(s.inProgressRate), pct1(s.slaPct));
-    const mv = months.length>1 ? mgmtEntryMovement(e.entry || e, months) : null;
-    if(mv){
-      row.push(mv.firstRates.count, mv.lastRates.count, mv.volumeChange, pct1(mv.volumeChangePct),
-        pct1(mv.firstRates.deliveryRate), pct1(mv.lastRates.deliveryRate), pct1(mv.deliveryRateChange),
-        pct1(mv.firstRates.returnRate), pct1(mv.lastRates.returnRate), pct1(mv.returnRateChange));
-    }else{
-      row.push('','','','لا توجد فترة مقارنة متاحة','','','','','','');
-    }
     return row;
   });
 
-  const aoa = [headerRow1, headerRow2, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const ws = XLSX.utils.aoa_to_sheet([headerRow1, headerRow2, ...dataRows]);
 
-  // Merge each month's (and OVERALL's/MOVEMENT's) header cells across its metric block.
-  const merges = [{s:{r:0,c:0}, e:{r:1,c:0}}]; // entity name column spans both header rows
+  // Merge each entity's name across its month columns (row 0), and the KPI
+  // label column across both header rows (column 0).
+  const merges = [{s:{r:0,c:0}, e:{r:1,c:0}}];
   let col = 1;
-  months.forEach(()=>{ merges.push({s:{r:0,c:col}, e:{r:0,c:col+metricLabels.length-1}}); col += metricLabels.length; });
-  merges.push({s:{r:0,c:col}, e:{r:0,c:col+metricLabels.length-1}}); col += metricLabels.length; // OVERALL
-  merges.push({s:{r:0,c:col}, e:{r:0,c:col+movementLabels.length-1}}); // MOVEMENT
+  entries.forEach(()=>{
+    if(months.length>1) merges.push({s:{r:0,c:col}, e:{r:0,c:col+months.length-1}});
+    col += months.length;
+  });
   ws['!merges'] = merges;
+  // Freeze BOTH the KPI label column and the two header rows, so scrolling
+  // horizontally through many branches/customers still keeps the KPI names
+  // and month/entity headers visible.
   ws['!freeze'] = { xSplit:1, ySplit:2 };
-  ws['!cols'] = [{wch:22}, ...Array(col + movementLabels.length - 1).fill({wch:11})];
+  ws['!cols'] = [{wch:20}, ...Array(Math.max(0, col-1)).fill({wch:11})];
+  return ws;
+}
+
+// Entity rows (one per branch/customer) with ONLY overall period totals and
+// movement — kept as a SEPARATE sheet from the monthly matrix above so that
+// sheet stays a clean, uncluttered KPI-by-month grid.
+function mgmtBuildOverallMovementSheet(entries, months, entityLabel){
+  const hasComparison = months.length > 1;
+  const header = [entityLabel, 'Overall Total','Overall Delivery %','Overall Return %','Overall Reject %','Overall In Progress %','Overall SLA %'];
+  if(hasComparison) header.push('Volume Change','Volume Change %','Delivery Rate Change','Return Rate Change');
+  const rows = [header];
+  entries.forEach(e=>{
+    const s = e.stats;
+    const row = [e.name, s.totalVolume, pct1(s.deliveryRate), pct1(s.returnRate), pct1(s.rejectRate), pct1(s.inProgressRate), pct1(s.slaPct)];
+    if(hasComparison){
+      const mv = mgmtEntryMovement(e.entry || e, months);
+      if(mv) row.push(mv.volumeChange, pct1(mv.volumeChangePct), pct1(mv.deliveryRateChange), pct1(mv.returnRateChange));
+      else row.push('','','','لا توجد فترة مقارنة متاحة');
+    }
+    rows.push(row);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!freeze'] = { xSplit:1, ySplit:1 };
+  ws['!cols'] = [{wch:22}, ...Array(header.length-1).fill({wch:14})];
   return ws;
 }
 
@@ -3757,6 +3792,7 @@ async function mgmtGenerateExcelReport(){
     const customerForSheet = withRawEntry(customerEntries, customerSeriesMap);
 
     const wb = XLSX.utils.book_new();
+    wb.Workbook = { Views: [{ RTL: true }] }; // Arabic content — display the workbook right-to-left where the library supports it
 
     // Sheet 1: Executive KPI
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
@@ -3783,11 +3819,11 @@ async function mgmtGenerateExcelReport(){
     wsMonthly['!cols'] = [{wch:14},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:12},{wch:8}];
     XLSX.utils.book_append_sheet(wb, wsMonthly, 'Monthly Performance');
 
-    // Sheet 3: Branch Performance Comparison (one row per branch, months side-by-side)
-    XLSX.utils.book_append_sheet(wb, mgmtBuildEntityComparisonSheet(branchForSheet, months, 'Branch'), 'Branch Comparison');
-
-    // Sheet 4: Customer Performance Comparison
-    XLSX.utils.book_append_sheet(wb, mgmtBuildEntityComparisonSheet(customerForSheet, months, 'Customer'), 'Customer Comparison');
+    // Branch Comparison — rotated matrix (KPI rows x Branch/month column groups) + separate Overall & Movement sheet
+    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(branchForSheet, months, 'Branch'), 'Branch Comparison');
+    XLSX.utils.book_append_sheet(wb, mgmtBuildOverallMovementSheet(branchForSheet, months, 'Branch'), 'Branch Overall & Movement');
+    XLSX.utils.book_append_sheet(wb, mgmtBuildRotatedComparisonSheet(customerForSheet, months, 'Customer'), 'Customer Comparison');
+    XLSX.utils.book_append_sheet(wb, mgmtBuildOverallMovementSheet(customerForSheet, months, 'Customer'), 'Customer Overall & Movement');
 
     // Sheet 5: Governorate Performance (if data exists)
     if(provinceEntries.length){
