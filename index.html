@@ -3401,148 +3401,26 @@ function mgmtRegisterArabicFont(doc){
 }
 
 /* =========================================================
-   ARABIC TEXT PROCESSING — real shaping + BiDi, replacing jsPDF's
-   isInputRtl (which only does a naive full-string character reversal, not
-   real Arabic shaping or the Unicode BiDi algorithm — that is exactly what
-   turned "January" into "yraunaJ" and "77.6%" into "%6.77" in production).
-   isInputRtl must never be used anywhere in this file again; every string
-   drawn to the PDF goes through pdfPrepareArabicText() first, then is drawn
-   with a plain LTR doc.text() call (no RTL flag at all).
+   ARABIC TEXT — jsPDF + the embedded Noto Naskh Arabic font handle Arabic
+   shaping AND right-to-left/BiDi ordering CORRECTLY AND AUTOMATICALLY for a
+   perfectly plain doc.text(str, x, y, {align}) call — confirmed by actually
+   rendering test PDFs (jsPDF in Node + PyMuPDF) and visually inspecting the
+   output for every case in the requirements: pure Arabic titles, Arabic
+   sentences with embedded numbers/percentages, mixed "Twear - تي وير"
+   names, pure English "H&H STORE", table rows mixing month+numbers+percent.
+   ALL rendered correctly with zero special handling.
+
+   The root cause of the original bug was ONLY ever isInputRtl:true, which
+   performs a naive whole-string character reversal — not real shaping, not
+   BiDi. An earlier fix attempt replaced isInputRtl with a HAND-WRITTEN
+   shaping+reversal layer (pdfPrepareArabicText/shapeArabicWord) — this was
+   verified BY RENDERING AND VISUALLY INSPECTING THE ACTUAL PDF to be
+   WRONG: it manually re-reversed text that jsPDF was already ordering
+   correctly on its own, reproducing the exact same backwards-text bug via a
+   different mechanism. That entire layer has been removed. The fix is:
+   never pass isInputRtl, never manually reverse or reshape anything — pass
+   the raw string straight to doc.text().
    ========================================================= */
-// Each entry: [isolated, final, initial, medial] Arabic Presentation Forms-B
-// codepoints for a base Arabic letter. Right-joining-only letters (alef,
-// dal, dhal, ra, zay, waw, ta-marbuta, alef-maksura, the hamza carriers)
-// have no initial/medial form — they never connect to the letter that
-// follows them — so those two slots are left null.
-const ARABIC_SHAPES = {
-  '\u0621':['\uFE80',null,null,null],           // ء hamza (never joins)
-  '\u0622':['\uFE81','\uFE82',null,null],        // آ alef madda
-  '\u0623':['\uFE83','\uFE84',null,null],        // أ alef hamza above
-  '\u0624':['\uFE85','\uFE86',null,null],        // ؤ waw hamza
-  '\u0625':['\uFE87','\uFE88',null,null],        // إ alef hamza below
-  '\u0626':['\uFE89','\uFE8A','\uFE8B','\uFE8C'],// ئ ya hamza
-  '\u0627':['\uFE8D','\uFE8E',null,null],        // ا alef
-  '\u0628':['\uFE8F','\uFE90','\uFE91','\uFE92'],// ب ba
-  '\u0629':['\uFE93','\uFE94',null,null],        // ة ta marbuta
-  '\u062A':['\uFE95','\uFE96','\uFE97','\uFE98'],// ت ta
-  '\u062B':['\uFE99','\uFE9A','\uFE9B','\uFE9C'],// ث tha
-  '\u062C':['\uFE9D','\uFE9E','\uFE9F','\uFEA0'],// ج jeem
-  '\u062D':['\uFEA1','\uFEA2','\uFEA3','\uFEA4'],// ح ha
-  '\u062E':['\uFEA5','\uFEA6','\uFEA7','\uFEA8'],// خ kha
-  '\u062F':['\uFEA9','\uFEAA',null,null],        // د dal
-  '\u0630':['\uFEAB','\uFEAC',null,null],        // ذ dhal
-  '\u0631':['\uFEAD','\uFEAE',null,null],        // ر ra
-  '\u0632':['\uFEAF','\uFEB0',null,null],        // ز zay
-  '\u0633':['\uFEB1','\uFEB2','\uFEB3','\uFEB4'],// س seen
-  '\u0634':['\uFEB5','\uFEB6','\uFEB7','\uFEB8'],// ش sheen
-  '\u0635':['\uFEB9','\uFEBA','\uFEBB','\uFEBC'],// ص sad
-  '\u0636':['\uFEBD','\uFEBE','\uFEBF','\uFEC0'],// ض dad
-  '\u0637':['\uFEC1','\uFEC2','\uFEC3','\uFEC4'],// ط ta (emphatic)
-  '\u0638':['\uFEC5','\uFEC6','\uFEC7','\uFEC8'],// ظ za
-  '\u0639':['\uFEC9','\uFECA','\uFECB','\uFECC'],// ع ain
-  '\u063A':['\uFECD','\uFECE','\uFECF','\uFED0'],// غ ghain
-  '\u0641':['\uFED1','\uFED2','\uFED3','\uFED4'],// ف fa
-  '\u0642':['\uFED5','\uFED6','\uFED7','\uFED8'],// ق qaf
-  '\u0643':['\uFED9','\uFEDA','\uFEDB','\uFEDC'],// ك kaf
-  '\u0644':['\uFEDD','\uFEDE','\uFEDF','\uFEE0'],// ل lam
-  '\u0645':['\uFEE1','\uFEE2','\uFEE3','\uFEE4'],// م meem
-  '\u0646':['\uFEE5','\uFEE6','\uFEE7','\uFEE8'],// ن noon
-  '\u0647':['\uFEE9','\uFEEA','\uFEEB','\uFEEC'],// ه ha (regular)
-  '\u0648':['\uFEED','\uFEEE',null,null],        // و waw
-  '\u0649':['\uFEEF','\uFEF0',null,null],        // ى alef maksura
-  '\u064A':['\uFEF1','\uFEF2','\uFEF3','\uFEF4'],// ي ya
-};
-// LAM+ALEF ligatures — Arabic always renders these two letters as a single
-// joined glyph, never as separate lam-then-alef shapes.
-const LAM_ALEF_LIGATURES = {
-  '\u0627':['\uFEFB','\uFEFC'], // لا  (lam + plain alef)      [isolated, final]
-  '\u0623':['\uFEF7','\uFEF8'], // لأ  (lam + alef-hamza-above)
-  '\u0625':['\uFEF9','\uFEFA'], // لإ  (lam + alef-hamza-below)
-  '\u0622':['\uFEF5','\uFEF6'], // لآ  (lam + alef-madda)
-};
-const ARABIC_DIACRITICS = /[\u064B-\u065F\u0670]/; // tashkeel — transparent to joining, kept in place if present
-
-function isArabicLetter(ch){ return !!ch && !!ARABIC_SHAPES[ch]; }
-function isArabicRangeChar(ch){
-  if(!ch) return false;
-  const c = ch.codePointAt(0);
-  return (c>=0x0600 && c<=0x06FF) || (c>=0x0750 && c<=0x077F);
-}
-
-// Shapes ONE Arabic word (a maximal run of Arabic letters/diacritics with no
-// spaces) into its correctly-joined presentation-form glyphs, applying
-// LAM+ALEF ligatures, then reverses the RESULT so the word's glyphs are in
-// correct right-to-left visual/storage order for a plain LTR draw call.
-function shapeArabicWord(word){
-  const letters = Array.from(word).filter(ch => !ARABIC_DIACRITICS.test(ch));
-  const shaped = [];
-  for(let i=0;i<letters.length;i++){
-    const ch = letters[i];
-    if(!isArabicLetter(ch)){ shaped.push(ch); continue; } // shouldn't normally happen inside a pure-Arabic word run
-    const prev = i>0 ? letters[i-1] : null;
-    const next = i<letters.length-1 ? letters[i+1] : null;
-    // LAM + ALEF-family ligature: consume both letters as one glyph.
-    if(ch==='\u0644' && next && LAM_ALEF_LIGATURES[next]){
-      const prevConnects = prev && isArabicLetter(prev) && ARABIC_SHAPES[prev][2] !== null;
-      const lig = LAM_ALEF_LIGATURES[next];
-      shaped.push(prevConnects ? lig[1] : lig[0]); // [isolated, final] — ligature only ever needs these two forms
-      i++; // skip the consumed alef-family letter
-      continue;
-    }
-    const shapes = ARABIC_SHAPES[ch];
-    const canJoinPrev = prev && isArabicLetter(prev) && ARABIC_SHAPES[prev][2] !== null; // does the PREVIOUS letter have an initial/medial form (i.e. can it hand off a connection into this one)?
-    const canJoinNext = shapes[2] !== null && next && isArabicLetter(next); // does THIS letter itself support connecting forward at all?
-    let form;
-    if(canJoinPrev && canJoinNext) form = shapes[3] ?? shapes[1]; // medial (fall back to final if this letter has no medial slot)
-    else if(canJoinPrev && !canJoinNext) form = shapes[1]; // final
-    else if(!canJoinPrev && canJoinNext) form = shapes[2]; // initial
-    else form = shapes[0]; // isolated
-    shaped.push(form || shapes[0]);
-  }
-  return shaped.reverse().join('');
-}
-
-// The central function requested: prepares ANY string for correct display
-// via a plain LTR jsPDF text() call (no isInputRtl). Segments the string
-// into runs by script; each Arabic run is shaped + reversed (see above);
-// every other run — Latin words, numbers, percentages, punctuation,
-// parentheses — is left completely untouched, in its original order and
-// characters. Runs are then reassembled in reverse ORDER (since the overall
-// paragraph reads right-to-left), so the whole line lays out correctly when
-// drawn as one ordinary left-to-right glyph sequence.
-function pdfPrepareArabicText(input){
-  if(input === null || input === undefined) return '';
-  const str = String(input);
-  if(!/[\u0600-\u06FF\u0750-\u077F]/.test(str)) return str; // no Arabic at all — nothing to do, never touch pure numbers/English
-
-  // Tokenize into runs: consecutive Arabic-script characters (a "word",
-  // spaces excluded) vs. everything else (Latin letters, digits, %, ., ,,
-  // -, (), spaces — all kept in original reading order).
-  const tokens = [];
-  let cur = '', curIsArabic = null;
-  for(const ch of str){
-    const arabic = isArabicRangeChar(ch) || ARABIC_DIACRITICS.test(ch);
-    if(curIsArabic === null){ curIsArabic = arabic; cur = ch; continue; }
-    if(arabic === curIsArabic){ cur += ch; }
-    else { tokens.push({text:cur, arabic:curIsArabic}); cur = ch; curIsArabic = arabic; }
-  }
-  if(cur) tokens.push({text:cur, arabic:curIsArabic});
-
-  // Shape each Arabic token at the WORD level (spaces inside an Arabic
-  // token still separate words — re-split on spaces, shape each word, keep
-  // the same spacing).
-  const processed = tokens.map(t=>{
-    if(!t.arabic) return t.text; // Latin/digits/punctuation — untouched, original order
-    return t.text.split(' ').map(w => w ? shapeArabicWord(w) : '').join(' ');
-  });
-
-  // Reverse the ORDER of tokens (paragraph is right-to-left overall), but
-  // each individual non-Arabic token's own internal character order was
-  // already left untouched above — this is what keeps "77.6%" as "77.6%"
-  // and "H&H STORE" as "H&H STORE" even inside an Arabic sentence.
-  return processed.reverse().join('');
-}
-
 // Fixed, explicit month-name lookup — never derived from Date/locale
 // formatting (which could reintroduce English names), never reversed.
 const PDF_ARABIC_MONTHS = {
@@ -3572,7 +3450,7 @@ function pdfCheckPageBreak(doc, y, needed){
 function pdfSectionTitle(doc, font, y, text){
   y = pdfCheckPageBreak(doc, y, 30);
   doc.setFont(font,'bold'); doc.setFontSize(13); doc.setTextColor(44,66,87);
-  doc.text(pdfPrepareArabicText(text), PDF_RIGHT, y, {align:'right'});
+  doc.text(text, PDF_RIGHT, y, {align:'right'});
   doc.setDrawColor(44,66,87); doc.setLineWidth(1);
   doc.line(PDF_MARGIN, y+5, PDF_RIGHT, y+5);
   doc.setFont(font,'normal'); doc.setTextColor(20,20,20); doc.setFontSize(9.5);
@@ -3588,7 +3466,7 @@ function pdfParagraph(doc, font, y, text, opts){
   // boundaries), THEN shape+reorder each wrapped line independently — never
   // the other way around, which could wrap a line mid-ligature.
   const rawLines = doc.splitTextToSize(String(text), PDF_USABLE_W - (opts.indent||0));
-  const lines = rawLines.map(l => pdfPrepareArabicText(l));
+  const lines = rawLines;
   y = pdfCheckPageBreak(doc, y, lines.length*13 + 4);
   doc.text(lines, PDF_RIGHT - (opts.indent||0), y, {align:'right'});
   return y + lines.length*13 + (opts.gap!==undefined?opts.gap:6);
@@ -3605,14 +3483,11 @@ function pdfKpiGrid(doc, font, y, cards){
     doc.setDrawColor(220,222,226); doc.setLineWidth(0.5);
     doc.rect(bx, by, boxW, boxH);
     doc.setFontSize(8); doc.setFont(font,'normal'); doc.setTextColor(90,96,105);
-    doc.text(pdfPrepareArabicText(c.label), bx+boxW-8, by+16, {align:'right'});
+    doc.text(c.label, bx+boxW-8, by+16, {align:'right'});
     doc.setFontSize(15); doc.setFont(font,'bold');
     const vcol = c.valueColor || [20,20,20];
     doc.setTextColor(vcol[0],vcol[1],vcol[2]);
-    // c.value is always a pdfFormatNumber/pdfFormatPercent result (pure
-    // digits/%) — pdfPrepareArabicText leaves it untouched either way, but
-    // routing it through consistently is cheap and future-proof.
-    doc.text(pdfPrepareArabicText(String(c.value)), bx+boxW-8, by+34, {align:'right'});
+    doc.text(String(c.value), bx+boxW-8, by+34, {align:'right'});
     if(c.sub){
       const col = c.subColor || [14,124,85];
       doc.setFontSize(9.5); doc.setFont(font,'bold'); doc.setTextColor(col[0],col[1],col[2]);
@@ -3637,7 +3512,7 @@ function pdfDrawTable(doc, font, y, columns, rows){
     doc.setFillColor(44,66,87);
     doc.rect(tableLeft, curY, tableW, headerH, 'F');
     doc.setTextColor(255,255,255); doc.setFont(font,'bold'); doc.setFontSize(fontSize);
-    columns.forEach((c,i)=>{ doc.text(pdfPrepareArabicText(c.header), (cellLeftEdge(i)+cellRightEdge(i))/2, curY+headerH/2+3, {align:'center'}); });
+    columns.forEach((c,i)=>{ doc.text(c.header, (cellLeftEdge(i)+cellRightEdge(i))/2, curY+headerH/2+3, {align:'center'}); });
     doc.setFont(font,'normal'); doc.setTextColor(20,20,20);
     return curY+headerH;
   }
@@ -3645,7 +3520,7 @@ function pdfDrawTable(doc, font, y, columns, rows){
     y = pdfCheckPageBreak(doc, y, headerH+rowH);
     y = drawHeader(y);
     doc.setFontSize(fontSize);
-    doc.text(pdfPrepareArabicText('لا توجد بيانات متاحة'), tableLeft+tableW/2, y+rowH/2+3, {align:'center'});
+    doc.text('لا توجد بيانات متاحة', tableLeft+tableW/2, y+rowH/2+3, {align:'center'});
     return y + rowH + 12;
   }
   y = pdfCheckPageBreak(doc, y, headerH+rowH);
@@ -3660,11 +3535,8 @@ function pdfDrawTable(doc, font, y, columns, rows){
       const isColored = cell && typeof cell === 'object' && 'text' in cell;
       const rawVal = isColored ? cell.text : cell;
       let text = String(rawVal===null||rawVal===undefined?'-':rawVal);
-      // Truncate the RAW text first — never slice an already-shaped string,
-      // which would cut a ligature/joined form in half and render garbage.
       const maxChars = Math.max(3, Math.floor(columns[ci].width/(fontSize*0.55)));
       if(text.length>maxChars) text = text.slice(0,maxChars-1)+'…';
-      text = pdfPrepareArabicText(text);
       if(isColored && cell.color){ doc.setTextColor(cell.color[0],cell.color[1],cell.color[2]); }
       doc.text(text, cx, y+rowH/2+3, {align});
       if(isColored && cell.color){ doc.setTextColor(20,20,20); } // restore default for the next cell
@@ -3745,12 +3617,12 @@ async function mgmtGenerateExecutivePdfReport(){
     // PAGE 1 — الملخص التنفيذي
     doc.setFont(font,'bold'); doc.setFontSize(20); doc.setTextColor(28,38,51);
     doc.text('ARRIVE', PDF_MARGIN, y, {align:'left'}); y+=20;
-    doc.setFontSize(14); doc.text(pdfPrepareArabicText('تقرير إدارة العمليات'), PDF_RIGHT, y, {align:'right'}); y+=18;
+    doc.setFontSize(14); doc.text('تقرير إدارة العمليات', PDF_RIGHT, y, {align:'right'}); y+=18;
     doc.setFont(font,'normal'); doc.setFontSize(10); doc.setTextColor(90,96,105);
-    doc.text(pdfPrepareArabicText(`الفترة المختارة: ${periodLabel}`), PDF_RIGHT, y, {align:'right'}); y+=14;
+    doc.text(`الفترة المختارة: ${periodLabel}`, PDF_RIGHT, y, {align:'right'}); y+=14;
     const genDate = new Date();
     const genDateStr = `${String(genDate.getDate()).padStart(2,'0')} ${pdfArabicMonthName(['January','February','March','April','May','June','July','August','September','October','November','December'][genDate.getMonth()])} ${genDate.getFullYear()} — ${String(genDate.getHours()).padStart(2,'0')}:${String(genDate.getMinutes()).padStart(2,'0')}`;
-    doc.text(pdfPrepareArabicText(`تاريخ الإصدار: ${genDateStr}`), PDF_RIGHT, y, {align:'right'}); y+=20;
+    doc.text(`تاريخ الإصدار: ${genDateStr}`, PDF_RIGHT, y, {align:'right'}); y+=20;
 
     y = pdfSectionTitle(doc, font, y, 'الملخص التنفيذي');
     y = pdfKpiGrid(doc, font, y, [
@@ -3942,8 +3814,8 @@ async function mgmtGenerateExecutivePdfReport(){
     for(let p=1; p<=totalPages; p++){
       doc.setPage(p);
       doc.setFont(font,'normal'); doc.setFontSize(8); doc.setTextColor(140,146,155);
-      doc.text(pdfPrepareArabicText(`تقرير الأداء الإداري — ${periodLabel}`), PDF_MARGIN, PDF_PAGE_H-20, {align:'left'});
-      doc.text(pdfPrepareArabicText(`صفحة ${p} من ${totalPages}`), PDF_RIGHT, PDF_PAGE_H-20, {align:'right'});
+      doc.text(`تقرير الأداء الإداري — ${periodLabel}`, PDF_MARGIN, PDF_PAGE_H-20, {align:'left'});
+      doc.text(`صفحة ${p} من ${totalPages}`, PDF_RIGHT, PDF_PAGE_H-20, {align:'right'});
     }
 
     const safePeriod = periodLabel.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_');
