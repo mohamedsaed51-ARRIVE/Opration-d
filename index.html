@@ -10,7 +10,6 @@
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23182633'/%3E%3Cpath d='M14 40 L32 16 L50 40' stroke='%23A9832E' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M22 40 L32 27 L42 40' stroke='%23F3F1E9' stroke-width='5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 :root{
@@ -731,12 +730,14 @@ footer.app-footer{text-align:center; padding:20px; color:var(--text-faint); font
           <option value="customers">العملاء فقط</option>
         </select>
       </div>
-      <div class="mgmt-ctrl" style="justify-content:flex-end;">
+      <div class="mgmt-ctrl" style="justify-content:flex-end; gap:8px;">
         <label>&nbsp;</label>
-        <button class="btn-primary" id="mgmtPdfBtn" type="button">📄 إصدار تقرير الإدارة</button>
+        <button class="btn-primary" id="mgmtPdfBtn" type="button">📄 Management Executive PDF</button>
+        <button class="btn-secondary" id="mgmtExcelBtn" type="button">📊 Management Detailed Excel</button>
       </div>
     </div>
     <div id="mgmtPdfStatus" class="mgmt-loadstate hidden" style="margin-bottom:12px;"><span class="spinner-sm"></span> <span id="mgmtPdfStatusText">جاري تجهيز التقرير...</span></div>
+    <div id="mgmtExcelStatus" class="mgmt-loadstate hidden" style="margin-bottom:12px;"><span class="spinner-sm"></span> <span id="mgmtExcelStatusText">جاري تجهيز ملف Excel...</span></div>
 
     <div class="card-title" style="margin:4px 0 8px;">الملخص التنفيذي للأداء (Executive Performance Summary)</div>
     <div class="kpi-grid" id="mgmtExecSummaryGrid" style="grid-template-columns:repeat(6,1fr); margin-bottom:14px;"></div>
@@ -2744,7 +2745,8 @@ async function mgmtGetBranchScopedSummary(month, branch){
 function mgmtBuildSeries(field, months, opts){
   opts = opts || {};
   const byName = new Map();
-  const listKey = field === 'branch' ? 'branchSummary' : 'customerSummary';
+  const listKeyMap = { branch:'branchSummary', client:'customerSummary', province:'provinceSummary', area:'areaSummary' };
+  const listKey = listKeyMap[field] || 'branchSummary';
   for(const m of months){
     const monthData = MGMT.monthsData[m];
     if(!monthData || !monthData.summary) continue;
@@ -2820,7 +2822,7 @@ function mgmtEntryStats(entry, months){
   return { counts, srs, volGrowth, srGrowth, totalVolume, avgSr,
     lastCount: counts[lastMonth]||0, firstCount: counts[firstMonth]||0,
     trend: mgmtClassifyGrowth(volGrowth),
-    delivered, returned, rejected, pending,
+    delivered, returned, rejected, pending, withinSla, slaBreach,
     deliveryRate: totalVolume>0 ? delivered/totalVolume*100 : null,
     returnRate: resolved>0 ? returned/resolved*100 : null,
     rejectRate: resolved>0 ? rejected/resolved*100 : null,
@@ -3130,259 +3132,470 @@ function mgmtRenderInsights(months, branchSeries, customerSeries, showBranches, 
     : '<div class="mgmt-empty-note">لا توجد ملاحظات ذات دلالة إحصائية كافية ضمن الفترة والفلاتر الحالية.</div>';
 }
 
-/* ---------- Management PDF Report ----------
-   Independent from the normal dashboard loading flow: uses ONLY the
-   already-loaded MGMT.monthsData / already-computed series (mgmtBuildSeries,
-   mgmtSortedEntries — same functions the on-screen tables use) — zero
-   additional Google Sheets requests, zero re-derivation of business logic.
-   Renders an off-screen HTML report (so Arabic text is laid out correctly by
-   the browser itself), snapshots it with html2canvas, then assembles a
-   real multi-page PDF with jsPDF and triggers an actual file download —
-   no print dialog involved. A failure here is fully caught and reported via
-   a simple alert; the live dashboard is never touched by this code path. */
-// Validates that a value is actually usable as a PNG data URL for jsPDF —
-// not just "truthy". A tainted or zero-size canvas's toDataURL() can, in
-// some browsers, silently return a blank/near-empty string instead of
-// throwing; feeding that straight to jsPDF is exactly what produces
-// "Incomplete or corrupt PNG file". Reject anything that doesn't look like a
-// real PNG payload before it ever reaches addImage.
-function isValidPngDataUrl(dataUrl){
-  if(!dataUrl || typeof dataUrl !== 'string') return false;
-  if(!dataUrl.startsWith('data:image/png;base64,')) return false;
-  const base64 = dataUrl.slice('data:image/png;base64,'.length);
-  // A real PNG's base64 payload is never trivially short — guards against
-  // the "blank/empty data URL" failure mode some browsers return for a
-  // tainted or truncated canvas capture, without being so strict it could
-  // reject a legitimately tiny real image.
-  return base64.length > 20;
+function pct1(n){ return (n===null||n===undefined||isNaN(n)) ? null : Number(n.toFixed(1)); }
+
+// Minimum-volume threshold for "worst performer" rankings — per the explicit
+// requirement, so a customer/branch with e.g. 1 shipment at 100% return rate
+// never dominates a ranking. Uses the given formula literally: no existing
+// Settings-based threshold exists for this in the current project, so this
+// falls back to the specified conservative default.
+function mgmtComputeMinVolumeThreshold(entries){
+  if(!entries.length) return 20;
+  const avgVolume = entries.reduce((a,e)=>a+e.stats.totalVolume,0) / entries.length;
+  return Math.max(20, avgVolume*0.01);
 }
 
-// The requested safe wrapper around every actual pdf.addImage() call —
-// rejects anything invalid instead of letting jsPDF throw, and lets the
-// report continue (skipping just that image) rather than aborting entirely.
-function safeAddImageToPdf(pdf, dataUrl, format, x, y, w, h){
-  if(!isValidPngDataUrl(dataUrl)) return false;
-  if(!(w > 0) || !(h > 0)) return false;
-  try{
-    pdf.addImage(dataUrl, format, x, y, w, h);
-    return true;
-  }catch(e){
-    console.warn('[PDF] skipping an image — addImage failed:', e);
-    return false;
+// Single source of truth for "management findings" — used by BOTH the PDF
+// (Key Findings + Recommendations pages) and the Excel report (Findings
+// sheet), so the two exports can never disagree. Every finding is derived
+// mechanically from already-computed counts/rates (mgmtCombineKpis /
+// mgmtEntryStats) — no invented causes; the recommended action is always a
+// generic operational-review instruction unless the data itself names a cause.
+function mgmtComputeFindings(months, overall, branchEntries, customerEntries){
+  const findings = [];
+  const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
+  const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
+  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol);
+  const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol);
+
+  function push(priority, category, entity, issue, count, rate, text, action){
+    findings.push({priority, category, entity, issue, count, rate, text, action});
   }
+
+  if(eligibleBranches.length){
+    const worstReturn = [...eligibleBranches].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1))[0];
+    if(worstReturn && worstReturn.stats.returnRate!==null){
+      push('High','Returns',worstReturn.name,'High Return Rate',worstReturn.stats.returned,worstReturn.stats.returnRate,
+        `${worstReturn.name} recorded ${fmtInt(worstReturn.stats.returned)} returned shipments at ${fmtPct(worstReturn.stats.returnRate)}, compared to the company average of ${fmtPct(overall.returnRate)}.`,
+        `Review return reasons for ${worstReturn.name} and analyze the customers/areas contributing most to its returns.`);
+    }
+    const worstReject = [...eligibleBranches].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1))[0];
+    if(worstReject && worstReject.stats.rejectRate!==null){
+      push('Medium','Rejects',worstReject.name,'High Reject Rate',worstReject.stats.rejected,worstReject.stats.rejectRate,
+        `${worstReject.name} recorded ${fmtInt(worstReject.stats.rejected)} rejected shipments at ${fmtPct(worstReject.stats.rejectRate)}, compared to the company average of ${fmtPct(overall.rejectedRate)}.`,
+        `Requires an operational review to determine the root cause at ${worstReject.name}.`);
+    }
+    const worstDelivery = [...eligibleBranches].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999))[0];
+    if(worstDelivery && worstDelivery.stats.deliveryRate!==null){
+      push('High','Delivery',worstDelivery.name,'Low Delivery Rate',worstDelivery.stats.delivered,worstDelivery.stats.deliveryRate,
+        `${worstDelivery.name} delivered ${fmtInt(worstDelivery.stats.delivered)} of ${fmtInt(worstDelivery.stats.totalVolume)} shipments (${fmtPct(worstDelivery.stats.deliveryRate)}), below the company average of ${fmtPct(overall.deliveryRate)}.`,
+        `Review address data quality and delivery attempt patterns for ${worstDelivery.name}.`);
+    }
+    const withSla = eligibleBranches.filter(e=>e.stats.slaPct!==null);
+    if(withSla.length){
+      const worstSla = [...withSla].sort((a,b)=>a.stats.slaPct-b.stats.slaPct)[0];
+      push('High','SLA',worstSla.name,'Low SLA Achievement',null,worstSla.stats.slaPct,
+        `${worstSla.name} achieved ${fmtPct(worstSla.stats.slaPct)} SLA compliance, below the company average of ${fmtPct(overall.slaAchievement)}.`,
+        `Review shipment aging and investigate causes of delivery delays at ${worstSla.name}.`);
+    }
+    const best = [...eligibleBranches].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1))[0];
+    if(best && best.stats.deliveryRate!==null){
+      push('Info','Performance',best.name,'Best Delivery Performance',best.stats.delivered,best.stats.deliveryRate,
+        `${best.name} achieved the highest delivery rate at ${fmtPct(best.stats.deliveryRate)} (${fmtInt(best.stats.delivered)} of ${fmtInt(best.stats.totalVolume)} shipments).`,
+        `Consider reviewing ${best.name}'s operational practices for wider application across branches.`);
+    }
+  }
+  if(eligibleCustomers.length){
+    const worstReturnC = [...eligibleCustomers].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1))[0];
+    if(worstReturnC && worstReturnC.stats.returnRate!==null){
+      push('Medium','Returns',worstReturnC.name,'High Return Rate (Customer)',worstReturnC.stats.returned,worstReturnC.stats.returnRate,
+        `Customer "${worstReturnC.name}" recorded ${fmtInt(worstReturnC.stats.returned)} returned shipments at ${fmtPct(worstReturnC.stats.returnRate)} (minimum volume threshold: ${fmtInt(minCustVol)} shipments applied).`,
+        `Review order/address quality and delivery attempt history for "${worstReturnC.name}".`);
+    }
+    const worstDeliveryC = [...eligibleCustomers].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999))[0];
+    if(worstDeliveryC && worstDeliveryC.stats.deliveryRate!==null){
+      push('Medium','Delivery',worstDeliveryC.name,'Low Delivery Rate (Customer)',worstDeliveryC.stats.delivered,worstDeliveryC.stats.deliveryRate,
+        `Customer "${worstDeliveryC.name}" had a delivery rate of ${fmtPct(worstDeliveryC.stats.deliveryRate)} (minimum volume threshold: ${fmtInt(minCustVol)} shipments applied), below the company average of ${fmtPct(overall.deliveryRate)}.`,
+        `Review address data quality and delivery attempts for "${worstDeliveryC.name}"'s shipments.`);
+    }
+  }
+  const allEntries = [...eligibleBranches.map(e=>({...e,kind:'Branch'})), ...eligibleCustomers.map(e=>({...e,kind:'Customer'}))];
+  const decliners = allEntries.filter(e=>e.stats.volGrowth!==null && e.stats.volGrowth<-3).sort((a,b)=>a.stats.volGrowth-b.stats.volGrowth);
+  if(decliners.length){
+    const worst = decliners[0];
+    push('Medium','Growth',worst.name,'Largest Volume Decline',worst.stats.totalVolume,worst.stats.volGrowth,
+      `${worst.kind} "${worst.name}" showed the largest volume decline in the selected period, down ${fmtPct(Math.abs(worst.stats.volGrowth),1)}.`,
+      `Investigate the cause of the volume decline at "${worst.name}" — this requires operational review to determine the root cause.`);
+  }
+  return findings;
 }
 
-// Converts the header logo <img> (a plain, possibly cross-origin URL — NOT a
-// data URL) into a pre-validated PNG data URL via an isolated canvas
-// draw+toDataURL, BEFORE it ever gets embedded into the offscreen report
-// that html2canvas will screenshot. This is the actual root-cause fix: if
-// the logo is cross-origin without CORS headers (or simply never finished
-// loading), drawing it taints a canvas and toDataURL() throws a
-// SecurityError — catching that HERE, in isolation, means it can never
-// silently corrupt the ONE big screenshot the whole PDF is built from.
-// Returns null (never embeds the logo) on any failure — the report must
-// still be produced without it.
-function getSafeLogoDataUrl(imgEl){
-  if(!imgEl || !imgEl.complete || !imgEl.naturalWidth || !imgEl.naturalHeight) return null;
-  try{
-    const c = document.createElement('canvas');
-    c.width = imgEl.naturalWidth;
-    c.height = imgEl.naturalHeight;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(imgEl, 0, 0);
-    const dataUrl = c.toDataURL('image/png');
-    return isValidPngDataUrl(dataUrl) ? dataUrl : null;
-  }catch(e){
-    console.warn('[PDF] skipping logo — image could not be safely converted (likely cross-origin without CORS headers, or not fully loaded):', e);
-    return null;
+/* =========================================================
+   MANAGEMENT EXECUTIVE PDF REPORT — text/table based (jsPDF core only)
+   Explicitly does NOT use html2canvas, does NOT render any screenshot or
+   composite PNG, and does NOT call addImage at all. Every page is built
+   from real text and drawn tables sourced directly from MGMT.monthsData —
+   the same already-loaded Compact Summary data every on-screen table uses.
+   This is the deliberate replacement for the previous screenshot-based
+   report, which was the source of the "Incomplete or corrupt PNG file"
+   production error — that entire failure class no longer exists here by
+   construction, since there is no image anywhere in the generation path.
+
+   KNOWN LIMITATION (see final report): jsPDF's built-in fonts (Helvetica /
+   Times / Courier) contain no Arabic glyphs. All structural labels below are
+   therefore in English by design. Branch/customer/province/area NAMES come
+   from the underlying data and may be Arabic text — those specific strings
+   may not render their glyphs correctly without a custom embedded Arabic
+   font (a separate, larger follow-up task requiring real-browser
+   verification, not attempted here to avoid trading one unverified risk for
+   another). All numbers, rates, and structural text are unaffected.
+   ========================================================= */
+const PDF_PAGE_W = 595.28, PDF_PAGE_H = 841.89, PDF_MARGIN = 40;
+const PDF_USABLE_W = PDF_PAGE_W - PDF_MARGIN*2;
+
+function pdfCheckPageBreak(doc, y, needed){
+  if(y + needed > PDF_PAGE_H - PDF_MARGIN){ doc.addPage(); return PDF_MARGIN; }
+  return y;
+}
+function pdfSectionTitle(doc, y, text){
+  y = pdfCheckPageBreak(doc, y, 30);
+  doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(44,66,87);
+  doc.text(text, PDF_MARGIN, y);
+  doc.setDrawColor(44,66,87); doc.setLineWidth(1);
+  doc.line(PDF_MARGIN, y+5, PDF_PAGE_W-PDF_MARGIN, y+5);
+  doc.setFont('helvetica','normal'); doc.setTextColor(20,20,20); doc.setFontSize(9.5);
+  return y + 22;
+}
+function pdfParagraph(doc, y, text, opts){
+  opts = opts || {};
+  doc.setFontSize(opts.fontSize || 9.5);
+  doc.setFont('helvetica', opts.bold?'bold':'normal');
+  const color = opts.color || [30,30,30];
+  doc.setTextColor(color[0],color[1],color[2]);
+  const lines = doc.splitTextToSize(String(text), PDF_USABLE_W - (opts.indent||0));
+  y = pdfCheckPageBreak(doc, y, lines.length*12 + 4);
+  doc.text(lines, PDF_MARGIN + (opts.indent||0), y);
+  return y + lines.length*12 + (opts.gap!==undefined?opts.gap:6);
+}
+function pdfKpiGrid(doc, y, cards){
+  const cols = 3, gap = 10, boxH = 50;
+  const boxW = (PDF_USABLE_W - gap*(cols-1))/cols;
+  y = pdfCheckPageBreak(doc, y, boxH*Math.ceil(cards.length/cols) + 10);
+  const startY = y;
+  cards.forEach((c,i)=>{
+    const row = Math.floor(i/cols), col = i%cols;
+    const bx = PDF_MARGIN + col*(boxW+gap);
+    const by = startY + row*(boxH+gap);
+    doc.setDrawColor(220,222,226); doc.setLineWidth(0.5);
+    doc.rect(bx, by, boxW, boxH);
+    doc.setFontSize(8); doc.setFont('helvetica','normal'); doc.setTextColor(90,96,105);
+    doc.text(String(c.label), bx+8, by+16);
+    doc.setFontSize(15); doc.setFont('helvetica','bold'); doc.setTextColor(20,20,20);
+    doc.text(String(c.value), bx+8, by+34);
+    if(c.sub){
+      doc.setFontSize(9.5); doc.setFont('helvetica','bold'); doc.setTextColor(14,124,85);
+      doc.text(String(c.sub), bx+boxW-8, by+34, {align:'right'});
+    }
+  });
+  return startY + Math.ceil(cards.length/cols)*(boxH+gap);
+}
+function pdfDrawTable(doc, y, columns, rows){
+  const rowH = 15, headerH = 18, fontSize = 7.3;
+  let colX = [PDF_MARGIN];
+  for(let i=0;i<columns.length;i++) colX.push(colX[i]+columns[i].width);
+  const tableW = colX[columns.length]-PDF_MARGIN;
+  function drawHeader(curY){
+    doc.setFillColor(44,66,87);
+    doc.rect(PDF_MARGIN, curY, tableW, headerH, 'F');
+    doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.setFontSize(fontSize);
+    columns.forEach((c,i)=>{ doc.text(String(c.header), colX[i]+columns[i].width/2, curY+headerH/2+3, {align:'center'}); });
+    doc.setFont('helvetica','normal'); doc.setTextColor(20,20,20);
+    return curY+headerH;
   }
+  if(!rows.length){
+    y = pdfCheckPageBreak(doc, y, headerH+rowH);
+    y = drawHeader(y);
+    doc.setFontSize(fontSize);
+    doc.text('No data available', PDF_MARGIN+tableW/2, y+rowH/2+3, {align:'center'});
+    return y + rowH + 12;
+  }
+  y = pdfCheckPageBreak(doc, y, headerH+rowH);
+  y = drawHeader(y);
+  rows.forEach((row,ri)=>{
+    if(y+rowH > PDF_PAGE_H-PDF_MARGIN){ doc.addPage(); y=PDF_MARGIN; y=drawHeader(y); }
+    if(ri%2===1){ doc.setFillColor(246,248,250); doc.rect(PDF_MARGIN,y,tableW,rowH,'F'); }
+    doc.setFontSize(fontSize);
+    row.forEach((cell,ci)=>{
+      const align = columns[ci].align||'center';
+      const cx = align==='left'?colX[ci]+4 : align==='right'?colX[ci+1]-4 : colX[ci]+columns[ci].width/2;
+      let text = String(cell===null||cell===undefined?'-':cell);
+      const maxChars = Math.max(3, Math.floor(columns[ci].width/(fontSize*0.55)));
+      if(text.length>maxChars) text = text.slice(0,maxChars-1)+'…';
+      doc.text(text, cx, y+rowH/2+3, {align});
+    });
+    y += rowH;
+  });
+  return y + 14;
 }
 
-// Captures a Chart.js canvas as a PNG data URL — but only once it has real
-// pixels to capture (width/height > 0) and the result actually validates as
-// a PNG, never a blank/corrupt one from a chart that hasn't finished
-// rendering (e.g. a canvas in a tab panel that was hidden a moment ago).
-function safeChartImage(canvasId){
-  try{
-    const c = document.getElementById(canvasId);
-    if(!c || typeof c.getContext !== 'function') return null;
-    if(!c.width || !c.height) return null; // nothing drawn yet — never capture a zero-size canvas
-    const dataUrl = c.toDataURL('image/png', 1.0);
-    return isValidPngDataUrl(dataUrl) ? dataUrl : null;
-  }catch(e){
-    console.warn('[PDF] skipping chart image ('+canvasId+') — canvas capture failed:', e);
-    return null;
-  }
-}
-async function mgmtGeneratePdfReport(){
+async function mgmtGenerateExecutivePdfReport(){
   const btn = document.getElementById('mgmtPdfBtn');
   const statusEl = document.getElementById('mgmtPdfStatus');
   const statusText = document.getElementById('mgmtPdfStatusText');
-  let offscreen = null;
   try{
     if(btn) btn.disabled = true;
-    if(statusEl && statusText){ statusText.textContent = 'جاري إصدار ملف PDF...'; statusEl.classList.remove('hidden'); }
-
-    if(typeof window.html2canvas === 'undefined' || typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF){
-      throw new Error('مكتبات إصدار PDF لم يتم تحميلها (تحقق من اتصال الإنترنت) — أعد تحميل الصفحة وحاول مرة أخرى.');
+    if(statusEl && statusText){ statusText.textContent = 'جاري إصدار تقرير الإدارة...'; statusEl.classList.remove('hidden'); }
+    if(typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF){
+      throw new Error('مكتبة PDF لم يتم تحميلها (تحقق من اتصال الإنترنت) — أعد تحميل الصفحة وحاول مرة أخرى.');
     }
-
     const months = mgmtPeriodMonths();
-    if(!months.length) throw new Error('لا توجد بيانات كافية لإصدار التقرير — اختر فترة تحتوي على بيانات أولاً.');
+    if(!months.length) throw new Error('لا توجد بيانات كافية لإصدار تقرير الإدارة للفترة المحددة.');
+    const overall = mgmtCombineKpis(months);
+    if(!overall || !overall.total){
+      throw new Error('لا توجد بيانات كافية لإصدار تقرير الإدارة للفترة المحددة.');
+    }
 
     const showBranches = MGMT.comparisonType !== 'customers';
     const showCustomers = MGMT.comparisonType !== 'branches';
-    const logoImg = document.querySelector('.brand-mark-img');
-    const logoSrc = getSafeLogoDataUrl(logoImg); // null if missing/broken/cross-origin — the logo is simply omitted, never lets a bad image reach html2canvas
-    const periodLabel = months.length>1 ? `${months[0]} — ${months[months.length-1]}` : months[0];
-    const branchLabel = MGMT.branch || 'كل الفروع';
-    const customerLabel = MGMT.customer || 'كل العملاء';
-    const comparisonLabel = {both:'الفروع والعملاء', branches:'الفروع فقط', customers:'العملاء فقط'}[MGMT.comparisonType] || 'الفروع والعملاء';
-
-    const overall = mgmtCombineKpis(months); // sums per-month server KPI totals — no raw rows involved
-    if(!overall || !overall.total){
-      throw new Error('لا توجد بيانات فعلية ضمن الفترة المختارة — لن يتم إصدار تقرير بأرقام صفرية. اختر فترة تحتوي على شحنات فعلية.');
-    }
-    const grab = id => { const el = document.getElementById(id); return el ? el.outerHTML : ''; };
-    const branchChartImg = showBranches ? safeChartImage('chartMgmtBranchTrend') : null;
-    const customerChartImg = showCustomers ? safeChartImage('chartMgmtCustomerTrend') : null;
-
     const branchSeries = showBranches ? mgmtBuildSeries('branch', months, {}) : new Map();
     const customerSeries = showCustomers ? mgmtBuildSeries('client', months, {}) : new Map();
     const branchEntries = mgmtSortedEntries(branchSeries, months);
-    const custEntries = mgmtSortedEntries(customerSeries, months);
-    const topGrowersAll = [...branchEntries, ...custEntries].filter(e=>e.stats.volGrowth!==null && e.stats.volGrowth>3).sort((a,b)=>b.stats.volGrowth-a.stats.volGrowth).slice(0,3);
-    const topDeclinersAll = [...branchEntries, ...custEntries].filter(e=>e.stats.volGrowth!==null && e.stats.volGrowth<-3).sort((a,b)=>a.stats.volGrowth-b.stats.volGrowth).slice(0,3);
-    const recommendations = [];
-    topDeclinersAll.forEach(e=>recommendations.push(`مراجعة أداء "${e.name}" لتحديد سبب التراجع (${e.stats.volGrowth.toFixed(1)}%) واتخاذ إجراء تصحيحي.`));
-    topGrowersAll.forEach(e=>recommendations.push(`دعم استمرار نمو "${e.name}" (+${e.stats.volGrowth.toFixed(1)}%) بتخصيص موارد إضافية عند الحاجة.`));
-    if(!recommendations.length) recommendations.push('لا توجد تحركات كبيرة (نمو أو تراجع يتجاوز 3%) تستدعي توصية خاصة خلال هذه الفترة.');
+    const customerEntries = mgmtSortedEntries(customerSeries, months);
+    const findings = mgmtComputeFindings(months, overall, branchEntries, customerEntries);
+    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'All Months' : (months.length>1 ? `${months[0]} - ${months[months.length-1]}` : months[0]);
 
-    // Build the report as an off-screen, fixed-width HTML fragment (A4-ish
-    // width at 96dpi) so html2canvas produces a clean, consistently-sized
-    // snapshot. Scoped styles (".pdf-report-root ...") never leak into the
-    // live dashboard, and the node is removed in `finally` no matter what.
-    offscreen = document.createElement('div');
-    offscreen.className = 'pdf-report-root';
-    offscreen.style.cssText = 'position:fixed; top:0; left:-99999px; width:794px; background:#fff; padding:28px; z-index:-1;';
-    offscreen.innerHTML = `
-      <style>
-        .pdf-report-root, .pdf-report-root *{ box-sizing:border-box; font-family:'Segoe UI',Tahoma,Arial,sans-serif; color:#1c2633; direction:rtl; }
-        .pdf-report-root h1{font-size:20px; margin:0 0 2px;}
-        .pdf-report-root h2{font-size:15px; margin:22px 0 8px; border-bottom:2px solid #2C4257; padding-bottom:4px; color:#2C4257;}
-        .pdf-report-root h3{font-size:12.5px; margin:12px 0 6px;}
-        .pdf-report-root .meta{font-size:11.5px; color:#5B6472; margin-bottom:16px; line-height:1.7;}
-        .pdf-report-root .kpi-row{display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px;}
-        .pdf-report-root .kpi-box{border:1px solid #ddd; border-radius:8px; padding:10px 14px; min-width:140px;}
-        .pdf-report-root .kpi-box b{display:block; font-size:10.5px; color:#5B6472;} .pdf-report-root .kpi-box span{font-size:15px; font-weight:800;}
-        .pdf-report-root table{width:100%; border-collapse:collapse; font-size:10.5px; margin-bottom:6px;}
-        .pdf-report-root th, .pdf-report-root td{border:1px solid #ddd; padding:5px 7px; text-align:center;}
-        .pdf-report-root th{background:#F0F2F5;}
-        .pdf-report-root img.chart{max-width:100%; margin:8px 0;}
-        .pdf-report-root .logo{height:44px; margin-bottom:8px;}
-        .pdf-report-root ul{margin:0; padding-inline-start:18px;}
-        .pdf-report-root .mgmt-insight{padding:7px 9px; border-inline-start:3px solid #2C4257; background:#F7F8FA; margin-bottom:5px; border-radius:0 6px 6px 0; font-size:10.5px;}
-        .pdf-report-root .mgmt-trend-tag{display:inline-flex; padding:1px 6px; border-radius:10px; font-size:9.5px; font-weight:700;}
-      </style>
-      ${logoSrc?`<img class="logo" src="${logoSrc}">`:''}
-      <h1>تقرير الإدارة — Management Report</h1>
-      <div class="meta">
-        الفترة: <b>${periodLabel}</b> &nbsp;|&nbsp; الفرع: <b>${branchLabel}</b> &nbsp;|&nbsp; العميل: <b>${customerLabel}</b> &nbsp;|&nbsp; نوع المقارنة: <b>${comparisonLabel}</b><br>
-        تاريخ الإصدار: ${new Date().toLocaleString('ar-EG')}
-      </div>
-
-      <h2>الملخص التنفيذي</h2>
-      <p style="font-size:11px; line-height:1.8;">خلال الفترة من ${periodLabel}، بلغ إجمالي الشحنات ${fmtInt(overall.total)} شحنة بمعدل نجاح (S.R %) قدره ${fmtPct(overall.successRate)}. رصد التقرير ${topGrowersAll.length} حالة نمو ملحوظ و${topDeclinersAll.length} حالة تراجع ملحوظ تستدعي المتابعة.</p>
-
-      <h2>المؤشرات العامة (Overall KPIs) — العدد والنسبة</h2>
-      <div class="kpi-row">
-        <div class="kpi-box"><b>إجمالي الشحنات (TOTAL SHIPMENTS)</b><span>${fmtInt(overall.total)}</span></div>
-        <div class="kpi-box"><b>تم التسليم (DELIVERED)</b><span>${fmtInt(overall.delivered)}</span><span style="font-size:11px; color:#0E7C55;">${fmtPct(overall.deliveryRate)}</span></div>
-        <div class="kpi-box"><b>مرتجعات (RETURNED)</b><span>${fmtInt(overall.returned)}</span><span style="font-size:11px; color:#B4302A;">${fmtPct(overall.returnRate)}</span></div>
-        <div class="kpi-box"><b>رفض الاستلام (REJECTED)</b><span>${fmtInt(overall.rejected)}</span><span style="font-size:11px; color:#B4302A;">${fmtPct(overall.rejectedRate)}</span></div>
-        <div class="kpi-box"><b>قيد التشغيل (IN PROGRESS)</b><span>${fmtInt(overall.pending)}</span><span style="font-size:11px; color:#5B6472;">${fmtPct(overall.inProgressRate)}</span></div>
-        <div class="kpi-box"><b>SLA %</b><span>${fmtPct(overall.slaAchievement)}</span></div>
-        ${(overall.successRate!==null && overall.deliveryRate!==null && Math.abs(overall.successRate-overall.deliveryRate)>0.05) ? `<div class="kpi-box"><b>S.R % (تسليم + رفض)</b><span>${fmtPct(overall.successRate)}</span></div>` : ''}
-      </div>
-
-      <h2>الأداء الشهري (Monthly Performance)</h2>
-      ${grab('mgmtMonthlyPerformanceTable')}
-
-      ${showBranches?`<h2>أداء الفروع (Branch Performance)</h2>${grab('mgmtBranchRankTable') || '<p>لا يوجد.</p>'}`:''}
-      ${showCustomers?`<h2>أداء العملاء (Customer Performance)</h2>${grab('mgmtCustomerRankTable') || '<p>لا يوجد.</p>'}`:''}
-      ${showBranches?`<h2>تحليل الفرع × العميل (Branch × Customer)</h2>${grab('mgmtBranchCustomerBody') || '<p>لم يتم اختيار فرع محدد.</p>'}`:''}
-
-      <h2>الحركة الشهرية (Monthly Movement)</h2>
-      ${showBranches?`<h3>الفروع</h3>${grab('mgmtBranchMovementTable')}`:''}
-      ${showCustomers?`<h3>العملاء</h3>${grab('mgmtCustomerMovementTable')}`:''}
-
-      <h2>النمو والتراجع (Growth / Decline)</h2>
-      <h3 style="color:#0E7C55;">📈 الأعلى نموًا</h3>
-      ${grab('mgmtTopGrowersBody')}
-      <h3 style="color:#B4302A;">📉 يحتاج متابعة</h3>
-      ${grab('mgmtTopDeclinersBody')}
-
-      ${(branchChartImg||customerChartImg)?`<h2>الرسوم البيانية (Charts)</h2>
-      ${branchChartImg?`<div>اتجاه حجم الفروع</div><img class="chart" src="${branchChartImg}">`:''}
-      ${customerChartImg?`<div>اتجاه حجم العملاء</div><img class="chart" src="${customerChartImg}">`:''}`:''}
-
-      <h2>ملاحظات الإدارة (Management Insights)</h2>
-      ${grab('mgmtInsightsBody')}
-
-      <h2>التوصيات (Recommendations)</h2>
-      <ul>${recommendations.map(r=>`<li>${r}</li>`).join('')}</ul>
-    `;
-    document.body.appendChild(offscreen);
-
-    // Snapshot the off-screen report, then slice it across as many A4 pages
-    // as needed — the standard html2canvas + jsPDF multi-page pattern.
-    const canvas = await window.html2canvas(offscreen, { scale:2, useCORS:true, backgroundColor:'#ffffff' });
-    if(!canvas || !canvas.width || !canvas.height){
-      throw new Error('تعذر التقاط محتوى التقرير (Canvas فارغ) — أعد المحاولة.');
-    }
-    const imgData = canvas.toDataURL('image/png');
-    if(!isValidPngDataUrl(imgData)){
-      // This is the exact failure mode that used to surface as jsPDF's cryptic
-      // "Incomplete or corrupt PNG file" — caught here with a clear cause
-      // instead. Almost always means an embedded image (logo/chart) tainted
-      // the canvas; getSafeLogoDataUrl/safeChartImage above should prevent
-      // this in normal operation.
-      throw new Error('تعذر إنشاء صورة صالحة لمحتوى التقرير — قد يكون أحد العناصر المرئية (كالشعار) غير صالح. أعد المحاولة، وإذا استمرت المشكلة أبلغ الدعم الفني.');
-    }
     const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF('p','pt','a4');
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const imgWidth = pageWidth;
-    const imgHeight = canvas.height * imgWidth / canvas.width;
-    let heightLeft = imgHeight;
-    let position = 0;
-    if(!safeAddImageToPdf(pdf, imgData, 'PNG', 0, position, imgWidth, imgHeight)){
-      throw new Error('تعذر إضافة محتوى التقرير إلى ملف PDF.');
+    const doc = new jsPDF('p','pt','a4');
+    let y = PDF_MARGIN;
+
+    // PAGE 1 — EXECUTIVE SUMMARY
+    doc.setFont('helvetica','bold'); doc.setFontSize(20); doc.setTextColor(28,38,51);
+    doc.text('ARRIVE', PDF_MARGIN, y); y+=20;
+    doc.setFontSize(14); doc.text('Operations Management Report', PDF_MARGIN, y); y+=18;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(90,96,105);
+    doc.text(`Period: ${periodLabel}`, PDF_MARGIN, y); y+=14;
+    doc.text(`Generated: ${new Date().toLocaleString('en-GB')}`, PDF_MARGIN, y); y+=20;
+
+    y = pdfSectionTitle(doc, y, 'Executive Summary');
+    y = pdfKpiGrid(doc, y, [
+      {label:'TOTAL SHIPMENTS', value:fmtInt(overall.total)},
+      {label:'DELIVERED', value:fmtInt(overall.delivered), sub:fmtPct(overall.deliveryRate)},
+      {label:'RETURNED', value:fmtInt(overall.returned), sub:fmtPct(overall.returnRate)},
+      {label:'REJECTED', value:fmtInt(overall.rejected), sub:fmtPct(overall.rejectedRate)},
+      {label:'IN PROGRESS', value:fmtInt(overall.pending), sub:fmtPct(overall.inProgressRate)},
+      {label:'SLA %', value:fmtPct(overall.slaAchievement)},
+    ]);
+    y += 6;
+    y = pdfParagraph(doc, y, `During the selected period (${periodLabel}), total shipments reached ${fmtInt(overall.total)}, with a delivery rate of ${fmtPct(overall.deliveryRate)} and SLA compliance of ${fmtPct(overall.slaAchievement)}. This report identifies ${findings.length} key operational finding(s) with corresponding recommendations on the following pages.`, {gap:10});
+
+    // PAGE 2 — MONTHLY PERFORMANCE
+    doc.addPage(); y = PDF_MARGIN;
+    y = pdfSectionTitle(doc, y, 'Monthly Performance');
+    const monthlyRows = months.map(m=>{
+      const md = MGMT.monthsData[m]; const k = md && md.summary && md.summary.kpis;
+      if(!k) return null;
+      const pending=k.pending||0; const ipr = k.total>0?pending/k.total*100:null;
+      return [m, fmtInt(k.total), fmtInt(k.delivered), fmtPct(k.deliveryRate), fmtInt(k.returned), fmtPct(k.returnRate),
+        fmtInt(k.rejected), fmtPct(k.rejectedRate), fmtInt(pending), fmtPct(ipr), k.slaAchievement!==null?fmtPct(k.slaAchievement):'-'];
+    }).filter(Boolean);
+    y = pdfDrawTable(doc, y, [
+      {header:'Month',width:56,align:'left'},{header:'Total',width:46},{header:'Delivered',width:46},{header:'Del %',width:40},
+      {header:'Returned',width:46},{header:'Ret %',width:40},{header:'Rejected',width:46},{header:'Rej %',width:40},
+      {header:'In Prog',width:44},{header:'IP %',width:36},{header:'SLA %',width:40},
+    ], monthlyRows);
+
+    // PAGE 3 — KEY MANAGEMENT FINDINGS
+    doc.addPage(); y = PDF_MARGIN;
+    y = pdfSectionTitle(doc, y, 'Key Management Findings');
+    if(findings.length){
+      findings.forEach(f=>{
+        y = pdfParagraph(doc, y, `[${f.priority}] ${f.category} — ${f.issue}`, {bold:true, gap:2});
+        y = pdfParagraph(doc, y, f.text, {gap:10});
+      });
+    }else{
+      y = pdfParagraph(doc, y, 'No significant findings were identified for this period.');
     }
-    heightLeft -= pageHeight;
-    while(heightLeft > 0){
-      position -= pageHeight;
-      pdf.addPage();
-      if(!safeAddImageToPdf(pdf, imgData, 'PNG', 0, position, imgWidth, imgHeight)){
-        console.warn('[PDF] stopped adding further pages — the report up to this point is still saved.');
-        pdf.deletePage(pdf.internal.getNumberOfPages()); // drop the blank page we just added
-        break;
-      }
-      heightLeft -= pageHeight;
+
+    // PAGE 4 — BRANCH PERFORMANCE
+    if(showBranches){
+      doc.addPage(); y = PDF_MARGIN;
+      y = pdfSectionTitle(doc, y, 'Branch Performance');
+      const branchCols = [
+        {header:'Branch',width:92,align:'left'},{header:'Total',width:38},{header:'Delivered',width:44},{header:'Del %',width:36},
+        {header:'Returned',width:44},{header:'Ret %',width:36},{header:'Rejected',width:40},{header:'Rej %',width:34},
+        {header:'In Prog',width:38},{header:'SLA %',width:36},
+      ];
+      const branchRow = e => [e.name, fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), fmtPct(e.stats.deliveryRate),
+        fmtInt(e.stats.returned), fmtPct(e.stats.returnRate), fmtInt(e.stats.rejected), fmtPct(e.stats.rejectRate),
+        fmtInt(e.stats.pending), e.stats.slaPct!==null?fmtPct(e.stats.slaPct):'-'];
+      const minVol = mgmtComputeMinVolumeThreshold(branchEntries);
+      const eligible = branchEntries.filter(e=>e.stats.totalVolume>=minVol);
+      y = pdfParagraph(doc, y, `Top 5 Branches by Delivery Rate (minimum volume: ${fmtInt(minVol)} shipments)`, {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, branchCols, [...eligible].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1)).slice(0,5).map(branchRow));
+      y = pdfParagraph(doc, y, 'Bottom 5 Branches by Delivery Rate', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, branchCols, [...eligible].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(branchRow));
+      y = pdfParagraph(doc, y, 'Top 5 Branches by Return Rate', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, branchCols, [...eligible].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(branchRow));
+      const withSla = eligible.filter(e=>e.stats.slaPct!==null);
+      y = pdfParagraph(doc, y, 'Bottom 5 Branches by SLA', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, branchCols, [...withSla].sort((a,b)=>a.stats.slaPct-b.stats.slaPct).slice(0,5).map(branchRow));
+    }
+
+    // PAGE 5 — CUSTOMER PERFORMANCE
+    if(showCustomers){
+      doc.addPage(); y = PDF_MARGIN;
+      y = pdfSectionTitle(doc, y, 'Customer Performance');
+      const custCols = [
+        {header:'Customer',width:104,align:'left'},{header:'Total',width:36},{header:'Delivered',width:42},{header:'Del %',width:34},
+        {header:'Returned',width:42},{header:'Ret %',width:34},{header:'Rejected',width:38},{header:'Rej %',width:32},
+        {header:'In Prog',width:36},{header:'SLA %',width:34},
+      ];
+      const custRow = e => [e.name, fmtInt(e.stats.totalVolume), fmtInt(e.stats.delivered), fmtPct(e.stats.deliveryRate),
+        fmtInt(e.stats.returned), fmtPct(e.stats.returnRate), fmtInt(e.stats.rejected), fmtPct(e.stats.rejectRate),
+        fmtInt(e.stats.pending), e.stats.slaPct!==null?fmtPct(e.stats.slaPct):'-'];
+      const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
+      const eligibleCust = customerEntries.filter(e=>e.stats.totalVolume>=minCustVol);
+      y = pdfParagraph(doc, y, 'Top 10 Customers by Volume', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, custCols, [...customerEntries].sort((a,b)=>b.stats.totalVolume-a.stats.totalVolume).slice(0,10).map(custRow));
+      y = pdfParagraph(doc, y, `Highest Return Rate (minimum volume: ${fmtInt(minCustVol)} shipments)`, {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, custCols, [...eligibleCust].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1)).slice(0,5).map(custRow));
+      y = pdfParagraph(doc, y, 'Highest Reject Rate', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, custCols, [...eligibleCust].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1)).slice(0,5).map(custRow));
+      y = pdfParagraph(doc, y, 'Lowest Delivery Rate', {bold:true, gap:4});
+      y = pdfDrawTable(doc, y, custCols, [...eligibleCust].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999)).slice(0,5).map(custRow));
+    }
+
+    // PAGE 6 — MANAGEMENT RECOMMENDATIONS
+    doc.addPage(); y = PDF_MARGIN;
+    y = pdfSectionTitle(doc, y, 'Management Recommendations');
+    if(findings.length){
+      const order = {High:0, Medium:1, Info:2};
+      const sorted = [...findings].sort((a,b)=>(order[a.priority]??3)-(order[b.priority]??3));
+      sorted.forEach((f,i)=>{
+        y = pdfParagraph(doc, y, `Priority ${i+1} — ${f.category}`, {bold:true, gap:2, color:[44,66,87]});
+        y = pdfParagraph(doc, y, f.text, {gap:2});
+        y = pdfParagraph(doc, y, `Recommended action: ${f.action}`, {gap:10, color:[14,124,85]});
+      });
+    }else{
+      y = pdfParagraph(doc, y, 'No specific recommendations — no significant findings were identified for this period.');
     }
 
     const safePeriod = periodLabel.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_');
-    pdf.save(`Management_Report_${safePeriod}.pdf`);
+    doc.save(`Management_Executive_Report_${safePeriod}.pdf`);
   }catch(err){
-    console.error('PDF report generation failed:', err);
+    console.error('Executive PDF generation failed:', err);
     alert('تعذر إصدار التقرير: ' + (err.message || err));
   }finally{
-    if(offscreen && offscreen.parentNode) offscreen.parentNode.removeChild(offscreen);
     if(btn) btn.disabled = false;
     if(statusEl) statusEl.classList.add('hidden');
   }
 }
+
+/* =========================================================
+   MANAGEMENT DETAILED EXCEL REPORT — SheetJS (XLSX), already loaded.
+   Reads ONLY MGMT.monthsData (already-loaded Compact Summaries) — no
+   fetch, no raw rows. Seven sheets exactly as specified.
+   ========================================================= */
+async function mgmtGenerateExcelReport(){
+  const btn = document.getElementById('mgmtExcelBtn');
+  const statusEl = document.getElementById('mgmtExcelStatus');
+  const statusText = document.getElementById('mgmtExcelStatusText');
+  try{
+    if(btn) btn.disabled = true;
+    if(statusEl && statusText){ statusText.textContent = 'جاري تجهيز ملف Excel...'; statusEl.classList.remove('hidden'); }
+    if(typeof XLSX === 'undefined'){
+      throw new Error('مكتبة Excel لم يتم تحميلها (تحقق من اتصال الإنترنت) — أعد تحميل الصفحة وحاول مرة أخرى.');
+    }
+    const months = mgmtPeriodMonths();
+    if(!months.length) throw new Error('لا توجد بيانات كافية للتصدير — اختر فترة تحتوي على بيانات أولاً.');
+    const overall = mgmtCombineKpis(months);
+    if(!overall || !overall.total){
+      throw new Error('لا توجد بيانات فعلية ضمن الفترة المختارة — لن يتم تصدير ملف بأرقام صفرية.');
+    }
+
+    const branchSeries = mgmtBuildSeries('branch', months, {});
+    const customerSeries = mgmtBuildSeries('client', months, {});
+    const provinceSeries = mgmtBuildSeries('province', months, {});
+    const areaSeries = mgmtBuildSeries('area', months, {});
+    const branchEntries = mgmtSortedEntries(branchSeries, months);
+    const customerEntries = mgmtSortedEntries(customerSeries, months);
+    const provinceEntries = mgmtSortedEntries(provinceSeries, months);
+    const areaEntries = mgmtSortedEntries(areaSeries, months);
+    const findings = mgmtComputeFindings(months, overall, branchEntries, customerEntries);
+    const periodLabel = (selectedMonth === ALL_MONTHS_SENTINEL) ? 'All Months' : (months.length>1 ? `${months[0]} - ${months[months.length-1]}` : months[0]);
+
+    const wb = XLSX.utils.book_new();
+
+    // Sheet 1: Executive KPI
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['KPI','Count','Rate'],
+      ['Total Shipments', overall.total, ''],
+      ['Delivered', overall.delivered, pct1(overall.deliveryRate)],
+      ['Returned', overall.returned, pct1(overall.returnRate)],
+      ['Rejected', overall.rejected, pct1(overall.rejectedRate)],
+      ['In Progress', overall.pending, pct1(overall.inProgressRate)],
+      ['SLA', '', pct1(overall.slaAchievement)],
+    ]), 'Executive KPI');
+
+    // Sheet 2: Monthly Performance
+    const monthlyRows = [['Month','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','In Progress %','SLA %']];
+    months.forEach(m=>{
+      const md = MGMT.monthsData[m]; const k = md && md.summary && md.summary.kpis;
+      if(!k) return;
+      const pending = k.pending||0; const ipr = k.total>0?pending/k.total*100:null;
+      monthlyRows.push([m, k.total, k.delivered, pct1(k.deliveryRate), k.returned, pct1(k.returnRate),
+        k.rejected, pct1(k.rejectedRate), pending, pct1(ipr), pct1(k.slaAchievement)]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(monthlyRows), 'Monthly Performance');
+
+    // Sheet 3: Branch Performance
+    const branchRows = [['Branch','Total Shipments','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','In Progress %','Within SLA','SLA Breach','SLA %']];
+    branchEntries.forEach(e=>{
+      const s = e.stats; const ipr = s.totalVolume>0?s.pending/s.totalVolume*100:null;
+      branchRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
+        s.rejected, pct1(s.rejectRate), s.pending, pct1(ipr), s.withinSla, s.slaBreach, pct1(s.slaPct)]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(branchRows), 'Branch Performance');
+
+    // Sheet 4: Customer Performance
+    const custRows = [['Customer','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','In Progress %','Within SLA','SLA Breach','SLA %']];
+    customerEntries.forEach(e=>{
+      const s = e.stats; const ipr = s.totalVolume>0?s.pending/s.totalVolume*100:null;
+      custRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
+        s.rejected, pct1(s.rejectRate), s.pending, pct1(ipr), s.withinSla, s.slaBreach, pct1(s.slaPct)]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(custRows), 'Customer Performance');
+
+    // Sheet 5: Governorate Performance (if data exists)
+    if(provinceEntries.length){
+      const provRows = [['Governorate','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','SLA %']];
+      provinceEntries.forEach(e=>{
+        const s = e.stats;
+        provRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
+          s.rejected, pct1(s.rejectRate), s.pending, pct1(s.slaPct)]);
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(provRows), 'Governorate Performance');
+    }
+
+    // Sheet 6: Area Performance (if data exists)
+    if(areaEntries.length){
+      const areaRows = [['Area','Total','Delivered','Delivery %','Returned','Return %','Rejected','Reject %','In Progress','SLA %']];
+      areaEntries.forEach(e=>{
+        const s = e.stats;
+        areaRows.push([e.name, s.totalVolume, s.delivered, pct1(s.deliveryRate), s.returned, pct1(s.returnRate),
+          s.rejected, pct1(s.rejectRate), s.pending, pct1(s.slaPct)]);
+      });
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(areaRows), 'Area Performance');
+    }
+
+    // Sheet 7: Management Findings
+    const findingRows = [['Priority','Category','Entity','Issue','Count','Rate','Recommended Action']];
+    findings.forEach(f=>{
+      findingRows.push([f.priority, f.category, f.entity, f.issue, f.count===null?'':f.count, f.rate!==null&&f.rate!==undefined?pct1(f.rate):'', f.action]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(findingRows), 'Management Findings');
+
+    const safePeriod = periodLabel.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_');
+    XLSX.writeFile(wb, `Management_Detailed_Report_${safePeriod}.xlsx`);
+  }catch(err){
+    console.error('Excel report generation failed:', err);
+    alert('تعذر إصدار ملف Excel: ' + (err.message || err));
+  }finally{
+    if(btn) btn.disabled = false;
+    if(statusEl) statusEl.classList.add('hidden');
+  }
+}
+
 
 /* ---------- Orchestration ---------- */
 function mgmtRenderAll(months){
@@ -3559,7 +3772,8 @@ function initManagementHandlers(){
   document.getElementById('mgmtToMonth')?.addEventListener('change', mgmtOnPeriodChange);
   ['mgmtBranchFilter','mgmtCustomerFilter','mgmtComparisonType','mgmtBranchTableMetric','mgmtCustomerTableMetric','mgmtBranchTrendMetric','mgmtCustomerTrendMetric']
     .forEach(id=>document.getElementById(id)?.addEventListener('change', mgmtOnEntityFilterChange));
-  document.getElementById('mgmtPdfBtn')?.addEventListener('click', mgmtGeneratePdfReport);
+  document.getElementById('mgmtPdfBtn')?.addEventListener('click', mgmtGenerateExecutivePdfReport);
+  document.getElementById('mgmtExcelBtn')?.addEventListener('click', mgmtGenerateExcelReport);
 }
 
 /* =========================================================
