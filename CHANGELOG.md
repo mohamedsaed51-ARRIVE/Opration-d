@@ -73,3 +73,42 @@ TEST 1–8 كلها PASSED (منطق منسوخ حرفياً من الملفات
 
 ### Not verified
 - لا اختبار بصري فعلي لملف PDF الناتج ولا اختبار على بيانات حقيقية — يتطلب تشغيل Mohamed للتقرير من الداشبورد الفعلي.
+
+## [Unreleased] — Audit شامل: June + SLA End-Date Priority + Unknown Status Breakdown + Arabic Normalization (انظر docs/production-debug-fixes.md)
+### Fixed
+- **Bug #7:** `unknownStatusBreakdown` [حقل جديد] — تفاصيل كل حالة غير مصنفة (عدد + نسبة)، بدل رقم إجمالي مبهم.
+- **Bug #8:** `summaryNormalizeArabicForMatch_()` [جديدة] — تطبيع فروق إملائية عربية (أ/إ/آ، ى، ة) عند مقارنة/تصنيف الحالة فقط، بدون تغيير القيمة المعروضة أو اختراع Mapping جديد.
+- **Bug #9:** أولوية `Delivery Date` على `Last Status Date` في حساب SLA (Fallback فقط لو الشحنة Delivered وبلا Delivery Date). عمود `delivery` أُضيف كـ Alias تجريبي يحتاج تأكيد الاسم الحقيقي. عداد `missingSlaData` جديد.
+- **تصحيح ذاتي حرج:** أول محاولة لـ Bug #9 كسرت `attemptCat` (ميزة Attempt Category الموجودة، تُطبَّق على كل الصفوف) عن طريق الخطأ. اكتُشف وأُصلح قبل التسليم — `attemptDays`/`attemptCat` الآن منفصلان تماماً عن `slaDays` الجديد.
+- تحسين `diagnoseMonth` ليشمل حالة الـ Snapshot المباشرة (موجود/فارغ/متوافق) لأي شهر.
+- SLA Explanation Tooltip مُضاف أعلى تبويب SLA بالواجهة (Section 9).
+
+### Verified (Code-level)
+- All Months Weighted Calculation (Section 11): تحقّقت أنه صحيح أصلاً، بدون تعديل.
+- Hardcoded Month List (Section 12): تحقّقت أنه لا يوجد Bug عملي (12 شهراً كاملة مُعرَّفة دائماً).
+- اختبار مخصص أثبت أن `attemptCat` غير متأثر إطلاقاً بإصلاح SLA (القيمة نفسها في كل السيناريوهات قبل/بعد). كل اختبارات Bug #1-#6 السابقة: لا Regression.
+
+### Not verified
+- **سبب مشكلة June تحديداً** — لم يُعثر على كود خاص بـ June نفسه؛ يتطلب تشغيل `?action=diagnose&sheet=June` من Mohamed لتأكيد حالة الـ Snapshot الفعلية. اسم عمود Delivery Date الحقيقي غير مؤكَّد.
+
+## [Unreleased] — حسم نهائي: أداة تشخيص June كاملة + تأكيد قطعي بعدم وجود عمود Delivery Date
+### Fixed/Added
+- `diagnoseMonth` أصبحت تُرجع تقريراً كاملاً: Raw Data (rowCount) + Snapshot (exists/empty/compatible) + Summary (total/delivered/deliveryRate) + All Months (included/source/reason) — وعند غياب Snapshot متوافق، تُنفِّذ فعلياً نفس Live Fallback الذي تنفّذه All Months بدل التخمين.
+- حُسم نهائياً: لا يوجد عمود "تاريخ التسليم" منفصل في بيانات المشروع — مؤكَّد بنص موجود مسبقاً في index.html (شرح SLA بالإعدادات) يسبق هذه الجلسة، ومؤكَّد إضافياً بفحص SUMMARY_COLUMN_ALIASES/COLUMN_ALIASES المستقلين. SLA End Date الحقيقي دائماً = Last Status Date للشحنات Delivered فقط.
+
+### Not verified
+- الأرقام الفعلية الحية (June Total, All Months Total, SLA...) — لا يوجد اتصال شبكي من بيئتي؛ أداة diagnoseMonth المُحسَّنة تعطي Mohamed الإجابة الكاملة بضغطة واحدة بعد الرفع.
+
+## [Unreleased] — Customer Activity Alerts: فصل عدّاد Significant عن Critical (فحص فعلي مؤكِّد لا تغيير في تعريف الشهر)
+### Verified (no change needed)
+- alertCurrentMonth = آخر شهر فعلي في فترة التقرير، alertPreviousMonth = الشهر التقويمي قبله مباشرة — كان صحيحاً بالفعل ومؤكَّد بكود واختبار فعليين جديدين هذه الجولة.
+
+### Fixed
+- `mgmtClassifyCustomerRisk()`: فصل `significantDeclineCount` (Significant فقط الآن) عن `criticalDeclineCount` [حقل جديد] بدل دمجهما.
+- `mgmtGenerateExecutivePdfReport()`: بطاقة KPI رابعة "تراجع حرج (Critical)" أُضيفت لصف ملخص الصفحة.
+
+### Not modified
+- Code.gs: صفر تعديل. كل منطق الشهر/الحدود/الحد الأدنى/عدم التكرار: بدون تغيير (كان صحيحاً).
+
+### Verified (Code-level — استخراج فعلي جديد من index.html الحالي)
+14 حالة اختبار حرفية من رسالة المستخدم، كلها PASSED. صفر Regression على كل اختبارات الجلسة.

@@ -344,6 +344,23 @@ var SUMMARY_COLUMN_ALIASES = {
   status:      ["حالة الشحنة", "حالة الشحنه", "Status"],
   finalStatus: ["الحالة النهائية", "الحالة النهائيه"],
   pickup:      ["تاريخ  استلام البيك أب  ", "تاريخ استلام البيك أب", "Pickup Date", "تاريخ الاستلام"],
+  // CONFIRMED — no separate "Delivery Date" column exists in this
+  // project's data (see docs/production-debug-fixes.md Bug #9 for the full
+  // trail). This is not a guess: the project's OWN pre-existing Settings UI
+  // text (index.html, SLA explanation panel) already states explicitly —
+  // predating this session — "End Date = تاريخ آخر حالة (تُستخدم كأقرب
+  // تقريب لتاريخ التسليم الفعلي لعدم وجود عمود منفصل لتاريخ التسليم في
+  // الملف)". Both the backend's SUMMARY_COLUMN_ALIASES and the frontend's
+  // independently-maintained COLUMN_ALIASES have only ever recognized
+  // Pickup Date and Last Status Date — never a delivery-date field, across
+  // every archived iteration of this project.
+  // The alias list below is kept only as harmless, inert future-proofing:
+  // if a real Delivery Date column is ever added to the sheet with one of
+  // these header names (or any name you add here), it starts being used
+  // automatically with zero further code changes — until then it matches
+  // nothing and every row falls through to the Last Status Date fallback,
+  // exactly matching the behavior the project already documented.
+  delivery:    ["تاريخ التسليم", "تاريخ التسليم الفعلي", "Delivery Date"],
   lastStatus:  ["تاريخ اخر حالة", "تاريخ آخر حالة", "Last Status Date"],
   cod:         ["مبلغ التحصيل", "COD"],
   shipCost:    ["تكلفة الشحن", "Shipping Cost"]
@@ -393,20 +410,36 @@ function summaryDetectColumnMap(headers) {
 }
 
 var SUMMARY_STATUS_LOOKUP = null; // built once, lazily, on first use — see summaryClassifyStatus
+// Arabic spelling-variant normalization — used ONLY for matching a status
+// value against SUMMARY_STATUS_MAP (see docs/production-debug-fixes.md —
+// Bug #8). Never applied to the `status` field stored on a row (that stays
+// exactly as read from the sheet, trimmed only — see summaryNormText) —
+// this only decides whether two different spellings of the SAME status
+// already listed in SUMMARY_STATUS_MAP are recognized as equivalent. It
+// never invents a new status->bucket mapping and never changes what an
+// already-distinct status means.
+function summaryNormalizeArabicForMatch_(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ');
+}
 function summaryBuildStatusLookup() {
   var lookup = {};
   var buckets = Object.keys(SUMMARY_STATUS_MAP);
   for (var i = 0; i < buckets.length; i++) {
     var vals = SUMMARY_STATUS_MAP[buckets[i]];
     for (var v = 0; v < vals.length; v++) {
-      lookup[summaryNormText(vals[v])] = buckets[i];
+      lookup[summaryNormalizeArabicForMatch_(summaryNormText(vals[v]))] = buckets[i];
     }
   }
   return lookup;
 }
 function summaryClassifyStatus(status) {
   if (!SUMMARY_STATUS_LOOKUP) SUMMARY_STATUS_LOOKUP = summaryBuildStatusLookup();
-  var n = summaryNormText(status);
+  var n = summaryNormalizeArabicForMatch_(summaryNormText(status));
   return SUMMARY_STATUS_LOOKUP.hasOwnProperty(n) ? SUMMARY_STATUS_LOOKUP[n] : "unknown";
 }
 
@@ -636,6 +669,23 @@ function summaryObjKeysSorted(obj) {
   for (var k in obj) { if (obj.hasOwnProperty(k)) keys.push(k); }
   keys.sort();
   return keys;
+}
+// Turns the {status: count} tally into a sorted array for the Data Quality
+// "Unknown Status Details" table (see docs/production-debug-fixes.md — Bug
+// #7): which exact raw status strings are landing in "unknown", how many
+// shipments each, and what % of the total unknown count they represent —
+// so "Unknown = 1,250" is never just an opaque number.
+function summaryUnknownStatusBreakdown_(countsObj) {
+  var total = 0;
+  for (var k in countsObj) { if (countsObj.hasOwnProperty(k)) total += countsObj[k]; }
+  var out = [];
+  for (var s in countsObj) {
+    if (!countsObj.hasOwnProperty(s)) continue;
+    var c = countsObj[s];
+    out.push({ status: s, count: c, pct: total > 0 ? (c / total * 100) : null });
+  }
+  out.sort(function (a, b) { return b.count - a.count; });
+  return out;
 }
 
 function summaryHashKey(s) {
@@ -1094,10 +1144,10 @@ function getMonthDashboardSummary(sheetName, params) {
   // Empty tab (no data yet) is a normal state, NOT an error — matches the
   // dashboard's existing "no data yet" handling exactly.
   if (lastRow === 0 || lastColumn === 0) {
-    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
+    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], unknownStatusBreakdown:[], missingSlaData:0, negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
   }
   if (lastRow < 2) {
-    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
+    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], unknownStatusBreakdown:[], missingSlaData:0, negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
   }
 
   // Single full read, done ONCE on the server — this is the whole point:
@@ -1115,7 +1165,7 @@ function getMonthDashboardSummary(sheetName, params) {
     return row.some(function (cell) { return cell !== "" && cell !== null; });
   });
   if (!hasAnyContent) {
-    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
+    return { success: true, sheet: sheetName, source: quarter, empty: true, noData: true, totalRows: 0, grandTotal: 0, attemptSummary: { first:0, second:0, other:0, na:0, total:0 }, timeSeries: { daily:[], weekly:[], monthly:[] }, dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], unknownStatusBreakdown:[], missingSlaData:0, negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false }, facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} }, colMap: {}, generatedAt: new Date().toISOString() };
   }
 
   var tMapStart = new Date().getTime();
@@ -1139,7 +1189,7 @@ function getMonthDashboardSummary(sheetName, params) {
   var awbMap = {}; // awb -> latest row object (dedup, matches dedupeForKPI)
   var dupCount = 0;
   var invalidDates = 0;
-  var dqTotalRows = 0, missingBranch = 0, missingClient = 0, missingProvince = 0, negativeCod = 0, unknownStatusCount = 0;
+  var dqTotalRows = 0, missingBranch = 0, missingClient = 0, missingProvince = 0, negativeCod = 0, unknownStatusCount = 0, missingSlaData = 0;
   var unknownStatusSet = {};
   var seenAwbCount = {}; // awb -> occurrence count
   var fullyBlankRowCount = 0, blankAwbRowCount = 0;
@@ -1167,11 +1217,12 @@ function getMonthDashboardSummary(sheetName, params) {
 
     var pickup = summaryParseDate(summaryGetField(row, idx, "pickup"));
     var lastStatus = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
+    var deliveryDate = summaryParseDate(summaryGetField(row, idx, "delivery"));
     if (!pickup) invalidDates++;
 
     var status = summaryNormText(summaryGetField(row, idx, "status"));
     var bucket = summaryClassifyStatus(status);
-    if (bucket === "unknown" && status) { unknownStatusSet[status] = true; unknownStatusCount++; }
+    if (bucket === "unknown" && status) { unknownStatusSet[status] = (unknownStatusSet[status]||0) + 1; unknownStatusCount++; }
     var branch = summaryNormText(summaryGetField(row, idx, "branch"));
     if (!branch) missingBranch++;
     var client = summaryNormText(summaryGetField(row, idx, "client"));
@@ -1184,14 +1235,39 @@ function getMonthDashboardSummary(sheetName, params) {
     if (cod < 0) negativeCod++;
     var shipCost = parseFloat(summaryGetField(row, idx, "shipCost")) || 0;
 
-    var slaDays = null;
-    if (pickup && lastStatus) slaDays = (lastStatus.getTime() - pickup.getTime()) / 86400000;
-    var attemptCat = summaryClassifyAttempt(slaDays, attemptT1, attemptT2);
+    // ATTEMPT CATEGORY — UNCHANGED from before this fix. This is a separate,
+    // pre-existing feature (drives the "Attempt Category" filter and
+    // attemptSummary breakdown, see summaryClassifyAttempt/attemptSummary
+    // below) that intentionally applies to EVERY row regardless of bucket —
+    // it measures pickup-to-last-status timing generally, not delivery
+    // performance specifically. It must NOT be affected by the Delivery
+    // SLA end-date priority change below (an earlier draft of this fix
+    // accidentally coupled the two, which would have silently reclassified
+    // every non-delivered row's Attempt Category to "na" the moment it no
+    // longer had a slaDays value — a real regression, caught before this
+    // was ever shipped, not after).
+    var attemptDays = null;
+    if (pickup && lastStatus) attemptDays = (lastStatus.getTime() - pickup.getTime()) / 86400000;
+    var attemptCat = summaryClassifyAttempt(attemptDays, attemptT1, attemptT2);
+
+    // SLA END DATE PRIORITY (see docs/production-debug-fixes.md — Bug #9):
+    // completely separate from attemptCat above — this is ONLY the
+    // Delivery SLA achievement metric (section 6/8 of the request).
+    // 1) Delivery Date, when present and valid — for ANY row (not gated on
+    //    bucket, since a genuine Delivery Date is authoritative regardless).
+    // 2) Last Status Date, ONLY as a fallback, and ONLY when the shipment
+    //    is actually Delivered — never applied to returned/rejected/
+    //    pending/unknown rows.
+    var slaEndDate = null, slaEndSource = null;
+    if (deliveryDate) { slaEndDate = deliveryDate; slaEndSource = "delivery"; }
+    else if (bucket === "delivered" && lastStatus) { slaEndDate = lastStatus; slaEndSource = "lastStatus"; }
+    var slaDays = (pickup && slaEndDate) ? (slaEndDate.getTime() - pickup.getTime()) / 86400000 : null;
+    if (bucket === "delivered" && slaDays === null) missingSlaData++; // Data Quality section 10 — delivered but no usable SLA end date
 
     var rec = {
       awb: awb, client: client, province: province, area: area, branch: branch,
       status: status, bucket: bucket, finalStatus: finalStatus,
-      pickup: pickup, lastStatus: lastStatus, slaDays: slaDays, cod: cod, shipCost: shipCost,
+      pickup: pickup, lastStatus: lastStatus, deliveryDate: deliveryDate, slaDays: slaDays, slaEndSource: slaEndSource, cod: cod, shipCost: shipCost,
       attemptCat: attemptCat
     };
 
@@ -1254,6 +1330,8 @@ function getMonthDashboardSummary(sheetName, params) {
     missingProvince: missingProvince,
     unknownStatusCount: unknownStatusCount,
     unknownStatusList: summaryObjKeysSorted(unknownStatusSet),
+    unknownStatusBreakdown: summaryUnknownStatusBreakdown_(unknownStatusSet),
+    missingSlaData: missingSlaData,
     negativeCod: negativeCod,
     duplicateRecords: duplicateRecords,
     duplicateRecordsTruncated: duplicateRecordsTruncated,
@@ -1713,8 +1791,9 @@ function summaryMergeTrendList(list) {
   return all;
 }
 function summaryMergeDataQuality(dqList) {
-  var totalRows=0, distinctAwb=0, dupAwbCount=0, invalidDates=0, missingBranch=0, missingClient=0, missingProvince=0, unknownStatusCount=0, negativeCod=0;
+  var totalRows=0, distinctAwb=0, dupAwbCount=0, invalidDates=0, missingBranch=0, missingClient=0, missingProvince=0, unknownStatusCount=0, negativeCod=0, missingSlaData=0;
   var unknownStatusSet = {};
+  var unknownStatusCounts = {};
   var allDupRecords = [];
   var truncated = false;
   var DQ_ALL_MONTHS_CAP = 1000;
@@ -1724,8 +1803,13 @@ function summaryMergeDataQuality(dqList) {
     totalRows += dq.totalRows||0; distinctAwb += dq.distinctAwb||0; dupAwbCount += dq.dupAwbCount||0;
     invalidDates += dq.invalidDates||0; missingBranch += dq.missingBranch||0; missingClient += dq.missingClient||0;
     missingProvince += dq.missingProvince||0; unknownStatusCount += dq.unknownStatusCount||0; negativeCod += dq.negativeCod||0;
+    missingSlaData += dq.missingSlaData||0;
     var usl = dq.unknownStatusList || [];
     for (var u = 0; u < usl.length; u++) unknownStatusSet[usl[u]] = true;
+    var usb = dq.unknownStatusBreakdown || [];
+    for (var ub = 0; ub < usb.length; ub++) {
+      unknownStatusCounts[usb[ub].status] = (unknownStatusCounts[usb[ub].status]||0) + (usb[ub].count||0);
+    }
     if (dq.duplicateRecordsTruncated) truncated = true;
     var recs = dq.duplicateRecords || [];
     for (var r = 0; r < recs.length; r++) {
@@ -1744,6 +1828,8 @@ function summaryMergeDataQuality(dqList) {
     totalRows: totalRows, distinctAwb: distinctAwb, dupAwbCount: dupAwbCount, invalidDates: invalidDates,
     missingBranch: missingBranch, missingClient: missingClient, missingProvince: missingProvince,
     unknownStatusCount: unknownStatusCount, unknownStatusList: summaryObjKeysSorted(unknownStatusSet),
+    unknownStatusBreakdown: summaryUnknownStatusBreakdown_(unknownStatusCounts),
+    missingSlaData: missingSlaData,
     negativeCod: negativeCod, duplicateRecords: allDupRecords, duplicateRecordsTruncated: truncated,
     reconciliation: recon
   };
@@ -1957,7 +2043,7 @@ function getAllMonthsDashboardSummary(params) {
       totalRows: 0, grandTotal: 0,
       attemptSummary: { first:0, second:0, other:0, na:0, total:0 },
       timeSeries: { daily:[], weekly:[], monthly:[] },
-      dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false },
+      dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], unknownStatusBreakdown:[], missingSlaData:0, negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false },
       facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} },
       colMap: {}, allMonths: true, includedMonths: [], emptyMonths: emptyMonths,
       missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths, partial: !!(skippedMonths.length || missingSnapshotMonths.length),
@@ -2900,7 +2986,75 @@ function diagnoseMonth(sheetName) {
       0,
 
     headers:
-      []
+      [],
+
+    // Answers section 2 of the audit request directly: does this month
+    // have a saved snapshot at all, is it empty, and is it built with the
+    // plain default settings (the same compatibility check
+    // getAllMonthsDashboardSummary / buildMissingMonthSnapshots already
+    // use) — without running a full live aggregation just to find out.
+    snapshot: (function(){
+      var snap = null;
+      try { snap = getSavedMonthSummary_(sheetName); } catch (eSnap) { return { exists:false, error:String(eSnap && eSnap.message ? eSnap.message : eSnap) }; }
+      if (!snap) return { exists:false };
+      if (snap.empty || snap.noData) return { exists:true, empty:true, generatedAt: snap.generatedAt || null };
+      var bc = snap.filterCube && snap.filterCube.buildConfig;
+      var compatibleWithDefaults = !!bc &&
+        Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
+        Number(bc.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
+        summaryBranchTargetsEqual_(bc.branchSlaTargets, {});
+      return {
+        exists:true, empty:false, compatibleWithDefaults: compatibleWithDefaults, buildConfig: bc || null,
+        generatedAt: snap.generatedAt || null, totalRows: snap.totalRows || 0,
+        total: snap.kpis ? snap.kpis.total : null, delivered: snap.kpis ? snap.kpis.delivered : null,
+        deliveryRate: snap.kpis ? snap.kpis.deliveryRate : null
+      };
+    })(),
+
+    // Answers "would a normal (unfiltered, default-settings) All Months
+    // request include this month right now, and why" — the exact same
+    // decision getAllMonthsDashboardSummary's fast path makes. When there
+    // is no compatible snapshot, this ACTUALLY runs the same live
+    // aggregation All Months would run (getMonthDashboardSummary), rather
+    // than guessing — a genuine answer, not a prediction.
+    allMonths: (function(){
+      var snap2 = null;
+      try { snap2 = getSavedMonthSummary_(sheetName); } catch (eSnap2) { snap2 = null; }
+      if (snap2 && (snap2.empty || snap2.noData)) {
+        return { included:false, asEmptyMonth:true, reason:"Snapshot marks this month as empty — correctly excluded from totals as an EMPTY month, not a failure." };
+      }
+      if (snap2) {
+        var bc2 = snap2.filterCube && snap2.filterCube.buildConfig;
+        var compatible2 = !!bc2 &&
+          Number(bc2.attemptT1) === 1 && Number(bc2.attemptT2) === 2 &&
+          Number(bc2.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
+          summaryBranchTargetsEqual_(bc2.branchSlaTargets, {});
+        if (compatible2) {
+          return {
+            included:true, source:"snapshot",
+            total: snap2.kpis ? snap2.kpis.total : null, delivered: snap2.kpis ? snap2.kpis.delivered : null,
+            deliveryRate: snap2.kpis ? snap2.kpis.deliveryRate : null
+          };
+        }
+      }
+      // No usable snapshot — actually run the same live fallback All Months would.
+      try {
+        var liveResult = getMonthDashboardSummary(sheetName, { __requestId: "diagnose-" + sheetName });
+        if (!liveResult || liveResult.success === false) {
+          return { included:false, reason:"Live fallback FAILED: " + (liveResult && liveResult.error ? liveResult.error : "unknown error") };
+        }
+        if (liveResult.empty || liveResult.noData) {
+          return { included:false, asEmptyMonth:true, reason:"Live computation shows this month genuinely has zero rows — an EMPTY month, not a failure." };
+        }
+        return {
+          included:true, source:"live-fallback",
+          total: liveResult.kpis ? liveResult.kpis.total : null, delivered: liveResult.kpis ? liveResult.kpis.delivered : null,
+          deliveryRate: liveResult.kpis ? liveResult.kpis.deliveryRate : null
+        };
+      } catch (eLive) {
+        return { included:false, reason:"Live fallback threw an exception: " + String(eLive && eLive.message ? eLive.message : eLive) };
+      }
+    })()
 
   };
 

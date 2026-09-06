@@ -596,6 +596,12 @@ footer.app-footer{text-align:center; padding:20px; color:var(--text-faint); font
   </div>
 
   <div class="tab-panel" id="tab-sla">
+    <div class="card-sub" style="margin-bottom:14px;">
+      <b>SLA Achievement</b> — نسبة الشحنات التي تم تسليمها خلال المدة المستهدفة.
+      يُحسب من تاريخ بداية الشحنة (Pickup Date) حتى تاريخ التسليم الفعلي (Delivery Date إن وُجد، وإلا تاريخ آخر حالة كـ fallback فقط للشحنات المُسلَّمة).
+      SLA = الشحنات المُسلَّمة ضمن المدة المستهدفة ÷ الشحنات المُسلَّمة ذات التواريخ الصحيحة × 100.
+      <b>ملاحظة:</b> هذا مختلف عن "نسبة التسليم" (Delivery Rate) التي تقارن بإجمالي كل الشحنات — SLA يقارن فقط بين الشحنات التي تم تسليمها فعلاً.
+    </div>
     <div class="kpi-grid" id="slaKpiGrid" style="grid-template-columns:repeat(5,1fr);"></div>
     <div class="section-row">
       <div class="card">
@@ -3722,16 +3728,19 @@ function mgmtClassifyCustomerRisk(series, currentMonth, previousMonth, minPrevio
   rows.sort((a,b)=>b.lostOrders-a.lostOrders);
   const stopped = rows.filter(r=>r.level==='stopped');
   const declining = rows.filter(r=>r.level!=='stopped'); // mild + significant + critical
-  // "Customers with Significant Decline: decline greater than 25%" — kept
-  // mutually exclusive from "Stopped Customers" (its own separate KPI card
-  // right next to this one) so no customer is ever counted in both cards;
-  // this is the one place this file makes that specific choice explicit.
-  const significantDeclineCount = rows.filter(r=>r.level==='significant' || r.level==='critical').length;
+  // Updated spec: Stopped, Significant, and Critical are reported as three
+  // SEPARATE counts in the PDF summary (an earlier iteration of this
+  // feature combined Significant+Critical into one number — the current
+  // request explicitly asks for Critical on its own). Each row still
+  // belongs to exactly one level, so there is still no double counting
+  // across these three numbers.
+  const significantDeclineCount = rows.filter(r=>r.level==='significant').length;
+  const criticalDeclineCount = rows.filter(r=>r.level==='critical').length;
   // "Lost Orders — avoid double counting": `rows` already has at most one
   // entry per customer name (mgmtBuildSeries groups by name into a Map), so
   // a plain sum here can never double-count the same customer twice.
   const lostOrders = rows.reduce((sum,r)=>sum+r.lostOrders, 0);
-  return { rows, stopped, declining, stoppedCount: stopped.length, significantDeclineCount, lostOrders };
+  return { rows, stopped, declining, stoppedCount: stopped.length, significantDeclineCount, criticalDeclineCount, lostOrders };
 }
 
 async function mgmtGenerateExecutivePdfReport(){
@@ -3966,7 +3975,8 @@ async function mgmtGenerateExecutivePdfReport(){
         y = pdfParagraph(doc, font, y, `مقارنة ${pdfArabicMonthName(alertCurrentMonth)} (الحالي) مقابل ${pdfArabicMonthName(alertPreviousMonth)} (السابق) — بحد أدنى ${pdfFormatNumber(CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS)} طلب في الشهر السابق لدخول التحليل.`, {gap:8});
         y = pdfKpiGrid(doc, font, y, [
           {label:'عملاء متوقفون', value:pdfFormatNumber(risk.stoppedCount), valueColor:[178,34,34]},
-          {label:'تراجع كبير (>25%)', value:pdfFormatNumber(risk.significantDeclineCount), valueColor:[214,102,26]},
+          {label:'تراجع كبير (Significant)', value:pdfFormatNumber(risk.significantDeclineCount), valueColor:[214,102,26]},
+          {label:'تراجع حرج (Critical)', value:pdfFormatNumber(risk.criticalDeclineCount), valueColor:[178,34,34]},
           {label:'إجمالي الطلبات المفقودة', value:pdfFormatNumber(risk.lostOrders), valueColor:[178,34,34]},
         ]);
         y += 6;
@@ -5130,10 +5140,27 @@ function renderDqTabFromServer(serverSummary){
     {n:fmtInt(dq.missingProvince), l:'صفوف بدون محافظة', cls: dq.missingProvince>0?'warn':'ok'},
     {n:fmtInt(dq.unknownStatusCount), l:'حالات غير مصنفة (Unknown Status)', cls: dq.unknownStatusCount>0?'bad':'ok'},
     {n:fmtInt(dq.negativeCod), l:'قيم سالبة في مبلغ التحصيل', cls: dq.negativeCod>0?'warn':'ok'},
+    // "Missing SLA Data" (section 10): delivered shipments with no usable
+    // SLA end date (no Delivery Date AND no valid Last Status Date) — kept
+    // separate from slaAchievement itself so that number is never
+    // silently diluted or inflated by shipments that couldn't be measured.
+    {n:fmtInt(dq.missingSlaData||0), l:'شحنات تم تسليمها بدون بيانات SLA صالحة', cls: (dq.missingSlaData||0)>0?'warn':'ok'},
   ];
   document.getElementById('dqGrid').innerHTML = cards.map(c=>`<div class="dq-card ${c.cls}"><div class="n">${c.n}</div><div class="l">${c.l}</div></div>`).join('');
 
-  if(dq.unknownStatusList && dq.unknownStatusList.length){
+  // "Unknown Status Details" (section 3): a real per-status breakdown —
+  // exact original status text as read from the sheet, count, and % of the
+  // total unknown count — never just a single opaque total. Falls back to
+  // the old comma-joined name-only line if an older cached summary (pre
+  // this fix) only has unknownStatusList and no unknownStatusBreakdown yet.
+  if(dq.unknownStatusBreakdown && dq.unknownStatusBreakdown.length){
+    const rows = dq.unknownStatusBreakdown.map(u=>`
+      <tr><td>${u.status}</td><td>${fmtInt(u.count)}</td><td>${u.pct!==null?fmtPct(u.pct):'-'}</td><td>Unknown / غير مصنف</td></tr>`).join('');
+    document.getElementById('dqGrid').innerHTML += `<div class="dq-card bad" style="grid-column:1/-1;">
+      <div class="l" style="margin-top:0;margin-bottom:8px;">تفاصيل الحالات غير المصنفة (Unknown Status Details) — القيم كما وردت فعلياً في الملف، يجب إضافتها إلى تصنيف الحالات من تبويب الإعدادات إن كانت تمثل حالة حقيقية معروفة:</div>
+      <table style="width:100%;font-size:13px;"><thead><tr><th>الحالة الأصلية</th><th>عدد الشحنات</th><th>النسبة</th><th>التصنيف الحالي</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
+  }else if(dq.unknownStatusList && dq.unknownStatusList.length){
     document.getElementById('dqGrid').innerHTML += `<div class="dq-card bad" style="grid-column:1/-1;"><div class="l" style="margin-top:0;">قيم الحالة غير المصنفة الموجودة فعلياً في الملف: <b>${dq.unknownStatusList.join('، ')}</b> — يجب إضافتها إلى تصنيف الحالات من تبويب الإعدادات.</div></div>`;
   }
 
