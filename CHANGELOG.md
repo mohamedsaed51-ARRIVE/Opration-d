@@ -61,3 +61,15 @@ TEST 1–8 كلها PASSED (منطق منسوخ حرفياً من الملفات
 
 ### Not verified
 - الرقم الفعلي الحقيقي (870509) والأداء الفعلي بعد بناء الـ Snapshots — يتطلب تنفيذ Mohamed لخطوات النشر والبناء الموثّقة في production-debug-fixes.md.
+
+## [Unreleased] — ميزة جديدة: تنبيهات نشاط العملاء ومخاطر انخفاض الطلبات (PDF) — انظر docs/production-debug-fixes.md
+### Added
+- صفحة PDF جديدة "تنبيهات نشاط العملاء ومخاطر انخفاض الطلبات" داخل `mgmtGenerateExecutivePdfReport()` (بعد صفحة "حركة العملاء" الموجودة، قبل "التوصيات الإدارية").
+- `mgmtClassifyCustomerRisk()`, `mgmtPreviousCalendarMonth()` [دالتان جديدتان، منطق خالص قابل للاختبار بمعزل عن jsPDF/DOM]، `CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS` [ثابت جديد = 20].
+- يقارن الشهر الحالي (آخر شهر في فترة تقرير الإدارة) مقابل الشهر التقويمي السابق مباشرة (يُحمَّل عند الحاجة عبر `mgmtEnsureMonthsLoaded()` الموجودة أصلاً)، يعيد استخدام `mgmtBuildSeries('client', ...)` الموجودة أصلاً — بدون أي تعديل في `Code.gs`.
+
+### Verified (Code-level — 21 تأكيداً)
+- كل حدود الشرائح (Stopped/Mild/Significant/Critical) مُختبرة بدقة عند القيم الحدّية بالضبط (10%، 25%، 50%). عميل جديد مُستبعَد تماماً، عميل تحت الحد الأدنى مُستبعَد حتى لو توقف، لا احتساب مزدوج، الفرز صحيح. Syntax Check PASSED. لا Regression على Bug #1-#6.
+
+### Not verified
+- لا اختبار بصري فعلي لملف PDF الناتج ولا اختبار على بيانات حقيقية — يتطلب تشغيل Mohamed للتقرير من الداشبورد الفعلي.

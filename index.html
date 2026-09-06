@@ -3645,6 +3645,95 @@ function mgmtCompanyAvgSentence(name, count, rate, companyAvg, verb){
   return `${verb} ${name} ${fmtInt(count)} شحنة بنسبة ${fmtPct(rate)}، مقارنة بمتوسط الشركة البالغ ${fmtPct(companyAvg)}.`;
 }
 
+/* =========================================================
+   CUSTOMER ACTIVITY & DECLINE ALERTS — see docs/production-debug-fixes.md.
+   Compares exactly two calendar months (the report's own "current" month
+   vs the calendar month immediately before it — NOT the whole selected
+   period's first-vs-last, which is a different, already-existing analysis
+   in the "حركة العملاء" page above). Reuses mgmtBuildSeries('client', ...)
+   as-is — the SAME per-customer-per-month data and name grouping every
+   other customer table/page in this report already uses, so normalization
+   and empty-name exclusion are inherited for free, not reimplemented.
+   ========================================================= */
+// Easy to change without touching the classification logic below.
+const CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS = 20;
+
+// FULL_YEAR_MONTHS is already the canonical Jan-Dec order used elsewhere in
+// this file — reused here rather than declaring a second month-order list.
+function mgmtPreviousCalendarMonth(month){
+  const idx = FULL_YEAR_MONTHS.indexOf(month);
+  if(idx <= 0) return null; // January (or an unrecognized month name) has no calendar-previous month
+  return FULL_YEAR_MONTHS[idx-1];
+}
+
+// Pure classification, deliberately separate from any DOM/jsPDF code so it
+// can be tested/inspected on its own. `series` is mgmtBuildSeries('client',
+// [previousMonth, currentMonth], {})'s output — passed in rather than
+// rebuilt here so the caller controls exactly which two months were loaded.
+function mgmtClassifyCustomerRisk(series, currentMonth, previousMonth, minPreviousOrders){
+  minPreviousOrders = (minPreviousOrders===undefined||minPreviousOrders===null) ? CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS : minPreviousOrders;
+  const rows = [];
+  for(const entry of series.values()){
+    const prevRec = entry.byMonth[previousMonth];
+    const currRec = entry.byMonth[currentMonth];
+    // "Do not classify a customer as stopped if the customer did not exist
+    // in the previous month" / "Do not treat new customers as declining
+    // customers" — a customer with no record at all in the previous month
+    // is a NEW customer this month, never part of this analysis.
+    if(!prevRec) continue;
+    const prevCount = prevRec.count||0;
+    const currCount = currRec ? (currRec.count||0) : 0; // no record in current month = zero orders this month
+    // Minimum Volume Protection (section 3) — applies to stopped customers
+    // too, by default, exactly as required.
+    if(prevCount < minPreviousOrders) continue;
+    // "If Previous Month Orders = 0, do not calculate a percentage decline"
+    // — already unreachable with the default threshold (20), kept explicit
+    // in case minPreviousOrders is ever configured down to 0.
+    if(prevCount <= 0) continue;
+    const diff = currCount - prevCount; // negative = a decline
+    if(diff >= 0) continue; // flat or growing — never an alert
+    const changePct = (diff/prevCount)*100; // always < 0 past this point
+    const declineMag = -changePct; // positive magnitude — avoids sign-boundary mistakes below
+    let level, labelAr, labelEn, color;
+    // Boundaries exactly as specified: "0% to -10%" Normal (10 itself is
+    // Normal), "more than -10% to -25%" Mild (25 itself is Mild, 10 itself
+    // is NOT), "more than -25% to -50%" Significant (50 itself is
+    // Significant, 25 itself is NOT), "more than -50%" Critical (50 itself
+    // is NOT Critical, it's Significant) — each tier's own upper bound is
+    // inclusive, its lower bound is exclusive (owned by the tier below it).
+    if(currCount === 0){
+      level='stopped'; labelAr='متوقف'; labelEn='STOPPED'; color=[178,34,34];
+    } else if(declineMag > 50){
+      level='critical'; labelAr='تراجع حرج'; labelEn='Critical Decline'; color=[178,34,34];
+    } else if(declineMag > 25){
+      level='significant'; labelAr='تراجع كبير'; labelEn='Significant Decline'; color=[214,102,26];
+    } else if(declineMag > 10){
+      level='mild'; labelAr='تراجع طفيف'; labelEn='Mild Decline'; color=[180,130,10];
+    } else {
+      continue; // 0% to -10% decline (inclusive) — Normal, no alert (section 2)
+    }
+    rows.push({
+      name: entry.name, previousOrders: prevCount, currentOrders: currCount,
+      diff, changePct, level, labelAr, labelEn, color,
+      lostOrders: Math.max(0, -diff)
+    });
+  }
+  // "Sort the table by: Largest Lost Orders descending" (section 5)
+  rows.sort((a,b)=>b.lostOrders-a.lostOrders);
+  const stopped = rows.filter(r=>r.level==='stopped');
+  const declining = rows.filter(r=>r.level!=='stopped'); // mild + significant + critical
+  // "Customers with Significant Decline: decline greater than 25%" — kept
+  // mutually exclusive from "Stopped Customers" (its own separate KPI card
+  // right next to this one) so no customer is ever counted in both cards;
+  // this is the one place this file makes that specific choice explicit.
+  const significantDeclineCount = rows.filter(r=>r.level==='significant' || r.level==='critical').length;
+  // "Lost Orders — avoid double counting": `rows` already has at most one
+  // entry per customer name (mgmtBuildSeries groups by name into a Map), so
+  // a plain sum here can never double-count the same customer twice.
+  const lostOrders = rows.reduce((sum,r)=>sum+r.lostOrders, 0);
+  return { rows, stopped, declining, stoppedCount: stopped.length, significantDeclineCount, lostOrders };
+}
+
 async function mgmtGenerateExecutivePdfReport(){
   const btn = document.getElementById('mgmtPdfBtn');
   const statusEl = document.getElementById('mgmtPdfStatus');
@@ -3856,6 +3945,51 @@ async function mgmtGenerateExecutivePdfReport(){
         const worsened = [...custMovements].filter(m=>m.mv.deliveryRateChange!==null && m.mv.deliveryRateChange<=-5).sort((a,b)=>a.mv.deliveryRateChange-b.mv.deliveryRateChange);
         y = pdfParagraph(doc, font, y, `عملاء تحسن أداؤهم (تسليم +5 نقاط أو أكثر): ${improved.length}.`, {gap:4});
         y = pdfParagraph(doc, font, y, `عملاء تراجع أداؤهم (تسليم -5 نقاط أو أكثر): ${worsened.length}.`, {gap:4});
+      }
+
+      // PAGE — تنبيهات نشاط العملاء ومخاطر انخفاض الطلبات (Customer Activity & Risk Alerts)
+      // Deliberately Current-vs-Previous CALENDAR month, not first-vs-last of
+      // the whole selected period (that's the "حركة العملاء" page above) —
+      // "current" is the most recent month in this report's own period.
+      doc.addPage(); y = PDF_MARGIN;
+      y = pdfSectionTitle(doc, font, y, 'تنبيهات نشاط العملاء ومخاطر انخفاض الطلبات');
+      const alertCurrentMonth = months[months.length-1];
+      const alertPreviousMonth = mgmtPreviousCalendarMonth(alertCurrentMonth);
+      const alertPrevAvailable = !!(alertPreviousMonth && availableMonths.includes(alertPreviousMonth));
+      if(alertPrevAvailable) await mgmtEnsureMonthsLoaded([alertCurrentMonth, alertPreviousMonth]);
+      const alertPrevLoaded = alertPrevAvailable && MGMT.monthsData[alertPreviousMonth] && MGMT.monthsData[alertPreviousMonth].summary;
+      if(!alertPrevLoaded){
+        y = pdfParagraph(doc, font, y, 'بيانات الشهر السابق غير متاحة لإجراء مقارنة العملاء (Previous month data is not available for customer comparison).', {gap:4});
+      } else {
+        const riskSeries = mgmtBuildSeries('client', [alertPreviousMonth, alertCurrentMonth], {});
+        const risk = mgmtClassifyCustomerRisk(riskSeries, alertCurrentMonth, alertPreviousMonth);
+        y = pdfParagraph(doc, font, y, `مقارنة ${pdfArabicMonthName(alertCurrentMonth)} (الحالي) مقابل ${pdfArabicMonthName(alertPreviousMonth)} (السابق) — بحد أدنى ${pdfFormatNumber(CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS)} طلب في الشهر السابق لدخول التحليل.`, {gap:8});
+        y = pdfKpiGrid(doc, font, y, [
+          {label:'عملاء متوقفون', value:pdfFormatNumber(risk.stoppedCount), valueColor:[178,34,34]},
+          {label:'تراجع كبير (>25%)', value:pdfFormatNumber(risk.significantDeclineCount), valueColor:[214,102,26]},
+          {label:'إجمالي الطلبات المفقودة', value:pdfFormatNumber(risk.lostOrders), valueColor:[178,34,34]},
+        ]);
+        y += 6;
+        const riskCols = [
+          {header:'العميل',width:130,align:'right'},{header:'السابق',width:60},{header:'الحالي',width:60},
+          {header:'الفرق',width:60},{header:'التغيّر %',width:55},{header:'المستوى',width:90},
+        ];
+        const riskRow = r => [
+          mgmtCleanEntityName(r.name), pdfFormatNumber(r.previousOrders), pdfFormatNumber(r.currentOrders),
+          pdfFormatNumber(r.diff), pdfFormatPercent(r.changePct,0), { text:r.labelAr, color:r.color }
+        ];
+        if(!risk.stopped.length && !risk.declining.length){
+          y = pdfParagraph(doc, font, y, 'لا يوجد عملاء متوقفون أو في تراجع يتجاوز الحد الأدنى المحدد خلال هذه المقارنة.', {gap:4});
+        } else {
+          // "Show all stopped customers if the number is reasonable,
+          // otherwise the top customers with the largest lost orders" —
+          // risk.stopped is already sorted by lostOrders descending, so a
+          // plain slice already satisfies both cases.
+          const stoppedCap = 20;
+          const stoppedToShow = risk.stopped.slice(0, stoppedCap);
+          y = pdfLabelAndTable(doc, font, y, `🔴 عملاء متوقفون (${risk.stopped.length})${risk.stopped.length>stoppedToShow.length ? ' — أعلى '+stoppedCap+' حسب الطلبات المفقودة' : ''}`, riskCols, stoppedToShow.map(riskRow));
+          y = pdfLabelAndTable(doc, font, y, 'أعلى العملاء تراجعًا في الطلبات (Top 10)', riskCols, risk.declining.slice(0,10).map(riskRow));
+        }
       }
     }
 
