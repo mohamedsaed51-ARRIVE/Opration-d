@@ -112,3 +112,23 @@ TEST 1–8 كلها PASSED (منطق منسوخ حرفياً من الملفات
 
 ### Verified (Code-level — استخراج فعلي جديد من index.html الحالي)
 14 حالة اختبار حرفية من رسالة المستخدم، كلها PASSED. صفر Regression على كل اختبارات الجلسة.
+
+## [Unreleased] — Bug #10: أداة تشخيص June (diagnoseJuneStatuses) — بانتظار تشغيل حقيقي
+### Added
+- `diagnoseStatusBreakdown(sheetName)` [عامة، بدون أي فرع خاص بأي شهر] + `diagnoseJuneStatuses()` [Wrapper بسطر واحد] في Code.gs. مساران HTTP: action=diagnoseStatuses، action=diagnoseJuneStatuses.
+- تُرجع: عمود الحالة المُكتشَف، كل القيم الخام بعددها ونوعها، القيم بعد التطبيع، توزيع البواكت، والقيم الخام بالضبط المسؤولة عن Unknown (مرتبة تنازلياً).
+
+### Root Cause الأرجح (لم يُؤكَّد بعد بلا بيانات حية)
+`SUMMARY_STATUS_MAP.delivered` يحتوي نصاً عربياً واحداً فقط ("تسليم ناجح") — أي فرق (بما فيه نص إنجليزي "Delivered") يفشل المطابقة بالكامل. يفسر النمط المُلاحَظ (delivered=0, unknown ضخم, returned/rejected سليمتان).
+
+### Fixed
+- بق صغير ذاتي: عند إضافة الدالة الجديدة حذفت بالخطأ تعليق "// 9. JSON RESPONSE"، اكتُشف وأُصلح فوراً في نفس الجولة.
+
+### Not modified
+- SUMMARY_STATUS_MAP: صفر تعديل (لا قيم مُخمَّنة، كما طُلِب صراحة).
+
+### Verified (Code-level فقط — يختبر الأداة، وليس بيانات June الحقيقية)
+اختبار بشيت وهمي يحاكي النمط المُلاحَظ (delivered=0 بسبب نص إنجليزي/عربي مختلف) — الأداة حدّدت المصدر بدقة 100%. Syntax Check PASSED. صفر Regression على كل اختبارات الجلسة.
+
+### Not verified — يتطلب تشغيلك الفعلي
+كل الرقم/القيم الحقيقية لـ June، وبالتالي: تحديث SUMMARY_STATUS_MAP الفعلي، إعادة بناء June Snapshot، ومقارنة May/July — كلها بانتظار نتيجة `?action=diagnoseJuneStatuses` منك.

@@ -172,6 +172,14 @@ function doGet(e) {
       result = diagnoseMonth(sheetName);
     }
 
+    else if (action === "diagnoseStatuses") {
+      result = diagnoseStatusBreakdown(sheetName);
+    }
+
+    else if (action === "diagnoseJuneStatuses") {
+      result = diagnoseJuneStatuses();
+    }
+
     // --------------------------------------------------------
     // DASHBOARD SUMMARY (server-side aggregation — compact JSON,
     // no raw rows). This is what the Dashboard now uses for the normal
@@ -367,7 +375,10 @@ var SUMMARY_COLUMN_ALIASES = {
 };
 
 var SUMMARY_STATUS_MAP = {
-  delivered: ["تسليم ناجح"],
+  delivered: [
+    "تسليم ناجح",
+    "التسليم ناجح"
+  ],
   returned:  ["مرتجعات"],
   rejected:  ["رفض الاستلام و تم دفع الشحن", "رفض الاستلام و رفض والدفع"],
   pending:   ["قيد التشغيل", "قيد  التشغيل"]
@@ -3156,9 +3167,128 @@ function diagnoseMonth(sheetName) {
 }
 
 
+// STATUS CLASSIFICATION DIAGNOSTIC (see docs/production-debug-fixes.md —
+// Bug #10 investigation). Deliberately general — takes sheetName as a
+// parameter and contains NO month-specific branching — so it works
+// identically for June, May, July, or any other month; diagnoseJuneStatuses()
+// below is only a thin convenience alias with the exact name requested,
+// NOT a separate code path.
+//
+// Opens the sheet with the EXACT same read (SpreadsheetApp.openById ->
+// getSheetByName -> one getRange().getValues() call) and column-detection
+// (summaryDetectColumnMap) that getMonthDashboardSummary itself uses, so
+// this diagnostic can never see a different status column or different
+// raw values than what the real aggregation sees.
+function diagnoseStatusBreakdown(sheetName) {
+  if (!sheetName) return { success: false, error: "sheetName مطلوب" };
+  if (!MONTH_SOURCE.hasOwnProperty(sheetName)) return { success: false, error: "شهر غير معروف: " + sheetName };
+
+  var quarter = MONTH_SOURCE[sheetName];
+  var spreadsheetId = SPREADSHEET_IDS[quarter];
+  var ss;
+  try { ss = SpreadsheetApp.openById(spreadsheetId); }
+  catch (err) { return { success: false, error: "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err) }; }
+
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return { success: false, error: "الشيت غير موجود: " + sheetName + " داخل " + quarter };
+
+  var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn();
+  if (lastRow < 2 || lastColumn === 0) return { success: true, sheet: sheetName, empty: true, note: "لا توجد بيانات في هذا الشيت." };
+
+  var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  var headers = values[0];
+  var dataRows = values.slice(1);
+
+  var colMap = summaryDetectColumnMap(headers);
+  var statusColIdx = headers.indexOf(colMap.status);
+
+  var result = {
+    success: true,
+    sheet: sheetName,
+    source: quarter,
+    // "اسم عمود الـ Status الذي تم اكتشافه" — النص الحرفي للـ Header المطابق،
+    // وموقعه (1-based، كما يظهر في الشيت فعلياً)، أو null إن لم يُكتشف إطلاقاً
+    // (وهذا بحد ذاته سيكون هو الـ Root Cause الأوضح لو حدث).
+    detectedStatusColumnHeader: colMap.status || null,
+    detectedStatusColumnIndex1Based: statusColIdx >= 0 ? (statusColIdx + 1) : null,
+    allHeaders: headers,
+    totalRows: dataRows.length
+  };
+  if (statusColIdx < 0) {
+    result.rootCauseHint = "لم يتم اكتشاف عمود الحالة إطلاقاً — أي Header في allHeaders أعلاه لم يطابق أياً من الأسماء المعروفة لعمود status. هذا يفسر مباشرة كل الصفوف كـ Unknown.";
+    return result;
+  }
+
+  // RAW STATUS VALUES — القيمة الحقيقية تماماً كما هي في الخلية (قبل أي
+  // Normalization)، مع نوع القيمة (typeof) لأن قيمة من نوع Date أو Number
+  // بدل String تكشف عادة مشكلة إزاحة أعمدة (Column Shift)، وليس مجرد فرق
+  // إملائي.
+  var rawCounts = {}; // exact original cell text -> count
+  var rawTypeExamples = {}; // exact original cell text -> typeof + sample
+  var normalizedCounts = {}; // after summaryNormText + summaryNormalizeArabicForMatch_ -> count
+  var bucketCounts = { delivered:0, returned:0, rejected:0, pending:0, unknown:0 };
+  var unknownRawBreakdown = {}; // raw text -> count, ONLY for rows that end up unknown
+
+  for (var i = 0; i < dataRows.length; i++) {
+    var rawVal = dataRows[i][statusColIdx];
+    var rawKey = (rawVal === null || rawVal === undefined) ? "(فارغ/null)" : String(rawVal);
+    rawCounts[rawKey] = (rawCounts[rawKey]||0) + 1;
+    if (!rawTypeExamples[rawKey]) rawTypeExamples[rawKey] = typeof rawVal + (rawVal instanceof Date ? " (Date object!)" : "");
+
+    var trimmed = summaryNormText(rawVal);
+    var normKey = summaryNormalizeArabicForMatch_(trimmed);
+    normalizedCounts[normKey || "(فارغ بعد التنظيف)"] = (normalizedCounts[normKey || "(فارغ بعد التنظيف)"]||0) + 1;
+
+    var bucket = summaryClassifyStatus(rawVal);
+    bucketCounts[bucket] = (bucketCounts[bucket]||0) + 1;
+    if (bucket === "unknown") {
+      unknownRawBreakdown[rawKey] = (unknownRawBreakdown[rawKey]||0) + 1;
+    }
+  }
+
+  function toSortedArray(countsObj) {
+    var out = [];
+    for (var k in countsObj) { if (countsObj.hasOwnProperty(k)) out.push({ value: k, count: countsObj[k] }); }
+    out.sort(function (a, b) { return b.count - a.count; });
+    return out;
+  }
+
+  result.rawStatusValues = toSortedArray(rawCounts).map(function (r) {
+    return { value: r.value, count: r.count, typeofValue: rawTypeExamples[r.value] };
+  });
+  result.normalizedStatusValues = toSortedArray(normalizedCounts);
+  result.classifiedBuckets = bucketCounts;
+  // "أمثلة من القيم التي انتهت Unknown" — القيم الخام الحقيقية بالضبط، مرتبة
+  // تنازلياً حسب العدد، فأكبر مساهم في Unknown يظهر أولاً.
+  result.unknownRawValues = toSortedArray(unknownRawBreakdown);
+  result.currentStatusMap = SUMMARY_STATUS_MAP; // نفس الخريطة الفعلية المُستخدَمة الآن، للمقارنة المباشرة
+  // "سبب عدم تصنيف كل Status رئيسي بشكل صحيح" — تفسير مباشر لكل قيمة غير
+  // مصنفة: هل هي قريبة (بعد التطبيع) من قيمة مُدرجة في الخريطة فعلاً (فرق
+  // إملائي بسيط لم يلتقطه التطبيع الحالي) أم مختلفة تماماً؟
+  var mappedNormalizedValues = {};
+  for (var bkt in SUMMARY_STATUS_MAP) {
+    for (var v = 0; v < SUMMARY_STATUS_MAP[bkt].length; v++) {
+      mappedNormalizedValues[summaryNormalizeArabicForMatch_(summaryNormText(SUMMARY_STATUS_MAP[bkt][v]))] = bkt;
+    }
+  }
+  result.unknownRawValues.forEach(function (u) {
+    var normOfUnknown = summaryNormalizeArabicForMatch_(summaryNormText(u.value));
+    u.normalizedForm = normOfUnknown;
+    u.exactlyMatchesAnyMappedBucket = mappedNormalizedValues.hasOwnProperty(normOfUnknown); // should always be false here by construction — sanity check
+  });
+
+  return result;
+}
+
+// Exact name requested — a thin, zero-logic alias. All real logic lives in
+// the general diagnoseStatusBreakdown() above (no June-specific branching
+// anywhere in this file).
+function diagnoseJuneStatuses() {
+  return diagnoseStatusBreakdown("June");
+}
+
 // ============================================================
 // 9. JSON RESPONSE
-// ============================================================
 
 function jsonResponse(obj) {
 
@@ -3172,4 +3302,9 @@ function jsonResponse(obj) {
       ContentService.MimeType.TEXT
     );
 
+}
+function diagnoseJuneStatuses() {
+  var result = diagnoseStatusBreakdown("June");
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
