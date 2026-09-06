@@ -160,6 +160,10 @@ function doGet(e) {
       result = buildQuarterSummaries(params.quarter || "");
     }
 
+    else if (action === "buildMissingSummaries") {
+      result = buildMissingMonthSnapshots();
+    }
+
     // --------------------------------------------------------
     // DIAGNOSTIC
     // --------------------------------------------------------
@@ -266,6 +270,34 @@ function doGet(e) {
 var DASHBOARD_CACHE_TTL_SECONDS = 300; // 5 minutes — short enough that edits show up soon, long enough to absorb repeat requests
 var LIST_SHEETS_CACHE_TTL_SECONDS = 600; // 10 minutes — month/tab names change far less often than shipment data; this avoids opening all 4 spreadsheets on every boot/list-refresh
 var CACHE_CHUNK_SIZE = 90000; // stay safely under CacheService's 100KB-per-key limit
+
+// SNAPSHOT GENERATION STAMP (see docs/production-debug-fixes.md — Bug #6:
+// obsolete All Months cache). Every dashboard-result CacheService entry
+// (single month AND All Months, in getMonthDashboardSummary /
+// getAllMonthsDashboardSummary) folds this stamp into its cache key. It
+// only changes when saveMonthSummary_() actually writes a snapshot — so a
+// cached result's validity now depends on the ACTUAL current snapshot
+// state, not only on the fixed 5-minute TTL. Building/updating ANY month's
+// snapshot bumps this once, which makes every previously-cached dashboard
+// result (single month or All Months, for any filter/date/SLA
+// combination) an automatic cache miss on its very next request — no
+// enumeration or explicit deletion of old cache entries needed; they are
+// simply never matched again and expire naturally via their own TTL.
+// Fails open on either side: if PropertiesService is unavailable for any
+// reason, reads fall back to a constant stamp and writes silently no-op,
+// which just degrades to the previous TTL-only behavior — never throws.
+var SNAPSHOT_GENERATION_PROPERTY_KEY = "SNAPSHOT_GENERATION_STAMP";
+function getSnapshotGenerationStamp_() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty(SNAPSHOT_GENERATION_PROPERTY_KEY);
+    return v || "0";
+  } catch (e) { return "0"; }
+}
+function bumpSnapshotGenerationStamp_() {
+  try {
+    PropertiesService.getScriptProperties().setProperty(SNAPSHOT_GENERATION_PROPERTY_KEY, String(new Date().getTime()));
+  } catch (e) { /* non-fatal — worst case, cache behavior is exactly what it was before this fix */ }
+}
 
 // Splits a serialized string across as many "<key>_c0", "<key>_c1", ... keys
 // as needed, plus a "<key>_meta" key recording the chunk count — so a
@@ -1007,7 +1039,7 @@ function getMonthDashboardSummary(sheetName, params) {
   // (these affect attemptSummary / slaPct / withinSla even when no other
   // filter is active) — see requirement: "Cache key must include sheet/month,
   // active filters, and SLA settings that affect calculations."
-  var cacheKey = "dash_v3_" + sheetName + "_p_" + summaryHashKey(
+  var cacheKey = "dash_v3_" + sheetName + "_g" + getSnapshotGenerationStamp_() + "_p_" + summaryHashKey(
     JSON.stringify(filters) + "|" + dateFrom + "|" + dateTo + "|" +
     attemptT1 + "|" + attemptT2 + "|" + slaTargetDefault + "|" + JSON.stringify(branchSlaTargets)
   );
@@ -1766,7 +1798,7 @@ function getAllMonthsDashboardSummary(params) {
 
   // Cache key mirrors the single-month scheme exactly (same helper, same
   // "every calculation-affecting input" rule) — sheet slot is the sentinel.
-  var cacheKey = "dash_v3_" + ALL_MONTHS_SENTINEL + "_p_" + summaryHashKey(
+  var cacheKey = "dash_v3_" + ALL_MONTHS_SENTINEL + "_g" + getSnapshotGenerationStamp_() + "_p_" + summaryHashKey(
     JSON.stringify(requestedFilters) + "|" + dateFrom + "|" + dateTo + "|" +
     attemptT1 + "|" + attemptT2 + "|" + slaTargetDefault + "|" + JSON.stringify(branchSlaTargets)
   );
@@ -2491,6 +2523,7 @@ function saveMonthSummary_(sheetName, summary) {
   sh.getRange(sh.getLastRow()+1,1,values.length,9).setValues(values);
   SpreadsheetApp.flush();
   console.log("[PERSISTENT SUMMARY SAVED] " + JSON.stringify({month:sheetName,quarter:quarter,chunks:chunks.length,totalRows:summary.totalRows || 0}));
+  bumpSnapshotGenerationStamp_(); // invalidate every cached dashboard result (single-month AND All Months) — see Bug #6
   return { success:true, month:sheetName, quarter:quarter, chunks:chunks.length };
 }
 
@@ -2537,10 +2570,52 @@ function buildAllDashboardSummaries() {
   return {success:true,results:out};
 }
 
+// Builds a snapshot ONLY for months that don't already have one usable
+// with the plain default build settings (attemptT1=1, attemptT2=2,
+// slaTargetDefault, no branch overrides) — the exact same compatibility
+// check getAllMonthsDashboardSummary's fast path already applies before
+// trusting a snapshot. Reuses buildAndSaveMonthSummary() as-is (the SAME
+// architecture already used successfully for January-March) — this
+// function only decides WHICH months need it, so already-good snapshots
+// (e.g. January-March) are left completely untouched and are not
+// re-computed. A month whose sheet is genuinely empty gets a real
+// "empty" snapshot saved too (this records the already-correct fact that
+// it has no data — see getMonthDashboardSummary's own noData/empty
+// detection — it never invents shipment data), which lets a future All
+// Months request recognize it as an empty month from the fast snapshot
+// path instead of re-reading that (empty) sheet live every time.
+function buildMissingMonthSnapshots() {
+  var out = [];
+  for (var i = 0; i < MONTH_ORDER.length; i++) {
+    var month = MONTH_ORDER[i];
+    var existing;
+    try { existing = getSavedMonthSummary_(month); } catch (eRead) { existing = null; }
+    var needsBuild = true;
+    var skipReason = null;
+    if (existing) {
+      if (existing.empty || existing.noData) {
+        needsBuild = false; skipReason = "already-empty-snapshot";
+      } else {
+        var bc = existing.filterCube && existing.filterCube.buildConfig;
+        var compatibleWithDefaults = !!bc &&
+          Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
+          Number(bc.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
+          summaryBranchTargetsEqual_(bc.branchSlaTargets, {});
+        if (compatibleWithDefaults) { needsBuild = false; skipReason = "already-compatible-snapshot"; }
+      }
+    }
+    if (!needsBuild) { out.push({ month: month, skipped: true, reason: skipReason }); continue; }
+    try { out.push(buildAndSaveMonthSummary(month)); }
+    catch (err) { out.push({ success:false, month: month, error: String(err && err.message ? err.message : err) }); }
+  }
+  return { success: true, results: out };
+}
+
 function onOpen() {
   SpreadsheetApp.getUi().createMenu("ARRIVE Dashboard")
     .addItem("Update Current Quarter Summaries", "updateCurrentQuarterSummaries")
     .addItem("Update All 12 Month Summaries", "buildAllDashboardSummaries")
+    .addItem("Build Missing Month Snapshots Only", "buildMissingMonthSnapshots")
     .addToUi();
 }
 

@@ -48,3 +48,16 @@ TEST 1–8 كلها PASSED (منطق منسوخ حرفياً من الملفات
 
 ### Not verified
 - الرقم الفعلي الحقيقي لـ `aggregatePassMs` بعد الإصلاح على August — يتطلب رفع الكود وتشغيل نفس أداة التشخيص. September–December: لا تغيير، بناءً على توجيه صريح بحصر النطاق في August فقط.
+
+## [Unreleased] — Bug #6: كاش All Months قديم + بناء Snapshots April-August + تمييز الشهور الفارغة (انظر docs/production-debug-fixes.md)
+### Fixed
+- **Cache Invalidation:** `getSnapshotGenerationStamp_()`/`bumpSnapshotGenerationStamp_()` [جديدتان] في `Code.gs` — طابع نسخة يُخزَّن في PropertiesService، يُحدَّث مرة واحدة داخل `saveMonthSummary_()` بعد كل حفظ ناجح، ويدخل الآن في مفتاح الكاش لكل من `getMonthDashboardSummary` و `getAllMonthsDashboardSummary`. بناء أي Snapshot جديد يُبطل تلقائياً كل نتيجة مخزَّنة سابقاً، بدل انتظار انتهاء TTL (5 دقائق).
+- **`buildMissingMonthSnapshots()` [جديدة]:** تبني فقط الشهور بلا Snapshot متوافق (أبريل-أغسطس حالياً)، تتخطى يناير-مارس تماماً. تعيد استخدام `buildAndSaveMonthSummary()` الموجودة أصلاً بدون أي بنية موازية. متاحة عبر قائمة الشيت وعبر `action=buildMissingSummaries`.
+- **`renderAllMonthsCompletenessWarning()` في `index.html`:** أصبحت تُميّز شهراً فارغاً (رسالة محايدة رمادية، بدون ⚠، تُحسب ديناميكياً من آخر شهر متضمن) عن شهر فاشل فعلياً (نفس التحذير الكهرماني ⚠ كما كان).
+
+### Verified (Code-level)
+- منطق تصنيف emptyMonths/missingSnapshotMonths/partial في `getAllMonthsDashboardSummary` **لم يتغيّر** — تحقّقت بمحاكاة الحالة المطلوبة (Jan-Aug snapshot، Sep-Dec empty) أنه يُنتج `includedMonths=[Jan..Aug], emptyMonths=[Sep..Dec], partial=false` بالضبط، أي أنه كان صحيحاً من الأساس.
+- اختبارات Cache-Invalidation، buildMissingMonthSnapshots، والبانر — كلها PASSED (Code-level، Mocks). Syntax Check PASSED. لا Regression على اختبارات Bug #1-#5.
+
+### Not verified
+- الرقم الفعلي الحقيقي (870509) والأداء الفعلي بعد بناء الـ Snapshots — يتطلب تنفيذ Mohamed لخطوات النشر والبناء الموثّقة في production-debug-fixes.md.

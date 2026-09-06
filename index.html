@@ -4427,29 +4427,55 @@ function updateTopbar(){
 // silently invisible: an incomplete total must never look identical to a
 // complete one. This renders (or clears) an explicit banner naming exactly
 // which months are missing whenever the current summary is flagged partial.
+// Distinguishes two genuinely different situations, per the explicit
+// requirement (see docs/production-debug-fixes.md — Bug #6): a month with
+// NO data yet (emptyMonths) is normal/expected and must read as neutral
+// information, never as a warning — only a month whose snapshot is truly
+// missing/incompatible-and-live-fallback-failed (missingSnapshotMonths),
+// was skipped (skippedMonths), or a stale-cache fallback is an actual
+// problem worth the amber ⚠ warning. Backend's own `partial` flag already
+// excludes emptyMonths from making a result "incomplete" (see
+// getAllMonthsDashboardSummary) — this only decides how to DISPLAY that.
 function renderAllMonthsCompletenessWarning(summary){
   let el = document.getElementById('allMonthsCompletenessWarning');
-  if(!summary || !summary.allMonths || (!summary.partial && !summary.staleCacheFallback)){
+  if(!summary || !summary.allMonths){
     if(el) el.remove();
     return;
   }
   const missing = summary.missingSnapshotMonths || [];
   const skipped = summary.skippedMonths || [];
-  const parts = [];
-  if(summary.staleCacheFallback){
-    parts.push(`تعذّر تحديث البيانات (${summary.staleCacheFallbackReason || 'خطأ غير معروف'}) — المعروض حاليًا نسخة محفوظة قديمة وغير مكتملة`);
+  const empty = summary.emptyMonths || [];
+  const hasFailure = !!(summary.partial || summary.staleCacheFallback);
+  const hasEmptyOnly = !hasFailure && empty.length > 0;
+  if(!hasFailure && !hasEmptyOnly){
+    if(el) el.remove();
+    return;
   }
-  if(missing.length) parts.push(`لا يوجد ملخص محفوظ ولم تنجح محاولة الحساب المباشر لهذه الشهور: ${missing.map(monthDisplayName).join('، ')} (شغّل "تحديث ملخصات كل الشهور" من قائمة ARRIVE Dashboard في الشيت)`);
-  if(skipped.length) parts.push(`تم تخطي هذه الشهور بسبب الوقت أو خطأ: ${skipped.map(monthDisplayName).join('، ')} (أعد المحاولة)`);
-  const message = 'الإجمالي المعروض لا يشمل كل الشهور. ' + parts.join(' | ');
   if(!el){
     el = document.createElement('div');
     el.id = 'allMonthsCompletenessWarning';
-    el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(242,183,91,.15);color:#B8842A;border:1px solid rgba(242,183,91,.4);font-size:13px;font-weight:600;';
     const topbar = document.querySelector('.topbar') || document.getElementById('app');
     if(topbar && topbar.parentNode) topbar.parentNode.insertBefore(el, topbar.nextSibling);
   }
-  el.textContent = '⚠ ' + message;
+  if(hasFailure){
+    el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(242,183,91,.15);color:#B8842A;border:1px solid rgba(242,183,91,.4);font-size:13px;font-weight:600;';
+    const parts = [];
+    if(summary.staleCacheFallback){
+      parts.push(`تعذّر تحديث البيانات (${summary.staleCacheFallbackReason || 'خطأ غير معروف'}) — المعروض حاليًا نسخة محفوظة قديمة وغير مكتملة`);
+    }
+    if(missing.length) parts.push(`لا يوجد ملخص محفوظ ولم تنجح محاولة الحساب المباشر لهذه الشهور: ${missing.map(monthDisplayName).join('، ')} (شغّل "تحديث ملخصات كل الشهور" من قائمة ARRIVE Dashboard في الشيت)`);
+    if(skipped.length) parts.push(`تم تخطي هذه الشهور بسبب الوقت أو خطأ: ${skipped.map(monthDisplayName).join('، ')} (أعد المحاولة)`);
+    const message = 'الإجمالي المعروض لا يشمل كل الشهور. ' + parts.join(' | ');
+    el.textContent = '⚠ ' + message;
+  } else {
+    // Purely informational — no problem, no incomplete data, nothing to retry.
+    el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(91,100,114,.10);color:#5B6472;border:1px solid rgba(91,100,114,.25);font-size:13px;font-weight:600;';
+    const includedList = summary.includedMonths || [];
+    const lastIncluded = includedList.length ? monthDisplayName(includedList[includedList.length-1]) : '';
+    el.textContent = lastIncluded
+      ? `ℹ البيانات المتاحة حاليًا حتى ${lastIncluded} — ${empty.map(monthDisplayName).join('، ')} لم تبدأ بعد (ليست بيانات مفقودة).`
+      : `ℹ ${empty.map(monthDisplayName).join('، ')} لا تحتوي بيانات بعد.`;
+  }
 }
 
 function renderExecFilterTag(){
