@@ -375,10 +375,7 @@ var SUMMARY_COLUMN_ALIASES = {
 };
 
 var SUMMARY_STATUS_MAP = {
-  delivered: [
-    "تسليم ناجح",
-    "التسليم ناجح"
-  ],
+  delivered: ["تسليم ناجح"],
   returned:  ["مرتجعات"],
   rejected:  ["رفض الاستلام و تم دفع الشحن", "رفض الاستلام و رفض والدفع"],
   pending:   ["قيد التشغيل", "قيد  التشغيل"]
@@ -3302,9 +3299,4 @@ function jsonResponse(obj) {
       ContentService.MimeType.TEXT
     );
 
-}
-function diagnoseJuneStatuses() {
-  var result = diagnoseStatusBreakdown("June");
-  Logger.log(JSON.stringify(result, null, 2));
-  return result;
 }
