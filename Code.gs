@@ -935,7 +935,24 @@ function summaryComputeFromCube_(cubes, filters, dateFrom, dateTo) {
 // (v2+) cube is available for this month — e.g. an old snapshot that
 // predates Filterable Summary V2, or a month never built yet.
 function summaryBranchTargetsEqual_(a, b) {
-  try { return JSON.stringify(a || {}) === JSON.stringify(b || {}); } catch (e) { return false; }
+  // A plain JSON.stringify(a) === JSON.stringify(b) comparison is sensitive
+  // to key INSERTION ORDER, not just content — two branchSlaTargets objects
+  // with the exact same branch->target values could compare as different
+  // (or, in edge cases, mask a real difference) purely because of the
+  // order keys were added in (e.g. the frontend builds this object by
+  // iterating table rows sorted by shipment volume, which can differ
+  // between requests). Compare by key/value content instead.
+  a = a || {}; b = b || {};
+  try {
+    var ak = Object.keys(a), bk = Object.keys(b);
+    if (ak.length !== bk.length) return false;
+    for (var i = 0; i < ak.length; i++) {
+      var k = ak[i];
+      if (!b.hasOwnProperty(k)) return false;
+      if (Number(a[k]) !== Number(b[k])) return false;
+    }
+    return true;
+  } catch (e) { return false; }
 }
 function getMonthDashboardSummaryFromCube_(sheetName, filters, dateFrom, dateTo, attemptT1, attemptT2, slaTargetDefault, branchSlaTargets) {
   var snap = getSavedMonthSummary_(sheetName);

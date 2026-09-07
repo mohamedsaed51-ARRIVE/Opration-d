@@ -3298,11 +3298,19 @@ function mgmtComputeMinVolumeThreshold(entries){
 // mechanically from already-computed counts/rates (mgmtCombineKpis /
 // mgmtEntryStats) — no invented causes; the recommended action is always a
 // generic operational-review instruction unless the data itself names a cause.
+// Real branch names in this dataset already include the word "فرع" (e.g.
+// "فرع مصر الجديده") — sentences that also prepend "فرع" literally were
+// producing "فرع فرع مصر الجديده" (confirmed in an actual generated PDF).
+// This only adds the prefix when the name doesn't already carry it.
+function mgmtBranchLabel(name){
+  const n = String(name||'');
+  return /^فرع\s/.test(n) ? n : ('فرع ' + n);
+}
 function mgmtComputeFindings(months, overall, branchEntries, customerEntries){
   const findings = [];
   const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
   const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
-  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol).map(e=>({...e, name: mgmtCleanEntityName(e.name)}));
+  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol && e.name!=='غير محدد').map(e=>({...e, name: mgmtCleanEntityName(e.name)}));
   const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol).map(e=>({...e, name: mgmtCleanEntityName(e.name)}));
 
   // .text/.action are Arabic (the report's primary language) — .category/
@@ -3315,33 +3323,33 @@ function mgmtComputeFindings(months, overall, branchEntries, customerEntries){
     const worstReturn = [...eligibleBranches].sort((a,b)=>(b.stats.returnRate??-1)-(a.stats.returnRate??-1))[0];
     if(worstReturn && worstReturn.stats.returnRate!==null){
       push('High','Returns',worstReturn.name,'High Return Rate',worstReturn.stats.returned,worstReturn.stats.returnRate,
-        `سجل فرع ${worstReturn.name} ${fmtInt(worstReturn.stats.returned)} شحنة مرتجعة بنسبة ${fmtPct(worstReturn.stats.returnRate)}، مقارنة بمتوسط الشركة البالغ ${fmtPct(overall.returnRate)}.`,
-        `مراجعة أسباب المرتجعات في فرع ${worstReturn.name} وتحليل العملاء/المناطق الأكثر مساهمة في هذه المرتجعات.`);
+        `سجل ${mgmtBranchLabel(worstReturn.name)} ${fmtInt(worstReturn.stats.returned)} شحنة مرتجعة بنسبة ${fmtPct(worstReturn.stats.returnRate)}، مقارنة بمتوسط الشركة البالغ ${fmtPct(overall.returnRate)}.`,
+        `مراجعة أسباب المرتجعات في ${mgmtBranchLabel(worstReturn.name)} وتحليل العملاء/المناطق الأكثر مساهمة في هذه المرتجعات.`);
     }
     const worstReject = [...eligibleBranches].sort((a,b)=>(b.stats.rejectRate??-1)-(a.stats.rejectRate??-1))[0];
     if(worstReject && worstReject.stats.rejectRate!==null){
       push('Medium','Rejects',worstReject.name,'High Reject Rate',worstReject.stats.rejected,worstReject.stats.rejectRate,
-        `سجل فرع ${worstReject.name} ${fmtInt(worstReject.stats.rejected)} حالة رفض استلام بنسبة ${fmtPct(worstReject.stats.rejectRate)}، مقارنة بمتوسط الشركة البالغ ${fmtPct(overall.rejectedRate)}.`,
-        `يتطلب مراجعة تشغيلية لتحديد السبب الجذري في فرع ${worstReject.name}.`);
+        `سجل ${mgmtBranchLabel(worstReject.name)} ${fmtInt(worstReject.stats.rejected)} حالة رفض استلام بنسبة ${fmtPct(worstReject.stats.rejectRate)}، مقارنة بمتوسط الشركة البالغ ${fmtPct(overall.rejectedRate)}.`,
+        `يتطلب مراجعة تشغيلية لتحديد السبب الجذري في ${mgmtBranchLabel(worstReject.name)}.`);
     }
     const worstDelivery = [...eligibleBranches].sort((a,b)=>(a.stats.deliveryRate??999)-(b.stats.deliveryRate??999))[0];
     if(worstDelivery && worstDelivery.stats.deliveryRate!==null){
       push('High','Delivery',worstDelivery.name,'Low Delivery Rate',worstDelivery.stats.delivered,worstDelivery.stats.deliveryRate,
-        `حقق فرع ${worstDelivery.name} نسبة تسليم ${fmtPct(worstDelivery.stats.deliveryRate)} (${fmtInt(worstDelivery.stats.delivered)} من أصل ${fmtInt(worstDelivery.stats.totalVolume)} شحنة)، وهي أقل من متوسط الشركة البالغ ${fmtPct(overall.deliveryRate)}.`,
-        `مراجعة جودة بيانات العناوين ومحاولات التسليم في فرع ${worstDelivery.name}.`);
+        `حقق ${mgmtBranchLabel(worstDelivery.name)} نسبة تسليم ${fmtPct(worstDelivery.stats.deliveryRate)} (${fmtInt(worstDelivery.stats.delivered)} من أصل ${fmtInt(worstDelivery.stats.totalVolume)} شحنة)، وهي أقل من متوسط الشركة البالغ ${fmtPct(overall.deliveryRate)}.`,
+        `مراجعة جودة بيانات العناوين ومحاولات التسليم في ${mgmtBranchLabel(worstDelivery.name)}.`);
     }
     const withSla = eligibleBranches.filter(e=>e.stats.slaPct!==null);
     if(withSla.length){
       const worstSla = [...withSla].sort((a,b)=>a.stats.slaPct-b.stats.slaPct)[0];
       push('High','SLA',worstSla.name,'Low SLA Achievement',null,worstSla.stats.slaPct,
-        `حقق فرع ${worstSla.name} نسبة التزام SLA بلغت ${fmtPct(worstSla.stats.slaPct)}، وهي أقل من متوسط الشركة البالغ ${fmtPct(overall.slaAchievement)}.`,
-        `مراجعة Aging للشحنات وتحليل أسباب التأخير في فرع ${worstSla.name}.`);
+        `حقق ${mgmtBranchLabel(worstSla.name)} نسبة التزام SLA بلغت ${fmtPct(worstSla.stats.slaPct)}، وهي أقل من متوسط الشركة البالغ ${fmtPct(overall.slaAchievement)}.`,
+        `مراجعة Aging للشحنات وتحليل أسباب التأخير في ${mgmtBranchLabel(worstSla.name)}.`);
     }
     const best = [...eligibleBranches].sort((a,b)=>(b.stats.deliveryRate??-1)-(a.stats.deliveryRate??-1))[0];
     if(best && best.stats.deliveryRate!==null){
       push('Info','Performance',best.name,'Best Delivery Performance',best.stats.delivered,best.stats.deliveryRate,
-        `حقق فرع ${best.name} أعلى نسبة تسليم بلغت ${fmtPct(best.stats.deliveryRate)} (${fmtInt(best.stats.delivered)} من أصل ${fmtInt(best.stats.totalVolume)} شحنة).`,
-        `دراسة الممارسات التشغيلية في فرع ${best.name} وإمكانية تطبيقها على فروع أخرى.`);
+        `حقق ${mgmtBranchLabel(best.name)} أعلى نسبة تسليم بلغت ${fmtPct(best.stats.deliveryRate)} (${fmtInt(best.stats.delivered)} من أصل ${fmtInt(best.stats.totalVolume)} شحنة).`,
+        `دراسة الممارسات التشغيلية في ${mgmtBranchLabel(best.name)} وإمكانية تطبيقها على فروع أخرى.`);
     }
   }
   if(eligibleCustomers.length){
@@ -3542,13 +3550,14 @@ function pdfCheckPageBreak(doc, y, needed){
   return y;
 }
 function pdfSectionTitle(doc, font, y, text){
-  y = pdfCheckPageBreak(doc, y, 30);
-  doc.setFont(font,'bold'); doc.setFontSize(13); doc.setTextColor(44,66,87);
-  doc.text(text, PDF_RIGHT, y, {align:'right'});
-  doc.setDrawColor(44,66,87); doc.setLineWidth(1);
-  doc.line(PDF_MARGIN, y+5, PDF_RIGHT, y+5);
+  y = pdfCheckPageBreak(doc, y, 40);
+  const bannerH = 26;
+  doc.setFillColor(21,43,74);
+  doc.roundedRect(PDF_MARGIN, y, PDF_USABLE_W, bannerH, 4, 4, 'F');
+  doc.setFont(font,'bold'); doc.setFontSize(12.5); doc.setTextColor(255,255,255);
+  doc.text(text, PDF_RIGHT-10, y+17, {align:'right'});
   doc.setFont(font,'normal'); doc.setTextColor(20,20,20); doc.setFontSize(9.5);
-  return y + 22;
+  return y + bannerH + 10;
 }
 // SMART SECTION START (see docs/production-debug-fixes.md — PDF whitespace
 // review #2). Every major report section used to force doc.addPage()
@@ -3565,7 +3574,7 @@ function pdfSectionTitle(doc, font, y, text){
 // or a partial KPI grid — enough that a section title is never left
 // dangling alone at the very bottom of a page.
 function pdfSectionStart(doc, font, y, title, minContentHeight){
-  y = pdfCheckPageBreak(doc, y, 30 + (minContentHeight!==undefined?minContentHeight:70));
+  y = pdfCheckPageBreak(doc, y, 40 + (minContentHeight!==undefined?minContentHeight:70));
   return pdfSectionTitle(doc, font, y, title);
 }
 function pdfParagraph(doc, font, y, text, opts){
@@ -3584,7 +3593,7 @@ function pdfParagraph(doc, font, y, text, opts){
   return y + lines.length*13 + (opts.gap!==undefined?opts.gap:6);
 }
 function pdfKpiGrid(doc, font, y, cards){
-  const cols = 3, gap = 10, boxH = 50;
+  const cols = 3, gap = 10, boxH = 54;
   const boxW = (PDF_USABLE_W - gap*(cols-1))/cols;
   y = pdfCheckPageBreak(doc, y, boxH*Math.ceil(cards.length/cols) + 10);
   const startY = y;
@@ -3592,18 +3601,30 @@ function pdfKpiGrid(doc, font, y, cards){
     const row = Math.floor(i/cols), colFromRight = i%cols; // RTL: first card at the RIGHT
     const bx = PDF_RIGHT - (colFromRight+1)*boxW - colFromRight*gap;
     const by = startY + row*(boxH+gap);
-    doc.setDrawColor(220,222,226); doc.setLineWidth(0.5);
-    doc.rect(bx, by, boxW, boxH);
-    doc.setFontSize(8); doc.setFont(font,'normal'); doc.setTextColor(90,96,105);
-    doc.text(c.label, bx+boxW-8, by+16, {align:'right'});
-    doc.setFontSize(15); doc.setFont(font,'bold');
-    const vcol = c.valueColor || [20,20,20];
-    doc.setTextColor(vcol[0],vcol[1],vcol[2]);
-    doc.text(String(c.value), bx+boxW-8, by+34, {align:'right'});
+    const accent = c.valueColor || [44,66,87];
+    // Soft background tinted from the card's own accent color (10% blend
+    // toward the accent, 90% white) — gives each KPI card a distinct,
+    // colorful identity matching the reference design, without needing
+    // separate per-KPI icon image assets.
+    const bg = c.bg || [
+      Math.round(255-(255-accent[0])*0.10),
+      Math.round(255-(255-accent[1])*0.10),
+      Math.round(255-(255-accent[2])*0.10)
+    ];
+    doc.setFillColor(bg[0],bg[1],bg[2]);
+    doc.roundedRect(bx, by, boxW, boxH, 5, 5, 'F');
+    // Small solid accent circle stands in for a pictorial icon.
+    doc.setFillColor(accent[0],accent[1],accent[2]);
+    doc.circle(bx+boxW-16, by+15, 6, 'F');
+    doc.setFontSize(8.5); doc.setFont(font,'normal'); doc.setTextColor(70,76,85);
+    doc.text(c.label, bx+boxW-30, by+18, {align:'right'});
+    doc.setFontSize(17); doc.setFont(font,'bold');
+    doc.setTextColor(accent[0],accent[1],accent[2]);
+    doc.text(String(c.value), bx+boxW-10, by+42, {align:'right'});
     if(c.sub){
-      const col = c.subColor || [14,124,85];
+      const col = c.subColor || accent;
       doc.setFontSize(9.5); doc.setFont(font,'bold'); doc.setTextColor(col[0],col[1],col[2]);
-      doc.text(String(c.sub), bx+8, by+34, {align:'left'});
+      doc.text(String(c.sub), bx+10, by+42, {align:'left'});
     }
   });
   return startY + Math.ceil(cards.length/cols)*(boxH+gap);
@@ -3809,7 +3830,7 @@ async function mgmtGenerateExecutivePdfReport(){
     const findings = mgmtComputeFindings(months, overall, branchEntries, customerEntries);
     const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
     const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
-    const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume>=minBranchVol);
+    const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume>=minBranchVol && e.name!=='غير محدد'); // 'غير محدد' (no branch assigned) is a data-quality issue, never a rankable operational branch — see the explicit Data Quality alert paragraph instead
     const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume>=minCustVol);
 
     // Customer Activity & Risk Alerts data — computed HERE (once) so both
@@ -3868,6 +3889,12 @@ async function mgmtGenerateExecutivePdfReport(){
     let y = PDF_MARGIN;
 
     // PAGE 1 — الملخص التنفيذي
+    // Full-bleed dark navy header banner (matches the approved ARRIVE
+    // executive report reference — "large premium header", edge-to-edge,
+    // not confined to the content margins).
+    const bannerH = 95;
+    doc.setFillColor(15,35,66);
+    doc.rect(0, 0, PDF_PAGE_W, bannerH, 'F');
     // Real ARRIVE logo image (see the embedded window.ARRIVE_LOGO_BASE64
     // script near the top of this file) — the source asset is a 415x415
     // square, so it's drawn at equal width/height to preserve its aspect
@@ -3875,16 +3902,37 @@ async function mgmtGenerateExecutivePdfReport(){
     // a warning, keeps generating the rest of the report) if the image
     // ever fails to embed, rather than ever showing "ARRIVE" as text.
     try{
-      if(window.ARRIVE_LOGO_BASE64) doc.addImage(window.ARRIVE_LOGO_BASE64, 'JPEG', PDF_MARGIN, PDF_MARGIN, 40, 40);
+      if(window.ARRIVE_LOGO_BASE64) doc.addImage(window.ARRIVE_LOGO_BASE64, 'JPEG', 24, 22, 50, 50);
     }catch(logoErr){ console.warn('[PDF] ARRIVE logo failed to render — continuing without it:', logoErr); }
-    doc.setFont(font,'bold'); doc.setFontSize(20); doc.setTextColor(28,38,51);
-    doc.setFontSize(14); doc.text('تقرير إدارة العمليات', PDF_RIGHT, y, {align:'right'}); y+=18;
-    doc.setFont(font,'normal'); doc.setFontSize(10); doc.setTextColor(90,96,105);
-    doc.text(`فترة التقرير: ${periodLabelWithYear}`, PDF_RIGHT, y, {align:'right'}); y+=13;
-    doc.text('يعرض هذا التقرير الأداء والتحليل الإداري للبيانات المسجلة خلال الفترة المحددة أعلاه.', PDF_RIGHT, y, {align:'right'}); y+=13;
+    doc.setFont(font,'bold'); doc.setFontSize(21); doc.setTextColor(255,255,255);
+    doc.text('تقرير إدارة العمليات', PDF_PAGE_W-30, 42, {align:'right'});
+    doc.setFontSize(13); doc.setFont(font,'normal');
+    doc.text('التقرير التنفيذي', PDF_PAGE_W-30, 62, {align:'right'});
+    doc.setFontSize(9); doc.setTextColor(190,205,225);
+    doc.text('بيانات أدق .. لقرارات أفضل', PDF_PAGE_W-30, 78, {align:'right'});
+    y = bannerH + 16;
+
+    // Information strip: 3 light rounded boxes (period / issue date /
+    // description) directly below the header, per the reference design.
     const genDate = new Date();
     const genDateStr = `${String(genDate.getDate()).padStart(2,'0')} ${pdfArabicMonthName(['January','February','March','April','May','June','July','August','September','October','November','December'][genDate.getMonth()])} ${genDate.getFullYear()} — ${String(genDate.getHours()).padStart(2,'0')}:${String(genDate.getMinutes()).padStart(2,'0')}`;
-    doc.text(`تاريخ الإصدار: ${genDateStr}`, PDF_RIGHT, y, {align:'right'}); y+=18;
+    const infoBoxes = [
+      { label:'فترة التقرير', value: periodLabelWithYear },
+      { label:'تاريخ الإصدار', value: genDateStr },
+      { label:'وصف التقرير', value: 'يعرض هذا التقرير الأداء والتحليل الإداري للفترة المحددة.' },
+    ];
+    const infoGap = 10, infoBoxW = (PDF_USABLE_W - infoGap*2)/3, infoBoxH = 46;
+    infoBoxes.forEach((b,i)=>{
+      const bx = PDF_RIGHT - (i+1)*infoBoxW - i*infoGap;
+      doc.setFillColor(235,242,250);
+      doc.roundedRect(bx, y, infoBoxW, infoBoxH, 5, 5, 'F');
+      doc.setFontSize(8); doc.setFont(font,'normal'); doc.setTextColor(90,96,105);
+      doc.text(b.label, bx+infoBoxW-8, y+14, {align:'right'});
+      doc.setFontSize(9); doc.setFont(font,'bold'); doc.setTextColor(20,20,20);
+      const valLines = doc.splitTextToSize(b.value, infoBoxW-16).slice(0,2);
+      doc.text(valLines, bx+infoBoxW-8, y+27, {align:'right'});
+    });
+    y += infoBoxH + 16;
 
     y = pdfSectionTitle(doc, font, y, 'الملخص التنفيذي');
     y = pdfKpiGrid(doc, font, y, [
@@ -3983,6 +4031,15 @@ async function mgmtGenerateExecutivePdfReport(){
     if(showBranches){
       y += 8;
       y = pdfSectionStart(doc, font, y, 'تحليل أداء الفروع', 90);
+      // "غير محدد" (see docs/production-debug-fixes.md) is a backend
+      // fallback label for rows with a genuinely BLANK branch field — a
+      // Data Quality issue, not a real operating branch. Flag it
+      // explicitly here instead of letting it appear silently as if it
+      // were an ordinary underperforming branch in the tables below.
+      const unspecifiedBranch = branchEntries.find(e=>e.name==='غير محدد');
+      if(unspecifiedBranch && unspecifiedBranch.stats.totalVolume>0){
+        y = pdfParagraph(doc, font, y, `تنبيه جودة بيانات: يوجد ${pdfFormatNumber(unspecifiedBranch.stats.totalVolume)} شحنة غير مرتبطة بفرع محدد ("غير محدد" في الجداول أدناه)، ويجب مراجعة مصدر هذه البيانات. هذه الشحنات ليست فرعاً تشغيلياً فعلياً، وتظهر بشكل منفصل هنا لضمان الشفافية فقط.`, {gap:8, color:[178,34,34]});
+      }
       const branchCols = [
         {header:'الفرع',width:92,align:'right'},{header:'الإجمالي',width:38},{header:'تم التسليم',width:44},{header:'التسليم %',width:38},
         {header:'مرتجعات',width:42},{header:'المرتجعات %',width:40},{header:'رفض',width:36},{header:'الرفض %',width:36},
@@ -4027,21 +4084,30 @@ async function mgmtGenerateExecutivePdfReport(){
         const byVolChange = [...movements].filter(m=>m.mv.volumeChangePct!==null).sort((a,b)=>b.mv.volumeChangePct-a.mv.volumeChangePct);
         if(byVolChange.length){
           const top = byVolChange[0], bottom = byVolChange[byVolChange.length-1];
-          y = pdfParagraph(doc, font, y, `أكبر نمو في الحجم: ${top.name} من ${pdfFormatNumber(top.mv.firstRates.count)} إلى ${pdfFormatNumber(top.mv.lastRates.count)} شحنة (${pdfFormatPercent(top.mv.volumeChangePct,1)}).`, {gap:4});
-          y = pdfParagraph(doc, font, y, `أكبر تراجع في الحجم: ${bottom.name} من ${pdfFormatNumber(bottom.mv.firstRates.count)} إلى ${pdfFormatNumber(bottom.mv.lastRates.count)} شحنة (${pdfFormatPercent(bottom.mv.volumeChangePct,1)}).`, {gap:8});
+          // See docs/production-debug-fixes.md — Bug: the extreme end of a
+          // sorted list is not automatically "growth" or "decline" — if
+          // EVERY entry happened to grow, the smallest-growth entry is
+          // still growth, not a decline, and must not be labeled as one.
+          if(top.mv.volumeChangePct>0) y = pdfParagraph(doc, font, y, `أكبر نمو في الحجم: ${top.name} من ${pdfFormatNumber(top.mv.firstRates.count)} إلى ${pdfFormatNumber(top.mv.lastRates.count)} شحنة (${pdfFormatPercent(top.mv.volumeChangePct,1)}).`, {gap:4});
+          if(bottom.mv.volumeChangePct<0) y = pdfParagraph(doc, font, y, `أكبر تراجع في الحجم: ${bottom.name} من ${pdfFormatNumber(bottom.mv.firstRates.count)} إلى ${pdfFormatNumber(bottom.mv.lastRates.count)} شحنة (${pdfFormatPercent(bottom.mv.volumeChangePct,1)}).`, {gap:8});
         }
         y = pdfParagraph(doc, font, y, 'ب) حركة الأداء — منفصلة عن حركة الحجم', {bold:true, gap:6, color:[44,66,87]});
         const byDelChange = [...movements].filter(m=>m.mv.deliveryRateChange!==null).sort((a,b)=>b.mv.deliveryRateChange-a.mv.deliveryRateChange);
         if(byDelChange.length){
           const top = byDelChange[0], bottom = byDelChange[byDelChange.length-1];
-          y = pdfParagraph(doc, font, y, `أكبر تحسن في نسبة التسليم: ${top.name} من ${pdfFormatPercent(top.mv.firstRates.deliveryRate)} إلى ${pdfFormatPercent(top.mv.lastRates.deliveryRate)} (${top.mv.deliveryRateChange>=0?'+':''}${pdfFormatPercent(top.mv.deliveryRateChange,1)} نقطة).`, {gap:4});
-          y = pdfParagraph(doc, font, y, `أكبر تراجع في نسبة التسليم: ${bottom.name} من ${pdfFormatPercent(bottom.mv.firstRates.deliveryRate)} إلى ${pdfFormatPercent(bottom.mv.lastRates.deliveryRate)} (${pdfFormatPercent(bottom.mv.deliveryRateChange,1)} نقطة).`, {gap:8});
+          // Delivery rate: UP is an improvement, DOWN is a decline.
+          if(top.mv.deliveryRateChange>0) y = pdfParagraph(doc, font, y, `أكبر تحسن في نسبة التسليم: ${top.name} من ${pdfFormatPercent(top.mv.firstRates.deliveryRate)} إلى ${pdfFormatPercent(top.mv.lastRates.deliveryRate)} (+${pdfFormatPercent(top.mv.deliveryRateChange,1)} نقطة).`, {gap:4});
+          if(bottom.mv.deliveryRateChange<0) y = pdfParagraph(doc, font, y, `أكبر تراجع في نسبة التسليم: ${bottom.name} من ${pdfFormatPercent(bottom.mv.firstRates.deliveryRate)} إلى ${pdfFormatPercent(bottom.mv.lastRates.deliveryRate)} (${pdfFormatPercent(bottom.mv.deliveryRateChange,1)} نقطة).`, {gap:8});
         }
         const byRetChange = [...movements].filter(m=>m.mv.returnRateChange!==null).sort((a,b)=>a.mv.returnRateChange-b.mv.returnRateChange);
         if(byRetChange.length){
           const improved = byRetChange[0], worsened = byRetChange[byRetChange.length-1];
-          y = pdfParagraph(doc, font, y, `أكبر تحسن في نسبة المرتجعات (انخفاض): ${improved.name} من ${pdfFormatPercent(improved.mv.firstRates.returnRate)} إلى ${pdfFormatPercent(improved.mv.lastRates.returnRate)}.`, {gap:4});
-          y = pdfParagraph(doc, font, y, `أكبر تدهور في نسبة المرتجعات (ارتفاع): ${worsened.name} من ${pdfFormatPercent(worsened.mv.firstRates.returnRate)} إلى ${pdfFormatPercent(worsened.mv.lastRates.returnRate)}.`, {gap:4});
+          // Return rate: DOWN (negative change) is an improvement, UP
+          // (positive change) is a decline — this is the exact case that
+          // was confirmed wrong in a real generated report (a genuine
+          // decrease, e.g. 17.1% -> 13.5%, was labeled "تدهور (ارتفاع)").
+          if(improved.mv.returnRateChange<0) y = pdfParagraph(doc, font, y, `أكبر تحسن في نسبة المرتجعات (انخفاض): ${improved.name} من ${pdfFormatPercent(improved.mv.firstRates.returnRate)} إلى ${pdfFormatPercent(improved.mv.lastRates.returnRate)}.`, {gap:4});
+          if(worsened.mv.returnRateChange>0) y = pdfParagraph(doc, font, y, `أكبر تدهور في نسبة المرتجعات (ارتفاع): ${worsened.name} من ${pdfFormatPercent(worsened.mv.firstRates.returnRate)} إلى ${pdfFormatPercent(worsened.mv.lastRates.returnRate)}.`, {gap:4});
         }
       }
     }
@@ -4084,17 +4150,29 @@ async function mgmtGenerateExecutivePdfReport(){
         const grown = [...custMovements].filter(m=>m.mv.volumeChangePct!==null && m.mv.volumeChangePct>0).sort((a,b)=>b.mv.volumeChangePct-a.mv.volumeChangePct);
         const declined = [...custMovements].filter(m=>m.mv.volumeChangePct!==null && m.mv.volumeChangePct<0).sort((a,b)=>a.mv.volumeChangePct-b.mv.volumeChangePct);
         y = pdfParagraph(doc, font, y, `عملاء جدد خلال الفترة: ${newCustomers.length}${newCustomers.length?' — أبرزهم: '+newCustomers.slice(0,3).map(c=>c.name).join('، '):''}.`, {gap:4});
-        y = pdfParagraph(doc, font, y, `عملاء توقفوا أو أصبحوا غير نشطين: ${stopped.length}${stopped.length?' — أبرزهم: '+stopped.slice(0,3).map(c=>c.name).join('، '):''}.`, {gap:6});
+        y = pdfParagraph(doc, font, y, `عملاء أصبحوا غير نشطين خلال الفترة: ${stopped.length}${stopped.length?' — أبرزهم: '+stopped.slice(0,3).map(c=>c.name).join('، '):''}.`, {gap:6});
         if(grown.length){
           const top = grown[0];
-          y = pdfParagraph(doc, font, y, `ارتفع حجم العميل "${top.name}" من ${pdfFormatNumber(top.mv.firstRates.count)} شحنة في ${pdfArabicMonthName(top.mv.firstMonth)} إلى ${pdfFormatNumber(top.mv.lastRates.count)} شحنة في ${pdfArabicMonthName(top.mv.lastMonth)}، بنسبة نمو ${pdfFormatPercent(top.mv.volumeChangePct,1)}.`, {gap:4});
+          const baseline = top.mv.firstRates.count;
+          // A % growth figure computed from a tiny previous-month baseline
+          // (e.g. 1 shipment -> 4,932 = 493,100%) is mathematically correct
+          // but not administratively useful — use qualitative phrasing
+          // instead once the baseline is below this threshold.
+          const growthSuffix = baseline >= CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS
+            ? `، بنسبة نمو ${pdfFormatPercent(top.mv.volumeChangePct,1)}.`
+            : ` (ظهر نمو كبير في حجم العميل، مع انخفاض قاعدة المقارنة في الشهر السابق).`;
+          y = pdfParagraph(doc, font, y, `ارتفع حجم العميل "${top.name}" من ${pdfFormatNumber(baseline)} شحنة في ${pdfArabicMonthName(top.mv.firstMonth)} إلى ${pdfFormatNumber(top.mv.lastRates.count)} شحنة في ${pdfArabicMonthName(top.mv.lastMonth)}${growthSuffix}`, {gap:4});
           if(top.mv.deliveryRateChange!==null && top.mv.deliveryRateChange < -3){
             y = pdfParagraph(doc, font, y, `رغم ارتفاع حجم العميل "${top.name}"، انخفضت نسبة التسليم من ${pdfFormatPercent(top.mv.firstRates.deliveryRate)} إلى ${pdfFormatPercent(top.mv.lastRates.deliveryRate)}.`, {gap:8});
           }
         }
         if(declined.length){
           const worst = declined[0];
-          y = pdfParagraph(doc, font, y, `انخفض حجم العميل "${worst.name}" من ${pdfFormatNumber(worst.mv.firstRates.count)} شحنة في ${pdfArabicMonthName(worst.mv.firstMonth)} إلى ${pdfFormatNumber(worst.mv.lastRates.count)} شحنة في ${pdfArabicMonthName(worst.mv.lastMonth)}، بنسبة تراجع ${pdfFormatPercent(Math.abs(worst.mv.volumeChangePct),1)}.`, {gap:4});
+          const baseline = worst.mv.firstRates.count;
+          const declineSuffix = baseline >= CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS
+            ? `، بنسبة تراجع ${pdfFormatPercent(Math.abs(worst.mv.volumeChangePct),1)}.`
+            : ` (تراجع كبير في حجم العميل، من قاعدة مقارنة صغيرة أصلاً في الشهر السابق).`;
+          y = pdfParagraph(doc, font, y, `انخفض حجم العميل "${worst.name}" من ${pdfFormatNumber(baseline)} شحنة في ${pdfArabicMonthName(worst.mv.firstMonth)} إلى ${pdfFormatNumber(worst.mv.lastRates.count)} شحنة في ${pdfArabicMonthName(worst.mv.lastMonth)}${declineSuffix}`, {gap:4});
         }
         const improved = [...custMovements].filter(m=>m.mv.deliveryRateChange!==null && m.mv.deliveryRateChange>=5).sort((a,b)=>b.mv.deliveryRateChange-a.mv.deliveryRateChange);
         const worsened = [...custMovements].filter(m=>m.mv.deliveryRateChange!==null && m.mv.deliveryRateChange<=-5).sort((a,b)=>a.mv.deliveryRateChange-b.mv.deliveryRateChange);
@@ -4111,9 +4189,10 @@ async function mgmtGenerateExecutivePdfReport(){
       if(!alertPrevLoaded){
         y = pdfParagraph(doc, font, y, 'بيانات الشهر السابق غير متاحة لإجراء مقارنة العملاء (Previous month data is not available for customer comparison).', {gap:4});
       } else {
-        y = pdfParagraph(doc, font, y, `مقارنة ${pdfArabicMonthName(alertCurrentMonth)} (الحالي) مقابل ${pdfArabicMonthName(alertPreviousMonth)} (السابق) — بحد أدنى ${pdfFormatNumber(CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS)} طلب في الشهر السابق لدخول التحليل.`, {gap:8});
+        y = pdfParagraph(doc, font, y, `مقارنة ${pdfArabicMonthName(alertCurrentMonth)} (الحالي) مقابل ${pdfArabicMonthName(alertPreviousMonth)} (السابق) — بحد أدنى ${pdfFormatNumber(CUSTOMER_ALERT_MIN_PREVIOUS_ORDERS)} طلب في الشهر السابق لدخول التحليل.`, {gap:4});
+        y = pdfParagraph(doc, font, y, 'ملاحظة: "عملاء متوقفون" هنا يقارن شهراً بشهر مباشرة قبله فقط، وهو مقياس مختلف عن "عملاء أصبحوا غير نشطين" الموضّح في صفحة حركة العملاء (والذي يقارن أول وآخر شهر ضمن كامل الفترة المختارة).', {gap:8, fontSize:8.5, color:[110,116,125]});
         y = pdfKpiGrid(doc, font, y, [
-          {label:'عملاء متوقفون', value:pdfFormatNumber(risk.stoppedCount), valueColor:[178,34,34]},
+          {label:'عملاء متوقفون (شهرياً)', value:pdfFormatNumber(risk.stoppedCount), valueColor:[178,34,34]},
           {label:'تراجع كبير (Significant)', value:pdfFormatNumber(risk.significantDeclineCount), valueColor:[214,102,26]},
           {label:'تراجع حرج (Critical)', value:pdfFormatNumber(risk.criticalDeclineCount), valueColor:[178,34,34]},
           {label:'إجمالي الطلبات المفقودة', value:pdfFormatNumber(risk.lostOrders), valueColor:[178,34,34]},
@@ -4170,13 +4249,21 @@ async function mgmtGenerateExecutivePdfReport(){
     // doc.getTextWidth() and draw with align:'left', which IS the proven
     // correct path used everywhere else. Also uses a plain hyphen instead
     // of an en-dash, removing one more untested variable.
-    const confidentialText = 'Confidential - For Internal Use Only';
+    // NOTE: two earlier attempts to fix the English "Confidential - For
+    // Internal Use Only" footer text (first via align:'center', then via
+    // align:'left' with manual centering) were BOTH confirmed broken by
+    // actually viewing rendered PDF pages — the words kept coming out
+    // reversed. Rather than gamble on a third unverified guess, this uses
+    // Arabic text instead: every Arabic string in this entire report has
+    // rendered correctly throughout this whole project, with zero
+    // confirmed failures, so this is the one choice guaranteed to be
+    // correct without another render-and-check cycle.
+    const confidentialText = 'سرّي — للاستخدام الداخلي فقط';
     for(let p=1; p<=totalPages; p++){
       doc.setPage(p);
       doc.setFont(font,'normal'); doc.setFontSize(8); doc.setTextColor(140,146,155);
       doc.text(`تقرير الأداء الإداري — ${periodLabel}`, PDF_MARGIN, PDF_PAGE_H-20, {align:'left'});
-      const confWidth = doc.getTextWidth(confidentialText);
-      doc.text(confidentialText, PDF_PAGE_W/2 - confWidth/2, PDF_PAGE_H-20, {align:'left'});
+      doc.text(confidentialText, PDF_PAGE_W/2, PDF_PAGE_H-20, {align:'center'});
       doc.text(`صفحة ${p} من ${totalPages}`, PDF_RIGHT, PDF_PAGE_H-20, {align:'right'});
     }
 
@@ -4282,7 +4369,7 @@ function mgmtComputeMovementFindings(months, branchEntries, customerEntries){
   if(months.length <= 1) return findings;
   const minBranchVol = mgmtComputeMinVolumeThreshold(branchEntries);
   const minCustVol = mgmtComputeMinVolumeThreshold(customerEntries);
-  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol);
+  const eligibleBranches = branchEntries.filter(e=>e.stats.totalVolume >= minBranchVol && e.name!=='غير محدد');
   const eligibleCustomers = customerEntries.filter(e=>e.stats.totalVolume >= minCustVol);
 
   const branchMoves = eligibleBranches.map(e=>({name:mgmtCleanEntityName(e.name), mv:mgmtEntryMovement(e.entry||e, months)})).filter(m=>m.mv);
@@ -5671,6 +5758,11 @@ function initSettingsHandlers(){
         else BRANCH_SLA_TARGETS[branch] = v;
       }
     });
+    // The table itself was never re-rendered after Apply, so a saved value
+    // (and its "مخصّص"/"افتراضي" status pill) never visibly updated even
+    // though it WAS saved in memory and sent on the next request — this
+    // could easily look like "nothing changed". Refresh it immediately.
+    renderBranchSlaTable();
     renderAll();
   });
 }
