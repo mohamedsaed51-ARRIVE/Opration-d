@@ -181,6 +181,20 @@ function doGet(e) {
     }
 
     // --------------------------------------------------------
+    // SLA SETTINGS (persisted single source of truth — Batch 1 fix)
+    // getSlaSettings: read-only, called by the frontend on every boot.
+    // saveSlaSettings: called only from the Settings tab's Apply buttons.
+    // --------------------------------------------------------
+
+    else if (action === "getSlaSettings") {
+      result = getSlaSettingsPayload();
+    }
+
+    else if (action === "saveSlaSettings") {
+      result = saveSlaSettingsPayload(params);
+    }
+
+    // --------------------------------------------------------
     // DASHBOARD SUMMARY (server-side aggregation — compact JSON,
     // no raw rows). This is what the Dashboard now uses for the normal
     // KPI/overview view instead of downloading the entire raw month.
@@ -375,13 +389,93 @@ var SUMMARY_COLUMN_ALIASES = {
 };
 
 var SUMMARY_STATUS_MAP = {
-  delivered: ["تسليم ناجح"],
+  delivered: ["تسليم ناجح", "التسليم ناجح"], // both spellings observed in real sheet data (June) map to the same bucket
   returned:  ["مرتجعات"],
   rejected:  ["رفض الاستلام و تم دفع الشحن", "رفض الاستلام و رفض والدفع"],
   pending:   ["قيد التشغيل", "قيد  التشغيل"]
 };
 
 var SUMMARY_DEFAULT_SLA_DAYS = 2;
+
+// ============================================================
+// 4C. PERSISTENT SLA SETTINGS (single source of truth)
+// ============================================================
+// Batch 1 fix: BRANCH_SLA_TARGETS/SLA_TARGET_DAYS previously lived ONLY as
+// in-memory JS variables in index.html — reset to {} / 2 on every page
+// reload, and never sent at all by the Management Analysis / Executive PDF
+// pipeline (mgmtEnsureMonthsLoaded -> getMonthSummaryLite ->
+// ensureMonthSummaryCached -> fetchMonthDashboardSummary), which silently
+// fell back to SUMMARY_DEFAULT_SLA_DAYS for every branch. This is the ONE
+// persisted source both the main dashboard and Management Analysis load
+// their SLA configuration from — no separate/duplicate SLA config anywhere
+// else. Stored via PropertiesService.getScriptProperties() (already the
+// project's existing pattern — see SNAPSHOT_GENERATION_PROPERTY_KEY above),
+// so it survives page reloads and is shared across every client session.
+// This does NOT change SUMMARY_DEFAULT_SLA_DAYS itself, and does NOT change
+// how getMonthDashboardSummary/getAllMonthsDashboardSummary resolve their
+// OWN slaTargetDefault/branchSlaTargets from request params (still exactly
+// as before, including their snapshot-compatibility comparisons against
+// SUMMARY_DEFAULT_SLA_DAYS) — the frontend is responsible for loading these
+// persisted values on boot and passing them as explicit request params on
+// every request, on both the dashboard and Management Analysis paths alike.
+// Fails open on any PropertiesService error, same pattern as the snapshot
+// generation stamp: reads fall back to {slaTargetDefault: SUMMARY_DEFAULT_SLA_DAYS,
+// branchSlaTargets: {}}, writes report success:false rather than throwing.
+var SLA_SETTINGS_PROPERTY_KEY = "SLA_SETTINGS_JSON";
+
+function getPersistedSlaSettings_() {
+  var fallback = { slaTargetDefault: SUMMARY_DEFAULT_SLA_DAYS, branchSlaTargets: {} };
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(SLA_SETTINGS_PROPERTY_KEY);
+    if (!raw) return fallback;
+    var parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return fallback;
+    var target = (parsed.slaTargetDefault !== undefined && parsed.slaTargetDefault !== null && !isNaN(Number(parsed.slaTargetDefault)))
+      ? Number(parsed.slaTargetDefault) : SUMMARY_DEFAULT_SLA_DAYS;
+    var branchTargets = (parsed.branchSlaTargets && typeof parsed.branchSlaTargets === "object") ? parsed.branchSlaTargets : {};
+    return { slaTargetDefault: target, branchSlaTargets: branchTargets };
+  } catch (e) {
+    console.log("[SLA SETTINGS READ FAILED] " + String(e && e.message ? e.message : e));
+    return fallback;
+  }
+}
+
+function getSlaSettingsPayload() {
+  var settings = getPersistedSlaSettings_();
+  return { success: true, slaTargetDefault: settings.slaTargetDefault, branchSlaTargets: settings.branchSlaTargets };
+}
+
+// Validates and persists {slaTargetDefault, branchSlaTargets} as ONE atomic
+// JSON blob (never two separate keys) so a partial write can never leave
+// the default and the per-branch overrides out of sync with each other.
+function saveSlaSettingsPayload(params) {
+  try {
+    var targetRaw = params && params.slaTargetDefault;
+    var target = (targetRaw !== undefined && targetRaw !== null && targetRaw !== "" && !isNaN(Number(targetRaw)) && Number(targetRaw) > 0)
+      ? Number(targetRaw) : SUMMARY_DEFAULT_SLA_DAYS;
+
+    var branchTargets = {};
+    if (params && params.branchSlaTargets) {
+      var parsed = JSON.parse(params.branchSlaTargets);
+      if (parsed && typeof parsed === "object") {
+        // Only keep finite, positive numeric overrides — never persist a
+        // malformed/empty value that could later be misread as a real target.
+        for (var branchName in parsed) {
+          if (!Object.prototype.hasOwnProperty.call(parsed, branchName)) continue;
+          var v = Number(parsed[branchName]);
+          if (!isNaN(v) && v > 0) branchTargets[branchName] = v;
+        }
+      }
+    }
+
+    var toStore = { slaTargetDefault: target, branchSlaTargets: branchTargets };
+    PropertiesService.getScriptProperties().setProperty(SLA_SETTINGS_PROPERTY_KEY, JSON.stringify(toStore));
+    return { success: true, slaTargetDefault: target, branchSlaTargets: branchTargets };
+  } catch (e) {
+    console.log("[SLA SETTINGS SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
 
 function summaryNormText(s) {
   if (s === null || s === undefined) return "";
@@ -2643,7 +2737,19 @@ function buildAndSaveMonthSummary(sheetName) {
     return { success:false, error:"شهر غير معروف: " + sheetName };
   }
   var started = new Date().getTime();
-  var params = { __buildPersistentSummary:true, refresh:"1" };
+  // ROOT CAUSE FIX (Batch 1 follow-up): this used to call getMonthDashboardSummary
+  // with NO slaTarget/branchSlaTargets in params at all, so it silently fell back
+  // to SUMMARY_DEFAULT_SLA_DAYS (2) and {} (no branch overrides) for EVERY
+  // snapshot ever built — regardless of what was configured/persisted in
+  // Settings. A snapshot is an admin/build-time artifact with no "current
+  // browser session" to inherit settings from, so it must explicitly read the
+  // one persisted source of truth (getPersistedSlaSettings_) itself.
+  var slaSettings = getPersistedSlaSettings_();
+  var params = {
+    __buildPersistentSummary: true, refresh: "1",
+    slaTarget: slaSettings.slaTargetDefault,
+    branchSlaTargets: JSON.stringify(slaSettings.branchSlaTargets)
+  };
   var summary = getMonthDashboardSummary(sheetName, params);
   if (!summary || summary.success === false) return summary || {success:false,error:"فشل بناء Summary"};
   summary.persistent = true;
@@ -2659,7 +2765,8 @@ function buildAndSaveMonthSummary(sheetName) {
     empty:!!(summary.empty || summary.noData),
     generatedAt:summary.generatedAt,
     durationMs:new Date().getTime()-started,
-    chunks:saved.chunks
+    chunks:saved.chunks,
+    slaConfigUsed: { slaTargetDefault: slaSettings.slaTargetDefault, branchSlaTargets: slaSettings.branchSlaTargets }
   };
 }
 
@@ -2697,6 +2804,14 @@ function buildAllDashboardSummaries() {
 // path instead of re-reading that (empty) sheet live every time.
 function buildMissingMonthSnapshots() {
   var out = [];
+  // ROOT CAUSE FIX (Batch 1 follow-up): "compatible" used to mean "matches
+  // the hardcoded SUMMARY_DEFAULT_SLA_DAYS/{} literally" — so once real
+  // branch SLA overrides are saved in Settings, every existing snapshot
+  // (all built at the old 2-day-only default) would be wrongly reported as
+  // "already compatible" and skipped, permanently locking in the wrong SLA
+  // numbers until this compatibility target changed too. Now compares
+  // against the actual persisted configuration instead.
+  var persisted = getPersistedSlaSettings_();
   for (var i = 0; i < MONTH_ORDER.length; i++) {
     var month = MONTH_ORDER[i];
     var existing;
@@ -2710,8 +2825,8 @@ function buildMissingMonthSnapshots() {
         var bc = existing.filterCube && existing.filterCube.buildConfig;
         var compatibleWithDefaults = !!bc &&
           Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
-          Number(bc.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
-          summaryBranchTargetsEqual_(bc.branchSlaTargets, {});
+          Number(bc.slaTargetDefault) === Number(persisted.slaTargetDefault) &&
+          summaryBranchTargetsEqual_(bc.branchSlaTargets, persisted.branchSlaTargets);
         if (compatibleWithDefaults) { needsBuild = false; skipReason = "already-compatible-snapshot"; }
       }
     }
@@ -3015,33 +3130,38 @@ function diagnoseMonth(sheetName) {
 
     // Answers section 2 of the audit request directly: does this month
     // have a saved snapshot at all, is it empty, and is it built with the
-    // plain default settings (the same compatibility check
-    // getAllMonthsDashboardSummary / buildMissingMonthSnapshots already
-    // use) — without running a full live aggregation just to find out.
+    // CURRENT PERSISTED SLA settings (Batch 1 follow-up fix — this used to
+    // compare against the hardcoded SUMMARY_DEFAULT_SLA_DAYS/{} literal,
+    // which would falsely report a correctly-rebuilt snapshot as
+    // "incompatible" once real branch SLA overrides are saved) — without
+    // running a full live aggregation just to find out.
     snapshot: (function(){
       var snap = null;
       try { snap = getSavedMonthSummary_(sheetName); } catch (eSnap) { return { exists:false, error:String(eSnap && eSnap.message ? eSnap.message : eSnap) }; }
       if (!snap) return { exists:false };
       if (snap.empty || snap.noData) return { exists:true, empty:true, generatedAt: snap.generatedAt || null };
       var bc = snap.filterCube && snap.filterCube.buildConfig;
+      var persistedForDiag = getPersistedSlaSettings_();
       var compatibleWithDefaults = !!bc &&
         Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
-        Number(bc.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
-        summaryBranchTargetsEqual_(bc.branchSlaTargets, {});
+        Number(bc.slaTargetDefault) === Number(persistedForDiag.slaTargetDefault) &&
+        summaryBranchTargetsEqual_(bc.branchSlaTargets, persistedForDiag.branchSlaTargets);
       return {
         exists:true, empty:false, compatibleWithDefaults: compatibleWithDefaults, buildConfig: bc || null,
+        currentPersistedSlaSettings: persistedForDiag,
         generatedAt: snap.generatedAt || null, totalRows: snap.totalRows || 0,
         total: snap.kpis ? snap.kpis.total : null, delivered: snap.kpis ? snap.kpis.delivered : null,
         deliveryRate: snap.kpis ? snap.kpis.deliveryRate : null
       };
     })(),
 
-    // Answers "would a normal (unfiltered, default-settings) All Months
-    // request include this month right now, and why" — the exact same
-    // decision getAllMonthsDashboardSummary's fast path makes. When there
-    // is no compatible snapshot, this ACTUALLY runs the same live
-    // aggregation All Months would run (getMonthDashboardSummary), rather
-    // than guessing — a genuine answer, not a prediction.
+    // Answers "would a normal (unfiltered) request right now use the
+    // snapshot or fall back to live aggregation, and why" — the exact same
+    // decision getAllMonthsDashboardSummary's fast path makes, now checked
+    // against the CURRENT PERSISTED SLA settings (same follow-up fix as
+    // above). When there is no compatible snapshot, this ACTUALLY runs the
+    // same live aggregation All Months would run (getMonthDashboardSummary),
+    // rather than guessing — a genuine answer, not a prediction.
     allMonths: (function(){
       var snap2 = null;
       try { snap2 = getSavedMonthSummary_(sheetName); } catch (eSnap2) { snap2 = null; }
@@ -3050,10 +3170,11 @@ function diagnoseMonth(sheetName) {
       }
       if (snap2) {
         var bc2 = snap2.filterCube && snap2.filterCube.buildConfig;
+        var persistedForDiag2 = getPersistedSlaSettings_();
         var compatible2 = !!bc2 &&
           Number(bc2.attemptT1) === 1 && Number(bc2.attemptT2) === 2 &&
-          Number(bc2.slaTargetDefault) === SUMMARY_DEFAULT_SLA_DAYS &&
-          summaryBranchTargetsEqual_(bc2.branchSlaTargets, {});
+          Number(bc2.slaTargetDefault) === Number(persistedForDiag2.slaTargetDefault) &&
+          summaryBranchTargetsEqual_(bc2.branchSlaTargets, persistedForDiag2.branchSlaTargets);
         if (compatible2) {
           return {
             included:true, source:"snapshot",

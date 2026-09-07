@@ -974,7 +974,7 @@ const REQUIRED_FIELDS = ['awb','client','province','area','branch','status','pic
 
 // default status bucket mapping — confirmed with the business owner
 let STATUS_MAP = {
-  delivered: ['تسليم ناجح'],
+  delivered: ['تسليم ناجح', 'التسليم ناجح'], // both spellings observed in real sheet data (June) map to the same bucket
   returned:  ['مرتجعات'],
   rejected:  ['رفض الاستلام و تم دفع الشحن','رفض الاستلام و رفض والدفع'],
   pending:   ['قيد التشغيل','قيد  التشغيل']
@@ -989,6 +989,59 @@ let BRANCH_SLA_TARGETS = {};
 function getSlaTarget(branch){
   const v = BRANCH_SLA_TARGETS[branch];
   return (v!==undefined && v!==null && !isNaN(v)) ? v : SLA_TARGET_DAYS;
+}
+
+// Batch 1 fix: these two globals used to be reset to 2/{} on every page
+// load and never persisted anywhere. They are now loaded from Code.gs's
+// PropertiesService-backed store on boot (loadPersistedSlaSettings, called
+// from init() BEFORE the first month loads) and written back to that same
+// store whenever the Settings tab's Apply buttons are used
+// (savePersistedSlaSettings). This is the ONE source of truth for SLA
+// configuration — both the main dashboard (refreshKpiAndOverviewFromServer,
+// switchToMonth/getMonthFullSummary) and Management Analysis/Executive PDF
+// (mgmtEnsureMonthsLoaded/getMonthSummaryLite) read SLA_TARGET_DAYS/
+// BRANCH_SLA_TARGETS from here and pass them explicitly as request params —
+// there is no second, independently-maintained copy anywhere else.
+async function loadPersistedSlaSettings(){
+  try{
+    if(!effectiveWebAppUrl()) return; // no data source configured yet — keep the hardcoded 2/{} defaults
+    const url = buildAppsScriptUrl({ action:'getSlaSettings' });
+    const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true) throw new Error('استجابة غير صالحة من getSlaSettings');
+    if(payload.slaTargetDefault!=null && !isNaN(payload.slaTargetDefault) && payload.slaTargetDefault>0){
+      SLA_TARGET_DAYS = Number(payload.slaTargetDefault);
+    }
+    if(payload.branchSlaTargets && typeof payload.branchSlaTargets === 'object'){
+      BRANCH_SLA_TARGETS = payload.branchSlaTargets;
+    }
+    console.info('[SLA SETTINGS LOADED]', { slaTargetDefault: SLA_TARGET_DAYS, branchOverrideCount: Object.keys(BRANCH_SLA_TARGETS).length });
+  }catch(e){
+    // Fails open: keep whatever SLA_TARGET_DAYS/BRANCH_SLA_TARGETS already
+    // are (the 2/{} hardcoded defaults on first boot) rather than blocking
+    // the dashboard from loading over a settings-fetch failure.
+    console.warn('[SLA SETTINGS LOAD FAILED] — keeping current in-memory values', e);
+  }
+}
+async function savePersistedSlaSettings(){
+  try{
+    if(!effectiveWebAppUrl()) return false;
+    const url = buildAppsScriptUrl({
+      action:'saveSlaSettings',
+      slaTargetDefault: SLA_TARGET_DAYS,
+      branchSlaTargets: JSON.stringify(BRANCH_SLA_TARGETS),
+    });
+    const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true) throw new Error((payload&&payload.error)||'فشل حفظ إعدادات SLA');
+    console.info('[SLA SETTINGS SAVED]', { slaTargetDefault: SLA_TARGET_DAYS, branchOverrideCount: Object.keys(BRANCH_SLA_TARGETS).length });
+    return true;
+  }catch(e){
+    console.warn('[SLA SETTINGS SAVE FAILED] — change is still applied in this session but will NOT survive a page reload', e);
+    return false;
+  }
 }
 
 // delivery-attempt classification: derived approximation based on calendar-day gap
@@ -1292,39 +1345,65 @@ function isUsableCachedSummary(summary, month){
     !(summary.skippedMonths && summary.skippedMonths.length);
 }
 
+// Batch 1 fix: a cached summary here is only reusable if it was computed
+// with the SAME SLA configuration currently being requested. Before this
+// fix, this cache was keyed by month only — so a month cached under the
+// OLD SLA settings (e.g. before a branch's SLA target was changed, or
+// simply from before page reload if a stale IndexedDB entry survived) could
+// silently be served back with the WRONG SLA%, on both the main dashboard's
+// initial month load and Management Analysis. Mirrors the exact same
+// config-identity pattern Code.gs already uses for its own snapshot/cache
+// compatibility checks (bc.slaTargetDefault / summaryBranchTargetsEqual_),
+// just applied to this client-side layer.
+function slaConfigKeyFromOpts(opts){
+  const target = (opts && opts.slaTarget!=null) ? opts.slaTarget : SLA_TARGET_DAYS;
+  const branchTargets = (opts && opts.branchSlaTargets) ? opts.branchSlaTargets : BRANCH_SLA_TARGETS;
+  return target + '|' + JSON.stringify(branchTargets);
+}
+function cachedSummaryMatchesSlaConfig(cachedSummary, requestedSlaConfigKey){
+  // Summaries saved before this fix have no __slaConfigKey at all — treat
+  // that as a mismatch (force one live re-check) rather than assuming they
+  // happen to match, so no pre-existing cache entry is ever trusted blindly.
+  return !!cachedSummary && cachedSummary.__slaConfigKey === requestedSlaConfigKey;
+}
+
 async function ensureMonthSummaryCached(month, opts){
   opts = opts || {};
+  const requestedSlaConfigKey = slaConfigKeyFromOpts(opts);
   if(!opts.force && monthSummaryMemCache.has(month)){
     const cachedVal = monthSummaryMemCache.get(month);
     const cachedSavedAt = monthSummaryMemCacheSavedAt.get(month);
-    if(isUsableCachedSummary(cachedVal, month) && isCacheFresh(cachedSavedAt)){
+    const slaMatches = cachedSummaryMatchesSlaConfig(cachedVal, requestedSlaConfigKey);
+    if(isUsableCachedSummary(cachedVal, month) && isCacheFresh(cachedSavedAt) && slaMatches){
       console.info('[CACHE HIT]', { month, source:'memory' });
       return { summary: normalizeEmptySummary(cachedVal), fromCache: true };
     }
-    console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', reason: isUsableCachedSummary(cachedVal, month) ? 'stale-ttl' : 'partial', savedAt: cachedSavedAt, missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
+    console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', reason: !slaMatches ? 'sla-config-mismatch' : (isUsableCachedSummary(cachedVal, month) ? 'stale-ttl' : 'partial'), savedAt: cachedSavedAt, missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
   }
   if(!opts.force){
     const cachedIdb = await loadMonthSummaryFromIDB(month);
     if(cachedIdb && cachedIdb.summary){
-      if(isUsableCachedSummary(cachedIdb.summary, month) && isCacheFresh(cachedIdb.savedAt)){
+      const slaMatches = cachedSummaryMatchesSlaConfig(cachedIdb.summary, requestedSlaConfigKey);
+      if(isUsableCachedSummary(cachedIdb.summary, month) && isCacheFresh(cachedIdb.savedAt) && slaMatches){
         normalizeEmptySummary(cachedIdb.summary);
         monthSummaryMemCache.set(month, cachedIdb.summary);
         monthSummaryMemCacheSavedAt.set(month, cachedIdb.savedAt);
         console.info('[CACHE HIT]', { month, source:'IndexedDB', savedAt: cachedIdb.savedAt });
         return { summary: cachedIdb.summary, fromCache: true };
       }
-      console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'IndexedDB', reason: isUsableCachedSummary(cachedIdb.summary, month) ? 'stale-ttl' : 'partial', savedAt: cachedIdb.savedAt, missingSnapshotMonths: cachedIdb.summary.missingSnapshotMonths, skippedMonths: cachedIdb.summary.skippedMonths });
+      console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'IndexedDB', reason: !slaMatches ? 'sla-config-mismatch' : (isUsableCachedSummary(cachedIdb.summary, month) ? 'stale-ttl' : 'partial'), savedAt: cachedIdb.savedAt, missingSnapshotMonths: cachedIdb.summary.missingSnapshotMonths, skippedMonths: cachedIdb.summary.skippedMonths });
     }
   }
   console.info('[CACHE MISS]', { month });
   const t0 = performance.now();
   console.info('[MONTH LOAD START]', { month, context:'dashboard-summary' });
   try{
-    const serverSummary = await fetchMonthDashboardSummary(month, { forceRefresh: opts.force });
+    const serverSummary = await fetchMonthDashboardSummary(month, { forceRefresh: opts.force, slaTarget: opts.slaTarget, branchSlaTargets: opts.branchSlaTargets });
     if(!serverSummary || serverSummary.success === false){
       throw new Error((serverSummary && serverSummary.error) || 'تعذر تحميل ملخص الشهر.');
     }
     normalizeEmptySummary(serverSummary);
+    serverSummary.__slaConfigKey = requestedSlaConfigKey; // stamp so a future request can tell whether this cached copy still matches
     const savedNowAt = Date.now();
     monthSummaryMemCache.set(month, serverSummary);
     monthSummaryMemCacheSavedAt.set(month, savedNowAt);
@@ -2023,7 +2102,7 @@ async function switchToMonth(month, opts){
   // `background` revalidation always bypasses the cache (same as `force`) so
   // it actually re-checks the live sheet rather than just re-reading cache.
   try{
-    const { summary, fromCache } = await getMonthFullSummary(month, { force: force || background });
+    const { summary, fromCache } = await getMonthFullSummary(month, { force: force || background, slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
 
     // A background revalidation only applies its (possibly newer) result if
     // the user is still looking at this same month — never stomps a switch
@@ -2688,6 +2767,24 @@ let MGMT = {
   controlsBuilt: false,
 };
 
+// Batch 1 follow-up fix: MGMT.monthsData has no TTL and is never
+// automatically invalidated — mgmtEnsureMonthsLoaded() only ever fetches a
+// month that is NOT already a key in here, permanently, until a full page
+// reload. The per-month client cache (ensureMonthSummaryCached) is now
+// SLA-config-aware and will correctly refetch live on a mismatch (see
+// slaConfigKeyFromOpts/cachedSummaryMatchesSlaConfig above) — but this
+// higher-level Management Analysis cache sits ON TOP of that layer and
+// would keep serving its already-loaded (stale) months regardless, so a
+// Settings change would otherwise never reach Management Analysis / the
+// Executive PDF until the page was manually reloaded. Called from both
+// Settings Apply handlers, BEFORE renderAll(), so by the time any
+// render reaches the Management tab (immediately, if it's the active tab —
+// see TAB_ALWAYS_RENDER — or on next visit otherwise) it treats every
+// month as needing a fresh, correctly-configured reload.
+function invalidateSlaDependentCaches(){
+  MGMT.monthsData = {};
+}
+
 // Ascending chronological order (oldest → newest) — sortMonths() already does
 // the numeric "شهر N" extraction, descending; this just reverses it for a
 // left-to-right period timeline. Non-numeric names keep their relative order.
@@ -2707,7 +2804,7 @@ async function mgmtEnsureMonthsLoaded(months){
   const results = await Promise.allSettled(toFetch.map(async m=>{
     const t0 = performance.now();
     console.info('[MONTH LOAD START]', { month:m, context:'management-analysis-summary' });
-    const summary = await getMonthSummaryLite(m);
+    const summary = await getMonthSummaryLite(m, { slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
     console.info('[MONTH LOAD COMPLETE]', { month:m, totalRows: summary?summary.totalRows:0, empty: summary?summary.isEmpty:true, ms: Math.round(performance.now()-t0), context:'management-analysis-summary' });
     return { m, summary };
   }));
@@ -4622,7 +4719,8 @@ async function mgmtRenderQuickCompare(){
   }
   console.info('[COMPARISON START]', { current, previous });
   const t0 = performance.now();
-  const [curSummary, prevSummary] = await Promise.all([getMonthSummaryLite(current), getMonthSummaryLite(previous)]);
+  const slaOpts = { slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS };
+  const [curSummary, prevSummary] = await Promise.all([getMonthSummaryLite(current, slaOpts), getMonthSummaryLite(previous, slaOpts)]);
   if(!curSummary || !prevSummary){
     body.innerHTML = '<div class="mgmt-empty-note">تعذر تحميل بيانات كافية للمقارنة حاليًا.</div>';
     return;
@@ -5642,6 +5740,13 @@ async function init(){
   // bootDashboard() below checks it directly, on demand, for exactly the one
   // month it needs.
 
+  // Batch 1 fix: load the persisted SLA settings (default target + branch
+  // overrides) BEFORE the first month loads, so the very first render — not
+  // just renders triggered later by a filter change — already uses the
+  // correct branch-specific SLA configuration instead of the hardcoded 2/{}.
+  try{ await loadPersistedSlaSettings(); }
+  catch(slaErr){ console.error('[INIT] loadPersistedSlaSettings failed — continuing with default SLA settings', slaErr); }
+
   // Automatic opening flow: discover month tabs, pick the default month,
   // connect to Apps Script, read that one month's data, normalize it, build
   // dimensions, init filters, render — fully automatic, no button required.
@@ -5736,9 +5841,15 @@ function initMonthSelectorHandlers(){
 window.addEventListener('DOMContentLoaded', ()=>{ init(); });
 
 function initSettingsHandlers(){
-  document.getElementById('applySlaBtn').addEventListener('click', ()=>{
+  document.getElementById('applySlaBtn').addEventListener('click', async ()=>{
     const v = parseFloat(document.getElementById('slaTargetInput').value);
-    if(!isNaN(v) && v>0){ SLA_TARGET_DAYS = v; renderAll(); }
+    if(!isNaN(v) && v>0){
+      SLA_TARGET_DAYS = v;
+      invalidateSlaDependentCaches(); // must happen BEFORE renderAll() so a stale Management Analysis summary is never re-rendered
+      renderAll();
+      renderBranchSlaTable(); // the "افتراضي" column value/labels depend on SLA_TARGET_DAYS — keep it in sync immediately
+      await savePersistedSlaSettings(); // Batch 1: persist so this survives a reload
+    }
   });
   document.getElementById('applyAttemptBtn').addEventListener('click', ()=>{
     const t1 = parseInt(document.getElementById('attemptT1Input').value, 10);
@@ -5748,7 +5859,7 @@ function initSettingsHandlers(){
       renderAll();
     }
   });
-  document.getElementById('applyBranchSlaBtn').addEventListener('click', ()=>{
+  document.getElementById('applyBranchSlaBtn').addEventListener('click', async ()=>{
     const inputs = document.querySelectorAll('#branchSlaTable input[data-branch]');
     inputs.forEach(inp=>{
       const branch = inp.getAttribute('data-branch');
@@ -5758,12 +5869,14 @@ function initSettingsHandlers(){
         else BRANCH_SLA_TARGETS[branch] = v;
       }
     });
+    invalidateSlaDependentCaches(); // must happen BEFORE renderAll() so a stale Management Analysis summary is never re-rendered
     // The table itself was never re-rendered after Apply, so a saved value
     // (and its "مخصّص"/"افتراضي" status pill) never visibly updated even
     // though it WAS saved in memory and sent on the next request — this
     // could easily look like "nothing changed". Refresh it immediately.
     renderBranchSlaTable();
     renderAll();
+    await savePersistedSlaSettings(); // Batch 1: persist so overrides survive a reload
   });
 }
 
