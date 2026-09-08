@@ -1378,8 +1378,24 @@ function cachedSummaryMatchesSlaConfig(cachedSummary, requestedSlaConfigKey){
 
 async function ensureMonthSummaryCached(month, opts){
   opts = opts || {};
+  // FIX: bypassing THIS function's own mem/IndexedDB cache is safe and
+  // intended for either an explicit force OR a silent background
+  // revalidation (see switchToMonth's comment) — both mean "don't trust
+  // what I have locally, ask again". That is a purely CLIENT-SIDE decision
+  // with no cost beyond one more compact-JSON request. Telling the BACKEND
+  // to skip ITS OWN cache and allow the heavy raw-sheet live-fallback
+  // (forceRefresh below, which becomes refresh=1 — see Code.gs
+  // allowHeavyLiveFallback) is a completely different, much more expensive
+  // decision that must be driven ONLY by an explicit user-initiated force —
+  // never by a background revalidation the code triggered on its own. This
+  // is exactly the bug that let a Cache Hit's automatic background
+  // revalidation of All Months (see switchToMonth's `if(fromCache &&
+  // !background) switchToMonth(month, {background:true,...})`) silently
+  // send refresh=1 before this fix, because both concerns used to share the
+  // single `opts.force` flag.
+  const bypassLocalCache = !!(opts.force || opts.background);
   const requestedSlaConfigKey = slaConfigKeyFromOpts(opts);
-  if(!opts.force && monthSummaryMemCache.has(month)){
+  if(!bypassLocalCache && monthSummaryMemCache.has(month)){
     const cachedVal = monthSummaryMemCache.get(month);
     const cachedSavedAt = monthSummaryMemCacheSavedAt.get(month);
     const slaMatches = cachedSummaryMatchesSlaConfig(cachedVal, requestedSlaConfigKey);
@@ -1389,7 +1405,7 @@ async function ensureMonthSummaryCached(month, opts){
     }
     console.info('[CACHE PARTIAL — LIVE RETRY]', { month, source:'memory', reason: !slaMatches ? 'sla-config-mismatch' : (isUsableCachedSummary(cachedVal, month) ? 'stale-ttl' : 'partial'), savedAt: cachedSavedAt, missingSnapshotMonths: cachedVal.missingSnapshotMonths, skippedMonths: cachedVal.skippedMonths });
   }
-  if(!opts.force){
+  if(!bypassLocalCache){
     const cachedIdb = await loadMonthSummaryFromIDB(month);
     if(cachedIdb && cachedIdb.summary){
       const slaMatches = cachedSummaryMatchesSlaConfig(cachedIdb.summary, requestedSlaConfigKey);
@@ -1407,6 +1423,12 @@ async function ensureMonthSummaryCached(month, opts){
   const t0 = performance.now();
   console.info('[MONTH LOAD START]', { month, context:'dashboard-summary' });
   try{
+    // FIX: forceRefresh (-> refresh=1 -> Code.gs allowHeavyLiveFallback) is
+    // opts.force ONLY — never OR'd with opts.background. A background
+    // revalidation still gets a fresh, non-cached answer (bypassLocalCache
+    // above already guarantees that), but the backend request itself stays
+    // a normal/passive one: fast snapshot/cache path, never the expensive
+    // raw-sheet live-fallback, for All Months or otherwise.
     const serverSummary = await fetchMonthDashboardSummary(month, { forceRefresh: opts.force, slaTarget: opts.slaTarget, branchSlaTargets: opts.branchSlaTargets });
     if(!serverSummary || serverSummary.success === false){
       throw new Error((serverSummary && serverSummary.error) || 'تعذر تحميل ملخص الشهر.');
@@ -1518,8 +1540,19 @@ function saveAutoRefreshToStorage(minutes){
 function setupAutoRefresh(){
   if(autoRefreshTimer){ clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
   if(autoRefreshMinutes > 0){
-    // Refresh = current selected month only, cache bypassed — never reloads the month list or the page.
-    autoRefreshTimer = setInterval(()=>{ if(selectedMonth) switchToMonth(selectedMonth, { force:true, silent:true }); }, autoRefreshMinutes * 60000);
+    // Refresh = current selected month only, never reloads the month list or the page.
+    // FIX: force:true here becomes refresh=1 on the wire, which — per Code.gs's
+    // allowHeavyLiveFallback gate — is the ONLY thing allowed to trigger the
+    // expensive per-month live aggregation for All Months. A silent background
+    // timer must never be that trigger (the user never asked for it right now),
+    // so All Months gets a plain/passive refresh (uses snapshots, flags any
+    // stale ones — see staleSlaMonths) while a specific month keeps its
+    // existing force:true cache-bypass behavior exactly as before.
+    autoRefreshTimer = setInterval(()=>{
+      if(!selectedMonth) return;
+      const isAllMonths = (selectedMonth === ALL_MONTHS_SENTINEL);
+      switchToMonth(selectedMonth, { force: !isAllMonths, silent: true });
+    }, autoRefreshMinutes * 60000);
   }
 }
 
@@ -1737,10 +1770,22 @@ function fetchMonthDashboardSummary(month, opts){
   opts = opts || {};
   const filtersKey = opts.filters ? JSON.stringify(opts.filters) : '';
   const slaTargetsKey = opts.branchSlaTargets ? JSON.stringify(opts.branchSlaTargets) : '';
+  // BUG FIX: forceRefresh determines whether refresh=1 is actually sent to
+  // the backend (see below) — which in turn decides whether Code.gs's
+  // allowHeavyLiveFallback can ever be true. It was missing from this key,
+  // so a normal request already in flight for the same month/filters/SLA
+  // could silently absorb a later Manual Refresh into the SAME promise
+  // (never actually sending refresh=1), or the reverse — a normal/
+  // background request could inherit an in-flight Manual Refresh's
+  // refresh=1. Both directions defeat the earlier force/background
+  // separation fix. '|refresh:1' vs '|refresh:0' keeps the two dedupe
+  // buckets distinct while still letting two truly identical requests
+  // (same forceRefresh value, same everything else) share one promise.
   const dedupeKey = 'dashboard:'+month+(opts.branch ? ('|b:'+opts.branch) : '')
     +(filtersKey?('|f:'+filtersKey):'')+(opts.dateFrom?('|df:'+opts.dateFrom):'')+(opts.dateTo?('|dt:'+opts.dateTo):'')
     +(opts.attemptT1!=null?('|t1:'+opts.attemptT1):'')+(opts.attemptT2!=null?('|t2:'+opts.attemptT2):'')
-    +(opts.slaTarget!=null?('|sla:'+opts.slaTarget):'')+(slaTargetsKey?('|slaov:'+slaTargetsKey):'');
+    +(opts.slaTarget!=null?('|sla:'+opts.slaTarget):'')+(slaTargetsKey?('|slaov:'+slaTargetsKey):'')
+    +(opts.forceRefresh?'|refresh:1':'|refresh:0');
   return dedupeFetch(dedupeKey, async ()=>{
     const params = { action:'dashboard', sheet: month };
     if(opts.forceRefresh) params.refresh = '1';
@@ -2108,10 +2153,20 @@ async function switchToMonth(month, opts){
   // Checks IndexedDB for a cached compact summary; on a miss, requests
   // ?action=dashboard&sheet=<month> and caches ONLY that compact summary.
   // No fetchSheetRows(), no pagination, no raw rows — ever, in this function.
-  // `background` revalidation always bypasses the cache (same as `force`) so
-  // it actually re-checks the live sheet rather than just re-reading cache.
+  // FIX: force and background are passed as TWO SEPARATE flags now, not
+  // merged into one (`force: force || background`, as this used to read).
+  // They mean different things: force = the user explicitly asked for a
+  // refresh (manual "تحديث الآن" or an explicit retry); background = a
+  // silent revalidation this code triggers itself after an instant cache
+  // render. Both legitimately mean "don't trust my local mem/IndexedDB
+  // cache, ask again" (see ensureMonthSummaryCached, which still bypasses
+  // its own cache for either), but ONLY force may translate into refresh=1
+  // on the wire — a background revalidation must never be able to widen
+  // into Code.gs's allowHeavyLiveFallback and live-aggregate All Months'
+  // raw sheets on its own initiative. See ensureMonthSummaryCached for
+  // where that distinction is actually enforced.
   try{
-    const { summary, fromCache } = await getMonthFullSummary(month, { force: force || background, slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
+    const { summary, fromCache } = await getMonthFullSummary(month, { force, background, slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
 
     // A background revalidation only applies its (possibly newer) result if
     // the user is still looking at this same month — never stomps a switch
@@ -2787,6 +2842,22 @@ let MGMT = {
   controlsBuilt: false,
 };
 
+// AUDIT FIX (race condition, confirmed by code reading): renderManagementTab,
+// mgmtOnPeriodChange, mgmtOnEntityFilterChange, mgmtRenderQuickCompare, and
+// mgmtRenderBranchCustomer each do async work (branch-scoped/period fetches)
+// and then write directly to the DOM with no guard against a newer render
+// cycle having started in the meantime. E.g.: user selects branch A ->
+// mgmtRenderBranchCustomer(A) starts fetching -> user quickly selects branch
+// B -> mgmtRenderBranchCustomer(B) starts and finishes first -> the SLOWER
+// branch-A fetch then finishes and overwrites the DOM with branch A's data
+// while "B" is still shown as selected. Same class of bug for a rapid period
+// change. Mirrors the exact pattern already used successfully for this in
+// refreshKpiAndOverviewFromServer (_serverKpiToken) — incremented by any
+// entry point that starts a new Management Analysis render cycle, captured
+// by the async helper at the moment it's invoked, and checked again right
+// after its await, before touching the DOM.
+let _mgmtRenderToken = 0;
+
 // Batch 1 follow-up fix: MGMT.monthsData has no TTL and is never
 // automatically invalidated — mgmtEnsureMonthsLoaded() only ever fetches a
 // month that is NOT already a key in here, permanently, until a full page
@@ -2803,6 +2874,12 @@ let MGMT = {
 // month as needing a fresh, correctly-configured reload.
 function invalidateSlaDependentCaches(){
   MGMT.monthsData = {};
+  // Branch-scoped drill-down summaries (mgmtGetBranchScopedSummary) are a
+  // SEPARATE cache from MGMT.monthsData, keyed by month+branch, and were not
+  // being cleared here — so after a successful SLA settings change, a
+  // previously-cached branch drill-down would keep showing numbers computed
+  // under the OLD SLA config indefinitely (this cache has no TTL either).
+  mgmtBranchScopedSummaryCache.clear();
 }
 
 // Ascending chronological order (oldest → newest) — sortMonths() already does
@@ -2929,7 +3006,7 @@ const mgmtBranchScopedSummaryCache = new Map(); // key: month+'|'+branch -> norm
 async function mgmtGetBranchScopedSummary(month, branch){
   const key = month+'|'+branch;
   if(mgmtBranchScopedSummaryCache.has(key)) return mgmtBranchScopedSummaryCache.get(key);
-  const serverSummary = await fetchMonthDashboardSummary(month, { branch });
+  const serverSummary = await fetchMonthDashboardSummary(month, { branch, slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
   const normalized = normalizeServerSummary(serverSummary);
   if(normalized) mgmtBranchScopedSummaryCache.set(key, normalized);
   return normalized;
@@ -3167,16 +3244,19 @@ async function mgmtRenderBranchCustomer(months){
   const body = document.getElementById('mgmtBranchCustomerBody');
   if(!body) return;
   if(!MGMT.branch){ body.innerHTML = '<div class="mgmt-empty-note">اختر فرعًا من أعلى الصفحة لعرض العملاء داخله وأثرهم على حركة الفرع.</div>'; return; }
+  const myMgmtToken = _mgmtRenderToken; // captured now — if a newer render cycle starts before our fetch below resolves, this render must never reach the DOM
+  const branchAtRequestTime = MGMT.branch; // avoid a second race: MGMT.branch itself could change before our await resolves
   body.innerHTML = '<div class="mgmt-empty-note">جاري تحميل بيانات الفرع...</div>';
   const branchScoped = {};
   await Promise.all(months.map(async m=>{
-    const s = await mgmtGetBranchScopedSummary(m, MGMT.branch);
+    const s = await mgmtGetBranchScopedSummary(m, branchAtRequestTime);
     if(s) branchScoped[m] = s;
   }));
+  if(myMgmtToken !== _mgmtRenderToken) return; // superseded by a newer render (e.g. a different branch was selected meanwhile) — never overwrite it
   const custSeries = mgmtBuildSeries('client', months, { branchScoped });
   const entries = mgmtSortedEntries(custSeries, months);
-  if(!entries.length){ body.innerHTML = `<div class="mgmt-empty-note">لا يوجد عملاء لفرع "${MGMT.branch}" في الفترة المختارة.</div>`; return; }
-  let html = `<div class="mgmt-bxc-block"><div class="mgmt-bxc-head"><span>${MGMT.branch}</span><span style="font-weight:400; font-size:11.5px; color:var(--text-faint);">${entries.length} عميل</span></div>
+  if(!entries.length){ body.innerHTML = `<div class="mgmt-empty-note">لا يوجد عملاء لفرع "${branchAtRequestTime}" في الفترة المختارة.</div>`; return; }
+  let html = `<div class="mgmt-bxc-block"><div class="mgmt-bxc-head"><span>${branchAtRequestTime}</span><span style="font-weight:400; font-size:11.5px; color:var(--text-faint);">${entries.length} عميل</span></div>
   <div class="table-scroll"><table class="data-table"><thead><tr><th>العميل</th><th>Volume</th><th>S.R %</th><th>Growth</th><th>الاتجاه</th></tr></thead><tbody>`;
   html += entries.map(e=>`<tr><td>${e.name}</td><td>${fmtInt(e.stats.totalVolume)}</td><td>${fmtPct(e.stats.avgSr)}</td><td>${fmtPct(e.stats.volGrowth,1)}</td><td><span class="mgmt-trend-tag ${e.stats.trend.cls}">${e.stats.trend.arrow} ${e.stats.trend.label}</span></td></tr>`).join('');
   html += '</tbody></table></div></div>';
@@ -4739,8 +4819,10 @@ async function mgmtRenderQuickCompare(){
   }
   console.info('[COMPARISON START]', { current, previous });
   const t0 = performance.now();
+  const myMgmtToken = _mgmtRenderToken; // captured now — see the shared race-condition guard note near MGMT's declaration
   const slaOpts = { slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS };
   const [curSummary, prevSummary] = await Promise.all([getMonthSummaryLite(current, slaOpts), getMonthSummaryLite(previous, slaOpts)]);
+  if(myMgmtToken !== _mgmtRenderToken) return; // superseded by a newer render cycle — never overwrite it
   if(!curSummary || !prevSummary){
     body.innerHTML = '<div class="mgmt-empty-note">تعذر تحميل بيانات كافية للمقارنة حاليًا.</div>';
     return;
@@ -4771,12 +4853,14 @@ async function mgmtRenderQuickCompare(){
   console.info('[COMPARISON COMPLETE]', { current, previous, ms: Math.round(performance.now()-t0) });
 }
 async function renderManagementTab(){
+  const myMgmtToken = ++_mgmtRenderToken; // new render cycle — invalidates any still-in-flight older one
   if(!availableMonths.length){
     // The month list may still be resolving in the background (e.g. right
     // after an All-Months cache-hit boot, which no longer blocks on it) —
     // wait for it here rather than silently leaving the panel empty with no
     // way to recover short of an unrelated action re-triggering this render.
     try{ await refreshMonthList(); }catch(e){ /* non-fatal — proceed with whatever is already known */ }
+    if(myMgmtToken !== _mgmtRenderToken) return; // superseded while awaiting the month list
     if(!availableMonths.length){
       const loadStateEl = document.getElementById('mgmtLoadState');
       if(loadStateEl){ document.getElementById('mgmtLoadStateText').textContent = 'تعذر العثور على أي شهر متاح — تحقق من الاتصال ثم أعد فتح هذا التبويب.'; loadStateEl.classList.remove('hidden'); }
@@ -4792,6 +4876,7 @@ async function renderManagementTab(){
   if(missing.length){
     if(loadStateEl){ document.getElementById('mgmtLoadStateText').textContent = `جاري تحميل بيانات ${missing.join('، ')}...`; loadStateEl.classList.remove('hidden'); }
     await mgmtEnsureMonthsLoaded(months);
+    if(myMgmtToken !== _mgmtRenderToken) return; // superseded while awaiting the fetch — a newer render cycle owns the DOM now
     if(loadStateEl) loadStateEl.classList.add('hidden');
   }
   mgmtPopulateEntityFilters(months);
@@ -4799,6 +4884,7 @@ async function renderManagementTab(){
   mgmtRenderAll(mgmtPeriodMonths());
 }
 async function mgmtOnPeriodChange(){
+  const myMgmtToken = ++_mgmtRenderToken; // new render cycle — invalidates any still-in-flight older one (e.g. a previous period's fetch)
   MGMT.periodFrom = document.getElementById('mgmtFromMonth').value;
   MGMT.periodTo = document.getElementById('mgmtToMonth').value;
   const months = mgmtPeriodMonths();
@@ -4807,6 +4893,7 @@ async function mgmtOnPeriodChange(){
   if(missing.length){
     if(loadStateEl){ document.getElementById('mgmtLoadStateText').textContent = `جاري تحميل بيانات ${missing.join('، ')}...`; loadStateEl.classList.remove('hidden'); }
     await mgmtEnsureMonthsLoaded(months);
+    if(myMgmtToken !== _mgmtRenderToken) return; // superseded while awaiting — a newer period change owns the DOM now
     if(loadStateEl) loadStateEl.classList.add('hidden');
   }
   mgmtPopulateEntityFilters(months);
@@ -4816,6 +4903,7 @@ async function mgmtOnPeriodChange(){
 function mgmtOnEntityFilterChange(){
   // Branch / Customer / Comparison type / table display / trend metric — NONE
   // of these ever fetch. They just re-render from MGMT.monthsData already in memory.
+  _mgmtRenderToken++; // a new branch/customer selection supersedes any still-in-flight branch-scoped fetch from the previous one
   MGMT.branch = document.getElementById('mgmtBranchFilter').value;
   MGMT.customer = document.getElementById('mgmtCustomerFilter').value;
   MGMT.comparisonType = document.getElementById('mgmtComparisonType').value;
@@ -4945,9 +5033,21 @@ function renderAllMonthsCompletenessWarning(summary){
   const missing = summary.missingSnapshotMonths || [];
   const skipped = summary.skippedMonths || [];
   const empty = summary.emptyMonths || [];
+  const staleSla = summary.staleSlaMonths || [];
+  const filterBlocked = summary.filteredFallbackBlockedMonths || [];
   const hasFailure = !!(summary.partial || summary.staleCacheFallback);
-  const hasEmptyOnly = !hasFailure && empty.length > 0;
-  if(!hasFailure && !hasEmptyOnly){
+  // Architectural fix follow-up: a normal/passive All-Months request no
+  // longer live-recomputes an incompatible month — it uses that month's
+  // last real snapshot as-is (see Code.gs getAllMonthsDashboardSummary,
+  // staleSlaMonths) so the total stays FAST and COMPLETE, but those specific
+  // months' SLA/attempt numbers may predate the current Settings. This is
+  // NOT the same situation as hasFailure (nothing is missing or skipped
+  // here — everything loaded), so it gets its own distinct, calmer notice
+  // rather than being folded into the "⚠ الإجمالي غير كامل" wording, which
+  // would be actively misleading (the total IS complete).
+  const hasStaleSla = !hasFailure && !!(summary.slaConfigStale && staleSla.length);
+  const hasEmptyOnly = !hasFailure && !hasStaleSla && empty.length > 0;
+  if(!hasFailure && !hasStaleSla && !hasEmptyOnly){
     if(el) el.remove();
     return;
   }
@@ -4963,10 +5063,14 @@ function renderAllMonthsCompletenessWarning(summary){
     if(summary.staleCacheFallback){
       parts.push(`تعذّر تحديث البيانات (${summary.staleCacheFallbackReason || 'خطأ غير معروف'}) — المعروض حاليًا نسخة محفوظة قديمة وغير مكتملة`);
     }
-    if(missing.length) parts.push(`لا يوجد ملخص محفوظ ولم تنجح محاولة الحساب المباشر لهذه الشهور: ${missing.map(monthDisplayName).join('، ')} (شغّل "تحديث ملخصات كل الشهور" من قائمة ARRIVE Dashboard في الشيت)`);
+    if(missing.length) parts.push(`لا يوجد ملخص محفوظ لهذه الشهور: ${missing.map(monthDisplayName).join('، ')} (شغّل buildMissingSummaries من محرر Apps Script)`);
     if(skipped.length) parts.push(`تم تخطي هذه الشهور بسبب الوقت أو خطأ: ${skipped.map(monthDisplayName).join('، ')} (أعد المحاولة)`);
+    if(filterBlocked.length) parts.push(`هذا الفلتر يحتاج قراءة مباشرة لبيانات هذه الشهور ولا تتوفر نسخة سريعة متوافقة معه حالياً: ${filterBlocked.map(monthDisplayName).join('، ')} — اضغط "تحديث الآن" إذا أردت حسابها مباشرة (قد يستغرق وقتاً أطول)، أو شغّل buildMissingSummaries لإعادة بناء الملخصات أولاً`);
     const message = 'الإجمالي المعروض لا يشمل كل الشهور. ' + parts.join(' | ');
     el.textContent = '⚠ ' + message;
+  } else if(hasStaleSla){
+    el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(242,183,91,.15);color:#B8842A;border:1px solid rgba(242,183,91,.4);font-size:13px;font-weight:600;';
+    el.textContent = `⚠ الإجمالي معروض بالكامل، لكن أرقام SLA لهذه الشهور مبنية بإعدادات SLA سابقة وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. شغّل buildMissingSummaries من محرر Apps Script لإعادة بنائها بإعدادات SLA الحالية، ثم أعد تحميل الصفحة.`;
   } else {
     // Purely informational — no problem, no incomplete data, nothing to retry.
     el.style.cssText = 'margin:8px 20px;padding:10px 14px;border-radius:8px;background:rgba(91,100,114,.10);color:#5B6472;border:1px solid rgba(91,100,114,.25);font-size:13px;font-weight:600;';

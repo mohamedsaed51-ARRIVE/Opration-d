@@ -2001,6 +2001,30 @@ function getAllMonthsDashboardSummary(params) {
   var dateTo = (params && params.dateTo) ? params.dateTo : "";
   var forceRefresh = debugMode || (params && (params.refresh === "1" || params.refresh === "true"));
 
+  // ROOT CAUSE FIX — architectural, not a timeout increase:
+  // Previously, ANY unfiltered All-Months request (forced or not — force
+  // only controlled whether the CacheService result-cache was bypassed)
+  // would live-aggregate every month whose snapshot was missing or
+  // incompatible, right there in the same HTTP request, budgeted up to
+  // ALL_MONTHS_TIME_BUDGET_MS = 260 seconds. Since a real per-branch SLA
+  // override makes every existing snapshot "incompatible" until rebuilt,
+  // this meant EVERY normal dashboard open/refresh (not just the first)
+  // could silently turn into a multi-minute live read of every month's raw
+  // sheet — exactly the "Dashboard takes forever to open" symptom, and no
+  // client-side timeout number can fix a problem that originates in what
+  // the backend itself unconditionally attempts.
+  // Now: only an EXPLICIT forced refresh (refresh=1 — e.g. the "تحديث الآن"
+  // button, or debug mode) may pay for that live aggregation. A normal/
+  // passive request (the default for every page open, every background
+  // auto-refresh, every plain month switch) stays fast no matter what: it
+  // uses whatever snapshot each month already has — even if stale/
+  // incompatible — and explicitly flags which months are stale, instead of
+  // ever reading a raw sheet inline. This never invents data: a stale
+  // snapshot is real, previously-computed data, just possibly built under
+  // an older SLA configuration.
+  var allowHeavyLiveFallback = forceRefresh;
+  var staleSlaMonths = []; // months shown from a snapshot that predates the CURRENT SLA/attempt config — real data, flagged as needing a rebuild
+
   // Cache key mirrors the single-month scheme exactly (same helper, same
   // "every calculation-affecting input" rule) — sheet slot is the sentinel.
   var cacheKey = "dash_v3_" + ALL_MONTHS_SENTINEL + "_g" + getSnapshotGenerationStamp_() + "_p_" + summaryHashKey(
@@ -2023,7 +2047,9 @@ function getAllMonthsDashboardSummary(params) {
   var missingSnapshotMonths = []; // months genuinely excluded: no snapshot AND live fallback also failed/was skipped
   var skippedMonths = []; // months genuinely excluded: time budget reached or an error occurred during live fallback
   var perMonthSummaries = [];
-  var monthSources = {}; // month -> 'snapshot' | 'live-fallback-missing-snapshot' | 'live-fallback-incompatible' | 'live-filtered'
+  var monthSources = {}; // month -> 'snapshot' | 'live-fallback-missing-snapshot' | 'live-fallback-incompatible' | 'live-filtered' | 'stale-snapshot-sla-mismatch' | 'filtered-cube'
+  var liveFallbackTotalMs = 0; // timing diagnostic: total time actually spent in the expensive raw-sheet live-fallback path this request
+  var filteredFallbackBlockedMonths = []; // FILTERED PATH months with no compatible cube, excluded because this was a normal/passive request (not an explicit refresh=1)
 
   // Shared by BOTH the "missing snapshot" and "incompatible snapshot" cases
   // (Rule 2 — unify the logic): never exclude a month just because its
@@ -2038,15 +2064,18 @@ function getAllMonthsDashboardSummary(params) {
       console.log("[ALL MONTHS LIVE FALLBACK SKIPPED — TIME BUDGET] " + JSON.stringify({ month: month, reason: reason, elapsedMs: elapsedNow }));
       return { ok: false, dueToBudget: true };
     }
+    var fbStart = new Date().getTime();
     var monthParamsFb = {};
     for (var pkFb in params) { if (params.hasOwnProperty(pkFb)) monthParamsFb[pkFb] = params[pkFb]; }
     monthParamsFb.sheet = month;
     var monthSummaryFb;
     try { monthSummaryFb = getMonthDashboardSummary(month, monthParamsFb); }
     catch (eFb) {
+      liveFallbackTotalMs += (new Date().getTime() - fbStart);
       console.log("[ALL MONTHS LIVE FALLBACK ERROR] " + JSON.stringify({ month: month, reason: reason, error: String(eFb) }));
       return { ok: false, dueToBudget: false };
     }
+    liveFallbackTotalMs += (new Date().getTime() - fbStart);
     if (!monthSummaryFb || monthSummaryFb.success === false) {
       console.log("[ALL MONTHS LIVE FALLBACK FAILED] " + JSON.stringify({ month: month, reason: reason, error: monthSummaryFb && monthSummaryFb.error }));
       return { ok: false, dueToBudget: false };
@@ -2107,14 +2136,35 @@ function getAllMonthsDashboardSummary(params) {
           continue;
         }
         // Incompatible: never silently use this snapshot's frozen
-        // attempt/SLA classification — fall through to the SAME unified
-        // live-fallback attempt used for a missing snapshot (Rule 2).
+        // attempt/SLA classification as if it were current — but per the
+        // architectural fix above, a normal/passive request still uses it
+        // AS-IS (real, previously-computed data) rather than paying for a
+        // live read, and flags it via staleSlaMonths so the frontend can
+        // show a clear "needs rebuild" notice instead of silently serving
+        // outdated numbers.
         console.log("[ALL MONTHS SNAPSHOT INCOMPATIBLE] " + JSON.stringify({ month: month, snapshotConfig: snapBc || null, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
+        if (!allowHeavyLiveFallback) {
+          perMonthSummaries.push(snap);
+          includedMonths.push(month);
+          monthSources[month] = "stale-snapshot-sla-mismatch";
+          staleSlaMonths.push(month);
+          continue;
+        }
       }
 
-      // Reached for EITHER "no snapshot at all" OR "incompatible snapshot" —
+      // Reached for EITHER "no snapshot at all" OR "incompatible snapshot,
+      // and this request explicitly opted into live fallback via refresh=1".
+      // A normal/passive request with NO snapshot at all simply excludes the
+      // month (missingSnapshotMonths) rather than reading its raw sheet —
+      // the same "always fast, flag what's missing" principle as above.
+      if (!snap && !allowHeavyLiveFallback) {
+        missingSnapshotMonths.push(month);
+        continue;
+      }
       // Rule 1/Rule 2: always attempt live aggregation before excluding the
-      // month. Only a genuine failure (or time budget) excludes it.
+      // month — but ONLY reached here now when the request explicitly
+      // allowed it (allowHeavyLiveFallback). Only a genuine failure (or time
+      // budget) excludes it.
       var fbReason = snap ? "incompatible" : "missing-snapshot";
       var fb = tryLiveFallbackForMonth_(month, fbReason);
       if (!fb.ok) {
@@ -2127,14 +2177,50 @@ function getAllMonthsDashboardSummary(params) {
       includedMonths.push(month);
       monthSources[month] = "live-fallback-" + fbReason;
     } else {
-      // FILTERED PATH: persisted snapshots are always unfiltered, so a
-      // filtered All-Months view needs each month's OWN filtered
-      // aggregation — the exact same live-or-CacheService-cached path a
-      // single-month filtered request already uses (still Compact Summary
-      // only). Bounded by a wall-clock budget: never stacks unlimited
-      // 100k-row live computations in one request.
+      // FILTERED PATH — same "fast path first, gate the heavy path" rule as
+      // the unfiltered branch above. A compatible filter cube (built into
+      // every snapshot) answers instantly with NO raw-sheet read at all —
+      // that is always attempted first here, exactly like
+      // getMonthDashboardSummary does internally for a single-month filtered
+      // request. Only when no compatible cube exists (missing snapshot, or
+      // its cube predates the current SLA/attempt settings — the identical
+      // situation the unfiltered path calls "stale/incompatible") does this
+      // ever need a genuine raw-sheet read — and per the SAME rule as the
+      // unfiltered path, that heavy read for a given month is only allowed
+      // when this request explicitly opted in via refresh=1
+      // (allowHeavyLiveFallback). Otherwise applying any server filter
+      // while on All Months could silently read all 12 months' raw sheets,
+      // which is exactly the scenario this fix closes. Bounded by the same
+      // wall-clock budget as before either way.
       var elapsed = new Date().getTime() - t0;
       if (elapsed > ALL_MONTHS_TIME_BUDGET_MS) { skippedMonths.push(month); continue; }
+
+      var cubeResultAM = getMonthDashboardSummaryFromCube_(month, requestedFilters, dateFrom, dateTo, attemptT1, attemptT2, slaTargetDefault, branchSlaTargets);
+      if (cubeResultAM) {
+        perMonthSummaries.push(cubeResultAM);
+        includedMonths.push(month);
+        monthSources[month] = "filtered-cube";
+        console.log("[ALL MONTHS PER-MONTH] " + JSON.stringify({
+          month: month, source: "filtered-cube", rowCount: cubeResultAM.dq ? cubeResultAM.dq.totalRows : null,
+          total: cubeResultAM.kpis ? cubeResultAM.kpis.total : null, delivered: cubeResultAM.kpis ? cubeResultAM.kpis.delivered : null,
+          returned: cubeResultAM.kpis ? cubeResultAM.kpis.returned : null, rejected: cubeResultAM.kpis ? cubeResultAM.kpis.rejected : null,
+          pending: cubeResultAM.kpis ? cubeResultAM.kpis.pending : null, unknown: cubeResultAM.kpis ? cubeResultAM.kpis.unknown : null,
+          fromCube: true
+        }));
+        continue;
+      }
+
+      if (!allowHeavyLiveFallback) {
+        // No compatible cube for this month, and this is a normal/passive
+        // filtered request — never silently pay for a raw-sheet read here.
+        // Excluded and explicitly flagged (never presented as if the total
+        // were complete) so the frontend can show a clear, honest message
+        // instead of either freezing the request or inventing a number.
+        filteredFallbackBlockedMonths.push(month);
+        console.log("[ALL MONTHS FILTERED — HEAVY FALLBACK BLOCKED]" + JSON.stringify({ month: month, reason: "no-compatible-cube-and-not-forced" }));
+        continue;
+      }
+
       var monthParams = {};
       for (var pk in params) { if (params.hasOwnProperty(pk)) monthParams[pk] = params[pk]; }
       monthParams.sheet = month;
@@ -2165,7 +2251,10 @@ function getAllMonthsDashboardSummary(params) {
       dataQuality: { totalRows:0, distinctAwb:0, dupAwbCount:0, invalidDates:0, missingBranch:0, missingClient:0, missingProvince:0, unknownStatusCount:0, unknownStatusList:[], unknownStatusBreakdown:[], missingSlaData:0, negativeCod:0, duplicateRecords:[], duplicateRecordsTruncated:false },
       facets: { provinces:[], branches:[], clients:[], statuses:[], areasAll:[], areasByProvince:{} },
       colMap: {}, allMonths: true, includedMonths: [], emptyMonths: emptyMonths,
-      missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths, partial: !!(skippedMonths.length || missingSnapshotMonths.length),
+      missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths,
+      filteredFallbackBlockedMonths: filteredFallbackBlockedMonths,
+      partial: !!(skippedMonths.length || missingSnapshotMonths.length || filteredFallbackBlockedMonths.length),
+      staleSlaMonths: staleSlaMonths, slaConfigStale: staleSlaMonths.length > 0,
       monthSources: monthSources,
       generatedAt: new Date().toISOString()
     };
@@ -2215,7 +2304,16 @@ function getAllMonthsDashboardSummary(params) {
     allMonths: true,
     includedMonths: includedMonths, emptyMonths: emptyMonths,
     missingSnapshotMonths: missingSnapshotMonths, skippedMonths: skippedMonths,
-    partial: !!(skippedMonths.length || missingSnapshotMonths.length),
+    filteredFallbackBlockedMonths: filteredFallbackBlockedMonths,
+    partial: !!(skippedMonths.length || missingSnapshotMonths.length || filteredFallbackBlockedMonths.length),
+    // Batch 1 architectural fix: which months (if any) are shown from a
+    // snapshot that predates the CURRENT SLA/attempt configuration. Real,
+    // previously-computed data — never invented — but the frontend must
+    // show a clear "needs rebuild" notice rather than presenting it as
+    // fully current. Empty unless a normal/passive request found an
+    // incompatible snapshot (allowHeavyLiveFallback === false case).
+    staleSlaMonths: staleSlaMonths, slaConfigStale: staleSlaMonths.length > 0,
+    allowedHeavyLiveFallback: allowHeavyLiveFallback,
     monthSources: monthSources,
     cached: false
   };
@@ -2226,15 +2324,26 @@ function getAllMonthsDashboardSummary(params) {
   } catch (cacheErr) { /* non-fatal */ }
 
   var tTotal = new Date().getTime() - t0;
+  // Per-phase timing diagnostics (explicitly requested): snapshotMs covers
+  // months served from ANY snapshot (fresh or stale) plus fast exclusions —
+  // essentially free, no raw-sheet reads. liveFallbackMs isolates time spent
+  // ONLY inside tryLiveFallbackForMonth_ (the expensive raw-sheet path),
+  // which should be 0 for every normal/passive request after this fix, and
+  // only non-zero for an explicit forced refresh.
   console.log("[TIMING] " + JSON.stringify({
     requestId: params.__requestId || null, sheet: ALL_MONTHS_SENTINEL, totalMs: tTotal,
     includedMonths: includedMonths.length, missingSnapshotMonths: missingSnapshotMonths.length,
-    skippedMonths: skippedMonths.length, filtered: hasServerFilters
+    skippedMonths: skippedMonths.length, staleSlaMonths: staleSlaMonths.length,
+    filteredFallbackBlockedMonths: filteredFallbackBlockedMonths.length,
+    allowHeavyLiveFallback: allowHeavyLiveFallback, liveFallbackMs: liveFallbackTotalMs,
+    filtered: hasServerFilters
   }));
   if (debugMode) {
     result.debug = {
       totalMs: tTotal, includedMonths: includedMonths, missingSnapshotMonths: missingSnapshotMonths,
-      skippedMonths: skippedMonths, filtered: hasServerFilters
+      skippedMonths: skippedMonths, staleSlaMonths: staleSlaMonths, filteredFallbackBlockedMonths: filteredFallbackBlockedMonths,
+      allowHeavyLiveFallback: allowHeavyLiveFallback,
+      liveFallbackMs: liveFallbackTotalMs, filtered: hasServerFilters
     };
   }
 
