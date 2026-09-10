@@ -1,0 +1,279 @@
+diff --git a/Code.gs b/Code.gs
+index 841f7e1..5028be3 100644
+--- a/Code.gs
++++ b/Code.gs
+@@ -3531,6 +3531,274 @@ function diagnoseJuneStatuses() {
+   return diagnoseStatusBreakdown("June");
+ }
+ 
++// ============================================================
++// DIAGNOSTIC ONLY — diagnoseUnclassified(month)
++// ============================================================
++// Investigates the dashboard's "غير مصنف" (Unclassified) KPI card
++// (renderKpiCards' k.unknown, index.html). Read-only: adds this ONE new
++// function and touches nothing else — no existing function, mapping,
++// cache, snapshot, SLA, or UI code is modified.
++//
++// Reuses the exact same helpers getMonthDashboardSummary itself uses
++// (summaryDetectColumnMap, summaryGetField, summaryNormText,
++// summaryClassifyStatus, summaryNormalizeArabicForMatch_, summaryParseDate,
++// summaryRowIsAllEmpty) and replicates its exact Pass-1 row-validity and
++// AWB de-duplication rule (skip fully-blank rows, skip rows with no AWB,
++// per AWB keep whichever occurrence has the latest Last Status Date) — so
++// every count below is directly comparable to what the dashboard itself
++// computes, never a re-derived approximation.
++//
++// CONFIRMED BY READING THE CODE (not assumed): the "غير مصنف" KPI card is
++// kpis.unknown, which getMonthDashboardSummary's aggregation pass
++// (summaryAccumulateRow -> topAcc) computes over allDedupRows — i.e. AFTER
++// AWB de-duplication. The separate Data Quality panel's "حالات غير مصنفة"
++// figure (dataQuality.unknownStatusCount, index.html ~line 5691) is counted
++// during Pass 1, over every raw row that merely has a valid AWB — i.e.
++// BEFORE de-duplication. These are two different quantities whenever any
++// duplicate-AWB row happens to be unclassified. This function computes and
++// reports BOTH explicitly, so which one is "the" number on screen (e.g.
++// 36,377) is never ambiguous.
++function diagnoseUnclassified(month) {
++  var report = { success: false };
++  if (!month) { report.error = "month مطلوب، مثال: diagnoseUnclassified('August')"; Logger.log(report.error); return report; }
++  if (!MONTH_SOURCE.hasOwnProperty(month)) { report.error = "شهر غير معروف: " + month; Logger.log(report.error); return report; }
++
++  var quarter = MONTH_SOURCE[month];
++  var spreadsheetId = SPREADSHEET_IDS[quarter];
++  var ss;
++  try { ss = SpreadsheetApp.openById(spreadsheetId); }
++  catch (err) { report.error = "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err); Logger.log(report.error); return report; }
++
++  var sheet = ss.getSheetByName(month);
++  if (!sheet) { report.error = "الشيت غير موجود: " + month + " داخل " + quarter; Logger.log(report.error); return report; }
++
++  var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn();
++  if (lastRow < 2 || lastColumn === 0) {
++    report.success = true; report.empty = true; report.note = "لا توجد بيانات في هذا الشيت.";
++    Logger.log(report.note);
++    return report;
++  }
++
++  // Same single read getMonthDashboardSummary uses — never a separate/
++  // different range, so this can never see different raw values than the
++  // real aggregation sees.
++  var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
++  var headers = values[0];
++  var dataRows = values.slice(1);
++
++  var colMap = summaryDetectColumnMap(headers);
++  var idx = {};
++  var mappedFields = Object.keys(colMap);
++  for (var mf = 0; mf < mappedFields.length; mf++) idx[mappedFields[mf]] = headers.indexOf(colMap[mappedFields[mf]]);
++
++  // ---- PASS 1: exact same row-validity + AWB de-dup rule getMonthDashboardSummary uses ----
++  var fullyBlankRowCount = 0, blankAwbRowCount = 0, dqTotalRows = 0;
++  var awbMap = {};
++  var seenAwbCount = {};
++  // PRE-DEDUP unknown breakdown — every valid-AWB row, duplicates included —
++  // for direct comparison against dataQuality.unknownStatusCount/unknownStatusBreakdown.
++  var preDedupUnknownBreakdown = {};
++  var preDedupUnknownCount = 0;
++
++  for (var ri = 0; ri < dataRows.length; ri++) {
++    var row = dataRows[ri];
++    if (summaryRowIsAllEmpty(row)) { fullyBlankRowCount++; continue; }
++    var awb = summaryNormText(summaryGetField(row, idx, "awb"));
++    if (!awb) { blankAwbRowCount++; continue; }
++    dqTotalRows++;
++    seenAwbCount[awb] = (seenAwbCount[awb] || 0) + 1;
++
++    var statusRawExact = summaryGetField(row, idx, "status"); // literally the cell value, before any trimming
++    var status = summaryNormText(statusRawExact); // == the `status` field production stores on the row record
++    var bucket = summaryClassifyStatus(status);
++    var lastStatus = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
++
++    if (bucket === "unknown") {
++      preDedupUnknownCount++;
++      var preKey = status || "(فارغ)";
++      if (!preDedupUnknownBreakdown[preKey]) preDedupUnknownBreakdown[preKey] = { count: 0, rawExactSamples: {} };
++      preDedupUnknownBreakdown[preKey].count++;
++      var exactKeyPre = (statusRawExact === null || statusRawExact === undefined) ? "(null)" : JSON.stringify(statusRawExact);
++      preDedupUnknownBreakdown[preKey].rawExactSamples[exactKeyPre] = (preDedupUnknownBreakdown[preKey].rawExactSamples[exactKeyPre] || 0) + 1;
++    }
++
++    var rec = { awb: awb, status: status, statusRawExact: statusRawExact, bucket: bucket, lastStatus: lastStatus };
++
++    // Exact same winner rule as getMonthDashboardSummary: keep whichever
++    // occurrence has the latest (or equal) Last Status Date.
++    if (awbMap.hasOwnProperty(awb)) {
++      var existingRec = awbMap[awb];
++      var et = existingRec.lastStatus ? existingRec.lastStatus.getTime() : -Infinity;
++      var rt = lastStatus ? lastStatus.getTime() : -Infinity;
++      if (rt >= et) awbMap[awb] = rec;
++    } else {
++      awbMap[awb] = rec;
++    }
++  }
++
++  // ---- PASS 2: POST-DEDUP classification — this is exactly what feeds kpis.unknown (the "غير مصنف" KPI card) ----
++  var postDedupRows = [];
++  for (var awbKey in awbMap) { if (awbMap.hasOwnProperty(awbKey)) postDedupRows.push(awbMap[awbKey]); }
++  var grandTotal = postDedupRows.length; // == kpis.total == the "إجمالي الشحنات" KPI card
++
++  var bucketCounts = { delivered: 0, returned: 0, rejected: 0, pending: 0, unknown: 0 };
++  var postDedupUnknownBreakdown = {};
++  for (var pi = 0; pi < postDedupRows.length; pi++) {
++    var pr = postDedupRows[pi];
++    bucketCounts[pr.bucket]++;
++    if (pr.bucket === "unknown") {
++      var key = pr.status || "(فارغ)";
++      if (!postDedupUnknownBreakdown[key]) postDedupUnknownBreakdown[key] = { count: 0, rawExactSamples: {} };
++      postDedupUnknownBreakdown[key].count++;
++      var exactKeyPost = (pr.statusRawExact === null || pr.statusRawExact === undefined) ? "(null)" : JSON.stringify(pr.statusRawExact);
++      postDedupUnknownBreakdown[key].rawExactSamples[exactKeyPost] = (postDedupUnknownBreakdown[key].rawExactSamples[exactKeyPost] || 0) + 1;
++    }
++  }
++
++  // ---- Known-bucket normalized/loose lookups, used ONLY to flag possible
++  // near-misses in the Reason column below — never used to classify anything. ----
++  var mappedNormalizedValues = {}; // normalized form -> bucket
++  var mappedLooseValues = {};      // normalized form with ALL whitespace stripped -> bucket
++  function looseKey(s) { return summaryNormalizeArabicForMatch_(summaryNormText(s)).replace(/\s+/g, ""); }
++  for (var bkt in SUMMARY_STATUS_MAP) {
++    for (var v = 0; v < SUMMARY_STATUS_MAP[bkt].length; v++) {
++      var mapped = SUMMARY_STATUS_MAP[bkt][v];
++      mappedNormalizedValues[summaryNormalizeArabicForMatch_(summaryNormText(mapped))] = bkt;
++      mappedLooseValues[looseKey(mapped)] = bkt;
++    }
++  }
++
++  function reasonFor(status, rawExactSamples) {
++    if (!status) return "Status فارغة/null بعد التنظيف (summaryNormText) — لا تدخل أي تصنيف";
++    var norm = summaryNormalizeArabicForMatch_(summaryNormText(status));
++    var loose = looseKey(status);
++    if (mappedLooseValues.hasOwnProperty(loose) && !mappedNormalizedValues.hasOwnProperty(norm)) {
++      return "قريبة جداً من قيمة مُدرجة فعلاً في SUMMARY_STATUS_MAP لتصنيف \"" + mappedLooseValues[loose] + "\" لكنها لا تُطابقها تماماً بعد summaryNormalizeArabicForMatch_ الحالية (فرق مسافات/Unicode لم يُلتقط) — تستحق مراجعة كـ variant محتمل، وليست بالضرورة Unknown حقيقية";
++    }
++    var rawVariantCount = rawExactSamples ? Object.keys(rawExactSamples).length : 1;
++    if (rawVariantCount > 1) {
++      return "Not found in SUMMARY_STATUS_MAP (قيمة غير معروفة تماماً، ولها أكثر من صيغة خام واحدة تصل لنفس القيمة بعد summaryNormText)";
++    }
++    return "Not found in SUMMARY_STATUS_MAP — لا يوجد أي bucket يحتوي هذه القيمة";
++  }
++
++  function toSortedBreakdownArray(breakdownObj, denominatorTotal) {
++    var out = [];
++    for (var k in breakdownObj) {
++      if (!breakdownObj.hasOwnProperty(k)) continue;
++      var entry = breakdownObj[k];
++      out.push({
++        status: k,
++        normalizedStatus: summaryNormalizeArabicForMatch_(summaryNormText(k)),
++        count: entry.count,
++        pctOfTotal: denominatorTotal > 0 ? (entry.count / denominatorTotal * 100) : null,
++        currentClassification: "UNKNOWN",
++        reason: reasonFor(k, entry.rawExactSamples),
++        rawExactVariants: Object.keys(entry.rawExactSamples || {})
++      });
++    }
++    out.sort(function (a, b) { return b.count - a.count; });
++    return out;
++  }
++
++  var postDedupBreakdownArr = toSortedBreakdownArray(postDedupUnknownBreakdown, grandTotal);
++  var preDedupBreakdownArr = toSortedBreakdownArray(preDedupUnknownBreakdown, dqTotalRows);
++
++  var distinctAwbCount = Object.keys(seenAwbCount).length;
++  var dupAwbCount = 0;
++  for (var ak in seenAwbCount) { if (seenAwbCount.hasOwnProperty(ak) && seenAwbCount[ak] > 1) dupAwbCount++; }
++
++  var sumOfAllBuckets = bucketCounts.delivered + bucketCounts.returned + bucketCounts.rejected + bucketCounts.pending + bucketCounts.unknown;
++
++  report = {
++    success: true,
++    month: month,
++    source: quarter,
++    detectedStatusColumnHeader: colMap.status || null,
++    detectedStatusColumnIndex1Based: headers.indexOf(colMap.status) >= 0 ? (headers.indexOf(colMap.status) + 1) : null,
++
++    grandTotal_postDedup: grandTotal, // == kpis.total == "إجمالي الشحنات" KPI card
++    validAwbRows_preDedup: dqTotalRows, // == dataQuality.totalRows, the Data Quality panel's own base
++    fullyBlankRows: fullyBlankRowCount,
++    blankAwbRows: blankAwbRowCount,
++    distinctAwbCount: distinctAwbCount,
++    duplicateAwbCount: dupAwbCount,
++
++    // B) Unclassified breakdown — POST-DEDUP: this is exactly the "غير
++    // مصنف" KPI card's own number (e.g. 36,377).
++    unclassifiedBreakdown_postDedup: postDedupBreakdownArr,
++    totalUnclassified_postDedup: bucketCounts.unknown,
++
++    // Same breakdown PRE-DEDUP, for direct comparison against the Data
++    // Quality panel's own unknownStatusCount/unknownStatusBreakdown.
++    unclassifiedBreakdown_preDedup: preDedupBreakdownArr,
++    totalUnclassified_preDedup: preDedupUnknownCount,
++    preDedupEqualsPostDedupUnknownCount: preDedupUnknownCount === bucketCounts.unknown,
++
++    // C) Reconciliation (POST-DEDUP — matches what the dashboard KPI cards show)
++    reconciliation: {
++      grandTotal: grandTotal,
++      delivered: bucketCounts.delivered,
++      returned: bucketCounts.returned,
++      rejected: bucketCounts.rejected,
++      pending: bucketCounts.pending,
++      unknownUnclassified: bucketCounts.unknown,
++      sumOfAllBuckets: sumOfAllBuckets,
++      matchesGrandTotal: sumOfAllBuckets === grandTotal,
++      excludedBeforeClassification: {
++        fullyBlankRows: fullyBlankRowCount,
++        blankAwbRows: blankAwbRowCount,
++        duplicateExtraRows: dqTotalRows - distinctAwbCount
++      }
++    },
++
++    top20_postDedup: postDedupBreakdownArr.slice(0, 20),
++    currentStatusMap: SUMMARY_STATUS_MAP,
++    generatedAt: new Date().toISOString()
++  };
++
++  // ---- Human-readable log, in the shape requested ----
++  var lines = [];
++  lines.push("========================================================");
++  lines.push("UNCLASSIFIED STATUS BREAKDOWN — " + month + " (POST-DEDUP — هذا هو نفس رقم بطاقة \"غير مصنف\")");
++  lines.push("========================================================");
++  postDedupBreakdownArr.forEach(function (u, i) {
++    lines.push("");
++    lines.push((i + 1) + ".");
++    lines.push("Raw Status: " + JSON.stringify(u.status));
++    lines.push("Normalized Status: " + JSON.stringify(u.normalizedStatus));
++    lines.push("Count: " + u.count);
++    lines.push("% of Total: " + (u.pctOfTotal !== null ? u.pctOfTotal.toFixed(2) + "%" : "-"));
++    lines.push("Current Classification: " + u.currentClassification);
++    lines.push("Reason: " + u.reason);
++    if (u.rawExactVariants.length > 1) lines.push("Raw exact cell variants landing here: " + u.rawExactVariants.join(" | "));
++  });
++  lines.push("");
++  lines.push("TOTAL UNCLASSIFIED (POST-DEDUP): " + bucketCounts.unknown);
++  lines.push("");
++  lines.push("---- RECONCILIATION (POST-DEDUP) ----");
++  lines.push("Grand Total: " + grandTotal);
++  lines.push("Delivered: " + bucketCounts.delivered);
++  lines.push("Returned: " + bucketCounts.returned);
++  lines.push("Rejected: " + bucketCounts.rejected);
++  lines.push("In Progress (Pending): " + bucketCounts.pending);
++  lines.push("Unknown / Unclassified: " + bucketCounts.unknown);
++  lines.push("Sum of all buckets: " + sumOfAllBuckets + (report.reconciliation.matchesGrandTotal ? " == Grand Total (matches)" : " != Grand Total (MISMATCH — يحتاج مراجعة)"));
++  lines.push("Excluded BEFORE classification (غير داخلة في Grand Total أعلاه): fullyBlankRows=" + fullyBlankRowCount + ", blankAwbRows=" + blankAwbRowCount + ", duplicateExtraRows=" + (dqTotalRows - distinctAwbCount));
++  lines.push("");
++  lines.push("---- PRE-DEDUP COMPARISON (هذا يطابق dataQuality.unknownStatusCount في لوحة Data Quality، وليس بطاقة KPI) ----");
++  lines.push("Valid-AWB raw rows (pre-dedup): " + dqTotalRows);
++  lines.push("Unknown count (pre-dedup): " + preDedupUnknownCount);
++  lines.push("Unknown count (post-dedup, = بطاقة \"غير مصنف\"): " + bucketCounts.unknown);
++  lines.push(report.preDedupEqualsPostDedupUnknownCount
++    ? "الرقمان متطابقان لهذا الشهر — لا توجد AWB مكررة تُزيح رقم Unknown."
++    : "الرقمان مختلفان — رقم بطاقة KPI محسوب بعد إزالة تكرار AWB (يبقى صف واحد لكل AWB وهو الأحدث بتاريخ Last Status)، بينما رقم لوحة Data Quality محسوب على كل صف خام قبل الإزالة. الفرق بينهما مصدره صفوف AWB المكررة.");
++  lines.push("========================================================");
++
++  Logger.log(lines.join("\n"));
++  return report;
++}
++
+ // ============================================================
+ // 9. JSON RESPONSE
+ 
