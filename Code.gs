@@ -2946,11 +2946,226 @@ function buildMissingMonthSnapshots() {
   return { success: true, results: out };
 }
 
+// ============================================================
+// RESUMABLE / CHUNKED SNAPSHOT BATCH BUILD (admin/backend only)
+// ============================================================
+// Fixes: buildAllDashboardSummaries() loops all 12 MONTH_ORDER months and
+// calls buildAndSaveMonthSummary() for every one of them inside a SINGLE
+// Apps Script execution. Each month's heavy raw-row aggregation takes
+// roughly 20-30s, so 12 months can approach or exceed Apps Script's
+// execution time ceiling ("Exceeded maximum execution time"), especially
+// on a slower month or with any added overhead.
+//
+// buildAndSaveMonthSummary()/buildQuarterSummaries()/buildAllDashboardSummaries()
+// are all left completely UNCHANGED below -- this is a new, separate,
+// opt-in entry point (buildNextSummaryBatch()) that processes only as many
+// months as safely fit within one execution's time budget, persists
+// exactly which months are already done via PropertiesService, and is
+// designed to be run repeatedly (manually, from the Apps Script editor)
+// until its report says allMonthsComplete: true. No time-based trigger is
+// installed anywhere -- running it again is a manual action, same as
+// buildAllDashboardSummaries()/buildMissingMonthSnapshots() already are.
+var SNAPSHOT_BUILD_PROGRESS_PROPERTY_KEY = "SNAPSHOT_BUILD_PROGRESS_JSON";
+// Safety time budget PER EXECUTION of buildNextSummaryBatch(), checked only
+// BETWEEN months (never used to abort a month mid-build) -- comfortably
+// below Apps Script's ~6-minute ceiling for a manually-run/simple-trigger
+// execution, leaving headroom for the per-month ~20-30s builds already in
+// flight plus logging/PropertiesService overhead after the loop ends.
+var SNAPSHOT_BUILD_TIME_BUDGET_MS = 240000; // 4 minutes
+
+function getSnapshotBuildProgress_() {
+  var fallback = { completed: {}, failed: {}, startedAt: null, lastUpdatedAt: null };
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(SNAPSHOT_BUILD_PROGRESS_PROPERTY_KEY);
+    if (!raw) return fallback;
+    var parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return fallback;
+    return {
+      completed: (parsed.completed && typeof parsed.completed === "object") ? parsed.completed : {},
+      failed: (parsed.failed && typeof parsed.failed === "object") ? parsed.failed : {},
+      startedAt: parsed.startedAt || null,
+      lastUpdatedAt: parsed.lastUpdatedAt || null
+    };
+  } catch (e) {
+    console.log("[SNAPSHOT BUILD PROGRESS READ FAILED] " + String(e && e.message ? e.message : e));
+    return fallback;
+  }
+}
+
+function saveSnapshotBuildProgress_(progress) {
+  try {
+    PropertiesService.getScriptProperties().setProperty(SNAPSHOT_BUILD_PROGRESS_PROPERTY_KEY, JSON.stringify(progress));
+    return true;
+  } catch (e) {
+    console.log("[SNAPSHOT BUILD PROGRESS SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return false;
+  }
+}
+
+// Intentionally restarts the resumable batch from January — does NOT touch
+// any saved DASHBOARD_SUMMARY snapshot, SLA settings, cache, or anything
+// else. Only clears buildNextSummaryBatch()'s own progress bookkeeping.
+function resetSummaryBuildProgress() {
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(SNAPSHOT_BUILD_PROGRESS_PROPERTY_KEY);
+    var msg = "تم مسح تقدم البناء التراكمي — سيبدأ buildNextSummaryBatch() القادم من " + MONTH_ORDER[0] + ".";
+    Logger.log(msg);
+    return { success: true, message: msg };
+  } catch (e) {
+    var errMsg = "فشل مسح تقدم البناء: " + String(e && e.message ? e.message : e);
+    Logger.log(errMsg);
+    return { success: false, error: errMsg };
+  }
+}
+
+// A month already marked "completed" by a previous buildNextSummaryBatch()
+// run is only actually SKIPPED if its saved snapshot is still compatible
+// with the CURRENT persisted SLA settings — the exact same compatibility
+// rule buildMissingMonthSnapshots() already applies above. This means
+// re-running the batch after changing SLA settings in Settings correctly
+// rebuilds every month again instead of trusting a stale "already done"
+// flag from before the SLA change. This is a lightweight snapshot-metadata
+// read, not a raw-row aggregation, so checking it for every already-
+// completed month on every run is cheap.
+function snapshotIsCurrentlyCompatible_(month, persistedSla) {
+  var existing;
+  try { existing = getSavedMonthSummary_(month); } catch (eRead) { existing = null; }
+  if (!existing) return false;
+  if (existing.empty || existing.noData) return true;
+  var bc = existing.filterCube && existing.filterCube.buildConfig;
+  return !!bc &&
+    Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
+    Number(bc.slaTargetDefault) === Number(persistedSla.slaTargetDefault) &&
+    summaryBranchTargetsEqual_(bc.branchSlaTargets, persistedSla.branchSlaTargets);
+}
+
+// THE function to run repeatedly (manually, from the Apps Script editor)
+// until the returned/logged report says allMonthsComplete: true. Safe to
+// run as many times as needed; already-completed+compatible months are
+// never rebuilt.
+function buildNextSummaryBatch() {
+  var started = new Date().getTime();
+  var progress = getSnapshotBuildProgress_();
+  if (!progress.startedAt) progress.startedAt = new Date().toISOString();
+
+  var persistedSla = getPersistedSlaSettings_();
+
+  var attempted = [], completedThisRun = [], skipped = [], failed = [];
+  // Caches each month's compatibility result the moment it's actually
+  // computed (in the skip-check below, or implicitly known after a fresh
+  // build this run), so the final completion scan can reuse it instead of
+  // blindly recomputing snapshotIsCurrentlyCompatible_ for every month a
+  // second time — while still always computing it fresh for any month the
+  // main loop never reached this run (e.g. after an early budget stop).
+  var compatCache = {};
+
+  for (var i = 0; i < MONTH_ORDER.length; i++) {
+    var month = MONTH_ORDER[i];
+
+    if (progress.completed.hasOwnProperty(month)) {
+      var isCompatNow = snapshotIsCurrentlyCompatible_(month, persistedSla);
+      compatCache[month] = isCompatNow;
+      if (isCompatNow) {
+        skipped.push(month);
+        continue;
+      }
+    }
+
+    // Checked BETWEEN months only — never aborts a month already in
+    // progress. Once the budget is spent, stop starting new months and let
+    // the next manual run pick up from here.
+    var elapsed = new Date().getTime() - started;
+    if (elapsed > SNAPSHOT_BUILD_TIME_BUDGET_MS) break;
+
+    attempted.push(month);
+    try {
+      var result = buildAndSaveMonthSummary(month); // UNCHANGED — same getPersistedSlaSettings_ -> getMonthDashboardSummary -> saveMonthSummary_ -> bumpSnapshotGenerationStamp_ chain as every other caller
+      if (result && result.success) {
+        progress.completed[month] = {
+          generatedAt: result.generatedAt, totalRows: result.totalRows,
+          grandTotal: result.grandTotal, durationMs: result.durationMs
+        };
+        if (progress.failed.hasOwnProperty(month)) delete progress.failed[month];
+        completedThisRun.push(month);
+        compatCache[month] = true; // just built against persistedSla — compatible with it by construction
+      } else {
+        var errMsg = (result && result.error) ? result.error : "فشل غير معروف (buildAndSaveMonthSummary أعاد success:false بدون رسالة خطأ)";
+        progress.failed[month] = { error: errMsg, attemptedAt: new Date().toISOString() };
+        failed.push({ month: month, error: errMsg });
+      }
+    } catch (err) {
+      var errMsg2 = String(err && err.message ? err.message : err);
+      progress.failed[month] = { error: errMsg2, attemptedAt: new Date().toISOString() };
+      failed.push({ month: month, error: errMsg2 });
+    }
+    // Persisted after EVERY month, not just at the end of the loop — so a
+    // failure on a later month, or the execution simply being killed by
+    // the platform, can never lose progress already made this run.
+    progress.lastUpdatedAt = new Date().toISOString();
+    saveSnapshotBuildProgress_(progress);
+  }
+
+  // BUG FIX: a month must only count as complete when it is BOTH recorded
+  // in progress.completed AND its saved snapshot is STILL compatible with
+  // the current persisted SLA — not the completed flag alone. Without the
+  // compatibility check here, a full SLA-driven rebuild that gets cut short
+  // by the time budget could wrongly report allMonthsComplete: true (every
+  // month is still sitting in progress.completed from BEFORE the SLA
+  // change, even though most of those saved snapshots are now stale).
+  // Reuses compatCache wherever the main loop above already computed it;
+  // only recomputes for a month the loop never reached this run (e.g. after
+  // an early budget stop) — never for one already known incompatible/absent.
+  var nextMonth = null;
+  var allMonthsComplete = true;
+  for (var j = 0; j < MONTH_ORDER.length; j++) {
+    var mj = MONTH_ORDER[j];
+    var isCompletedFlag = progress.completed.hasOwnProperty(mj);
+    var isCompatibleNow = false;
+    if (isCompletedFlag) {
+      isCompatibleNow = compatCache.hasOwnProperty(mj) ? compatCache[mj] : snapshotIsCurrentlyCompatible_(mj, persistedSla);
+    }
+    if (!isCompatibleNow) { nextMonth = mj; allMonthsComplete = false; break; }
+  }
+  var completedMonths = Object.keys(progress.completed);
+
+  var report = {
+    success: true,
+    monthsAttempted: attempted,
+    monthsCompletedThisRun: completedThisRun,
+    monthsSkipped: skipped,
+    monthsFailed: failed,
+    totalCompletedSoFar: completedMonths,
+    totalCompletedCount: completedMonths.length,
+    nextMonthToProcess: nextMonth,
+    allMonthsComplete: allMonthsComplete,
+    durationMs: new Date().getTime() - started
+  };
+
+  Logger.log(
+    "========================================================\n" +
+    "SNAPSHOT BATCH BUILD RUN\n" +
+    "========================================================\n" +
+    "Months attempted this run: " + (attempted.join(", ") || "(none)") + "\n" +
+    "Months completed this run: " + (completedThisRun.join(", ") || "(none)") + "\n" +
+    "Months skipped (already complete & compatible): " + (skipped.join(", ") || "(none)") + "\n" +
+    "Months failed this run: " + (failed.length ? failed.map(function (f) { return f.month + " (" + f.error + ")"; }).join(", ") : "(none)") + "\n" +
+    "Total completed so far (" + completedMonths.length + "/" + MONTH_ORDER.length + "): " + (completedMonths.join(", ") || "(none)") + "\n" +
+    "Next month to process: " + (nextMonth || "(none — ALL MONTHS COMPLETE)") + "\n" +
+    "All months complete: " + allMonthsComplete + "\n" +
+    "Duration: " + report.durationMs + "ms\n" +
+    "========================================================"
+  );
+
+  return report;
+}
+
 function onOpen() {
   SpreadsheetApp.getUi().createMenu("ARRIVE Dashboard")
     .addItem("Update Current Quarter Summaries", "updateCurrentQuarterSummaries")
     .addItem("Update All 12 Month Summaries", "buildAllDashboardSummaries")
     .addItem("Build Missing Month Snapshots Only", "buildMissingMonthSnapshots")
+    .addItem("Build Next Snapshot Batch (resumable)", "buildNextSummaryBatch")
+    .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
     .addToUi();
 }
 
@@ -3532,274 +3747,6 @@ function diagnoseJuneStatuses() {
 }
 
 // ============================================================
-// DIAGNOSTIC ONLY — diagnoseUnclassified(month)
-// ============================================================
-// Investigates the dashboard's "غير مصنف" (Unclassified) KPI card
-// (renderKpiCards' k.unknown, index.html). Read-only: adds this ONE new
-// function and touches nothing else — no existing function, mapping,
-// cache, snapshot, SLA, or UI code is modified.
-//
-// Reuses the exact same helpers getMonthDashboardSummary itself uses
-// (summaryDetectColumnMap, summaryGetField, summaryNormText,
-// summaryClassifyStatus, summaryNormalizeArabicForMatch_, summaryParseDate,
-// summaryRowIsAllEmpty) and replicates its exact Pass-1 row-validity and
-// AWB de-duplication rule (skip fully-blank rows, skip rows with no AWB,
-// per AWB keep whichever occurrence has the latest Last Status Date) — so
-// every count below is directly comparable to what the dashboard itself
-// computes, never a re-derived approximation.
-//
-// CONFIRMED BY READING THE CODE (not assumed): the "غير مصنف" KPI card is
-// kpis.unknown, which getMonthDashboardSummary's aggregation pass
-// (summaryAccumulateRow -> topAcc) computes over allDedupRows — i.e. AFTER
-// AWB de-duplication. The separate Data Quality panel's "حالات غير مصنفة"
-// figure (dataQuality.unknownStatusCount, index.html ~line 5691) is counted
-// during Pass 1, over every raw row that merely has a valid AWB — i.e.
-// BEFORE de-duplication. These are two different quantities whenever any
-// duplicate-AWB row happens to be unclassified. This function computes and
-// reports BOTH explicitly, so which one is "the" number on screen (e.g.
-// 36,377) is never ambiguous.
-function diagnoseUnclassified(month) {
-  var report = { success: false };
-  if (!month) { report.error = "month مطلوب، مثال: diagnoseUnclassified('August')"; Logger.log(report.error); return report; }
-  if (!MONTH_SOURCE.hasOwnProperty(month)) { report.error = "شهر غير معروف: " + month; Logger.log(report.error); return report; }
-
-  var quarter = MONTH_SOURCE[month];
-  var spreadsheetId = SPREADSHEET_IDS[quarter];
-  var ss;
-  try { ss = SpreadsheetApp.openById(spreadsheetId); }
-  catch (err) { report.error = "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err); Logger.log(report.error); return report; }
-
-  var sheet = ss.getSheetByName(month);
-  if (!sheet) { report.error = "الشيت غير موجود: " + month + " داخل " + quarter; Logger.log(report.error); return report; }
-
-  var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn();
-  if (lastRow < 2 || lastColumn === 0) {
-    report.success = true; report.empty = true; report.note = "لا توجد بيانات في هذا الشيت.";
-    Logger.log(report.note);
-    return report;
-  }
-
-  // Same single read getMonthDashboardSummary uses — never a separate/
-  // different range, so this can never see different raw values than the
-  // real aggregation sees.
-  var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
-  var headers = values[0];
-  var dataRows = values.slice(1);
-
-  var colMap = summaryDetectColumnMap(headers);
-  var idx = {};
-  var mappedFields = Object.keys(colMap);
-  for (var mf = 0; mf < mappedFields.length; mf++) idx[mappedFields[mf]] = headers.indexOf(colMap[mappedFields[mf]]);
-
-  // ---- PASS 1: exact same row-validity + AWB de-dup rule getMonthDashboardSummary uses ----
-  var fullyBlankRowCount = 0, blankAwbRowCount = 0, dqTotalRows = 0;
-  var awbMap = {};
-  var seenAwbCount = {};
-  // PRE-DEDUP unknown breakdown — every valid-AWB row, duplicates included —
-  // for direct comparison against dataQuality.unknownStatusCount/unknownStatusBreakdown.
-  var preDedupUnknownBreakdown = {};
-  var preDedupUnknownCount = 0;
-
-  for (var ri = 0; ri < dataRows.length; ri++) {
-    var row = dataRows[ri];
-    if (summaryRowIsAllEmpty(row)) { fullyBlankRowCount++; continue; }
-    var awb = summaryNormText(summaryGetField(row, idx, "awb"));
-    if (!awb) { blankAwbRowCount++; continue; }
-    dqTotalRows++;
-    seenAwbCount[awb] = (seenAwbCount[awb] || 0) + 1;
-
-    var statusRawExact = summaryGetField(row, idx, "status"); // literally the cell value, before any trimming
-    var status = summaryNormText(statusRawExact); // == the `status` field production stores on the row record
-    var bucket = summaryClassifyStatus(status);
-    var lastStatus = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
-
-    if (bucket === "unknown") {
-      preDedupUnknownCount++;
-      var preKey = status || "(فارغ)";
-      if (!preDedupUnknownBreakdown[preKey]) preDedupUnknownBreakdown[preKey] = { count: 0, rawExactSamples: {} };
-      preDedupUnknownBreakdown[preKey].count++;
-      var exactKeyPre = (statusRawExact === null || statusRawExact === undefined) ? "(null)" : JSON.stringify(statusRawExact);
-      preDedupUnknownBreakdown[preKey].rawExactSamples[exactKeyPre] = (preDedupUnknownBreakdown[preKey].rawExactSamples[exactKeyPre] || 0) + 1;
-    }
-
-    var rec = { awb: awb, status: status, statusRawExact: statusRawExact, bucket: bucket, lastStatus: lastStatus };
-
-    // Exact same winner rule as getMonthDashboardSummary: keep whichever
-    // occurrence has the latest (or equal) Last Status Date.
-    if (awbMap.hasOwnProperty(awb)) {
-      var existingRec = awbMap[awb];
-      var et = existingRec.lastStatus ? existingRec.lastStatus.getTime() : -Infinity;
-      var rt = lastStatus ? lastStatus.getTime() : -Infinity;
-      if (rt >= et) awbMap[awb] = rec;
-    } else {
-      awbMap[awb] = rec;
-    }
-  }
-
-  // ---- PASS 2: POST-DEDUP classification — this is exactly what feeds kpis.unknown (the "غير مصنف" KPI card) ----
-  var postDedupRows = [];
-  for (var awbKey in awbMap) { if (awbMap.hasOwnProperty(awbKey)) postDedupRows.push(awbMap[awbKey]); }
-  var grandTotal = postDedupRows.length; // == kpis.total == the "إجمالي الشحنات" KPI card
-
-  var bucketCounts = { delivered: 0, returned: 0, rejected: 0, pending: 0, unknown: 0 };
-  var postDedupUnknownBreakdown = {};
-  for (var pi = 0; pi < postDedupRows.length; pi++) {
-    var pr = postDedupRows[pi];
-    bucketCounts[pr.bucket]++;
-    if (pr.bucket === "unknown") {
-      var key = pr.status || "(فارغ)";
-      if (!postDedupUnknownBreakdown[key]) postDedupUnknownBreakdown[key] = { count: 0, rawExactSamples: {} };
-      postDedupUnknownBreakdown[key].count++;
-      var exactKeyPost = (pr.statusRawExact === null || pr.statusRawExact === undefined) ? "(null)" : JSON.stringify(pr.statusRawExact);
-      postDedupUnknownBreakdown[key].rawExactSamples[exactKeyPost] = (postDedupUnknownBreakdown[key].rawExactSamples[exactKeyPost] || 0) + 1;
-    }
-  }
-
-  // ---- Known-bucket normalized/loose lookups, used ONLY to flag possible
-  // near-misses in the Reason column below — never used to classify anything. ----
-  var mappedNormalizedValues = {}; // normalized form -> bucket
-  var mappedLooseValues = {};      // normalized form with ALL whitespace stripped -> bucket
-  function looseKey(s) { return summaryNormalizeArabicForMatch_(summaryNormText(s)).replace(/\s+/g, ""); }
-  for (var bkt in SUMMARY_STATUS_MAP) {
-    for (var v = 0; v < SUMMARY_STATUS_MAP[bkt].length; v++) {
-      var mapped = SUMMARY_STATUS_MAP[bkt][v];
-      mappedNormalizedValues[summaryNormalizeArabicForMatch_(summaryNormText(mapped))] = bkt;
-      mappedLooseValues[looseKey(mapped)] = bkt;
-    }
-  }
-
-  function reasonFor(status, rawExactSamples) {
-    if (!status) return "Status فارغة/null بعد التنظيف (summaryNormText) — لا تدخل أي تصنيف";
-    var norm = summaryNormalizeArabicForMatch_(summaryNormText(status));
-    var loose = looseKey(status);
-    if (mappedLooseValues.hasOwnProperty(loose) && !mappedNormalizedValues.hasOwnProperty(norm)) {
-      return "قريبة جداً من قيمة مُدرجة فعلاً في SUMMARY_STATUS_MAP لتصنيف \"" + mappedLooseValues[loose] + "\" لكنها لا تُطابقها تماماً بعد summaryNormalizeArabicForMatch_ الحالية (فرق مسافات/Unicode لم يُلتقط) — تستحق مراجعة كـ variant محتمل، وليست بالضرورة Unknown حقيقية";
-    }
-    var rawVariantCount = rawExactSamples ? Object.keys(rawExactSamples).length : 1;
-    if (rawVariantCount > 1) {
-      return "Not found in SUMMARY_STATUS_MAP (قيمة غير معروفة تماماً، ولها أكثر من صيغة خام واحدة تصل لنفس القيمة بعد summaryNormText)";
-    }
-    return "Not found in SUMMARY_STATUS_MAP — لا يوجد أي bucket يحتوي هذه القيمة";
-  }
-
-  function toSortedBreakdownArray(breakdownObj, denominatorTotal) {
-    var out = [];
-    for (var k in breakdownObj) {
-      if (!breakdownObj.hasOwnProperty(k)) continue;
-      var entry = breakdownObj[k];
-      out.push({
-        status: k,
-        normalizedStatus: summaryNormalizeArabicForMatch_(summaryNormText(k)),
-        count: entry.count,
-        pctOfTotal: denominatorTotal > 0 ? (entry.count / denominatorTotal * 100) : null,
-        currentClassification: "UNKNOWN",
-        reason: reasonFor(k, entry.rawExactSamples),
-        rawExactVariants: Object.keys(entry.rawExactSamples || {})
-      });
-    }
-    out.sort(function (a, b) { return b.count - a.count; });
-    return out;
-  }
-
-  var postDedupBreakdownArr = toSortedBreakdownArray(postDedupUnknownBreakdown, grandTotal);
-  var preDedupBreakdownArr = toSortedBreakdownArray(preDedupUnknownBreakdown, dqTotalRows);
-
-  var distinctAwbCount = Object.keys(seenAwbCount).length;
-  var dupAwbCount = 0;
-  for (var ak in seenAwbCount) { if (seenAwbCount.hasOwnProperty(ak) && seenAwbCount[ak] > 1) dupAwbCount++; }
-
-  var sumOfAllBuckets = bucketCounts.delivered + bucketCounts.returned + bucketCounts.rejected + bucketCounts.pending + bucketCounts.unknown;
-
-  report = {
-    success: true,
-    month: month,
-    source: quarter,
-    detectedStatusColumnHeader: colMap.status || null,
-    detectedStatusColumnIndex1Based: headers.indexOf(colMap.status) >= 0 ? (headers.indexOf(colMap.status) + 1) : null,
-
-    grandTotal_postDedup: grandTotal, // == kpis.total == "إجمالي الشحنات" KPI card
-    validAwbRows_preDedup: dqTotalRows, // == dataQuality.totalRows, the Data Quality panel's own base
-    fullyBlankRows: fullyBlankRowCount,
-    blankAwbRows: blankAwbRowCount,
-    distinctAwbCount: distinctAwbCount,
-    duplicateAwbCount: dupAwbCount,
-
-    // B) Unclassified breakdown — POST-DEDUP: this is exactly the "غير
-    // مصنف" KPI card's own number (e.g. 36,377).
-    unclassifiedBreakdown_postDedup: postDedupBreakdownArr,
-    totalUnclassified_postDedup: bucketCounts.unknown,
-
-    // Same breakdown PRE-DEDUP, for direct comparison against the Data
-    // Quality panel's own unknownStatusCount/unknownStatusBreakdown.
-    unclassifiedBreakdown_preDedup: preDedupBreakdownArr,
-    totalUnclassified_preDedup: preDedupUnknownCount,
-    preDedupEqualsPostDedupUnknownCount: preDedupUnknownCount === bucketCounts.unknown,
-
-    // C) Reconciliation (POST-DEDUP — matches what the dashboard KPI cards show)
-    reconciliation: {
-      grandTotal: grandTotal,
-      delivered: bucketCounts.delivered,
-      returned: bucketCounts.returned,
-      rejected: bucketCounts.rejected,
-      pending: bucketCounts.pending,
-      unknownUnclassified: bucketCounts.unknown,
-      sumOfAllBuckets: sumOfAllBuckets,
-      matchesGrandTotal: sumOfAllBuckets === grandTotal,
-      excludedBeforeClassification: {
-        fullyBlankRows: fullyBlankRowCount,
-        blankAwbRows: blankAwbRowCount,
-        duplicateExtraRows: dqTotalRows - distinctAwbCount
-      }
-    },
-
-    top20_postDedup: postDedupBreakdownArr.slice(0, 20),
-    currentStatusMap: SUMMARY_STATUS_MAP,
-    generatedAt: new Date().toISOString()
-  };
-
-  // ---- Human-readable log, in the shape requested ----
-  var lines = [];
-  lines.push("========================================================");
-  lines.push("UNCLASSIFIED STATUS BREAKDOWN — " + month + " (POST-DEDUP — هذا هو نفس رقم بطاقة \"غير مصنف\")");
-  lines.push("========================================================");
-  postDedupBreakdownArr.forEach(function (u, i) {
-    lines.push("");
-    lines.push((i + 1) + ".");
-    lines.push("Raw Status: " + JSON.stringify(u.status));
-    lines.push("Normalized Status: " + JSON.stringify(u.normalizedStatus));
-    lines.push("Count: " + u.count);
-    lines.push("% of Total: " + (u.pctOfTotal !== null ? u.pctOfTotal.toFixed(2) + "%" : "-"));
-    lines.push("Current Classification: " + u.currentClassification);
-    lines.push("Reason: " + u.reason);
-    if (u.rawExactVariants.length > 1) lines.push("Raw exact cell variants landing here: " + u.rawExactVariants.join(" | "));
-  });
-  lines.push("");
-  lines.push("TOTAL UNCLASSIFIED (POST-DEDUP): " + bucketCounts.unknown);
-  lines.push("");
-  lines.push("---- RECONCILIATION (POST-DEDUP) ----");
-  lines.push("Grand Total: " + grandTotal);
-  lines.push("Delivered: " + bucketCounts.delivered);
-  lines.push("Returned: " + bucketCounts.returned);
-  lines.push("Rejected: " + bucketCounts.rejected);
-  lines.push("In Progress (Pending): " + bucketCounts.pending);
-  lines.push("Unknown / Unclassified: " + bucketCounts.unknown);
-  lines.push("Sum of all buckets: " + sumOfAllBuckets + (report.reconciliation.matchesGrandTotal ? " == Grand Total (matches)" : " != Grand Total (MISMATCH — يحتاج مراجعة)"));
-  lines.push("Excluded BEFORE classification (غير داخلة في Grand Total أعلاه): fullyBlankRows=" + fullyBlankRowCount + ", blankAwbRows=" + blankAwbRowCount + ", duplicateExtraRows=" + (dqTotalRows - distinctAwbCount));
-  lines.push("");
-  lines.push("---- PRE-DEDUP COMPARISON (هذا يطابق dataQuality.unknownStatusCount في لوحة Data Quality، وليس بطاقة KPI) ----");
-  lines.push("Valid-AWB raw rows (pre-dedup): " + dqTotalRows);
-  lines.push("Unknown count (pre-dedup): " + preDedupUnknownCount);
-  lines.push("Unknown count (post-dedup, = بطاقة \"غير مصنف\"): " + bucketCounts.unknown);
-  lines.push(report.preDedupEqualsPostDedupUnknownCount
-    ? "الرقمان متطابقان لهذا الشهر — لا توجد AWB مكررة تُزيح رقم Unknown."
-    : "الرقمان مختلفان — رقم بطاقة KPI محسوب بعد إزالة تكرار AWB (يبقى صف واحد لكل AWB وهو الأحدث بتاريخ Last Status)، بينما رقم لوحة Data Quality محسوب على كل صف خام قبل الإزالة. الفرق بينهما مصدره صفوف AWB المكررة.");
-  lines.push("========================================================");
-
-  Logger.log(lines.join("\n"));
-  return report;
-}
-
-// ============================================================
 // 9. JSON RESPONSE
 
 function jsonResponse(obj) {
@@ -3814,4 +3761,23 @@ function jsonResponse(obj) {
       ContentService.MimeType.TEXT
     );
 
+}
+function buildMissingSummaries() {
+  const result = buildMissingMonthSnapshots();
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+function rebuildRemainingMonths() {
+  const months = ['June', 'July', 'August'];
+
+  months.forEach(function(month) {
+    Logger.log('Building: ' + month);
+
+    const result = buildAndSaveMonthSummary(month);
+
+    Logger.log(JSON.stringify({
+      month: month,
+      result: result
+    }, null, 2));
+  });
 }
