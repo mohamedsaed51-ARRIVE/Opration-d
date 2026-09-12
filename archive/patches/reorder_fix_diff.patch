@@ -1,0 +1,108 @@
+diff --git a/index.html b/index.html
+index a6bedc5..2683044 100644
+--- a/index.html
++++ b/index.html
+@@ -5894,20 +5894,37 @@ function refreshAfterSlaChange(){
+ 
+ function initSettingsHandlers(){
+   document.getElementById('applySlaBtn').addEventListener('click', async ()=>{
++    const oldValue = SLA_TARGET_DAYS; // kept so a failed save can be rolled back exactly
+     try{
+       const v = parseFloat(document.getElementById('slaTargetInput').value);
+       if(isNaN(v) || v<=0){ showSlaSaveStatus('قيمة SLA غير صالحة — أدخل رقماً أكبر من صفر.', 'error'); return; }
+-      SLA_TARGET_DAYS = v;
+-      invalidateSlaDependentCaches(); // must happen BEFORE any refresh so a stale Management Analysis summary is never re-rendered
+-      renderBranchSlaTable(); // the "افتراضي" column value/labels depend on SLA_TARGET_DAYS — keep it in sync immediately
+-      refreshAfterSlaChange();
+-      const persisted = await savePersistedSlaSettings(); // Batch 1: persist so this survives a reload
+-      if(persisted && selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ الإعداد بنجاح ✓', 'ok');
+-      else if(!persisted) showSlaSaveStatus('تم تطبيق الإعداد في هذه الجلسة، لكن الحفظ الدائم فشل — سيُفقد هذا التغيير عند إعادة تحميل الصفحة. تحقق من الاتصال وحاول مرة أخرى.', 'error');
++
++      SLA_TARGET_DAYS = v; // set in memory only so savePersistedSlaSettings() below sends the NEW value
++
++      // Persistence gate: nothing downstream (cache invalidation, Management
++      // Analysis, Dashboard, PDF) may act on this new value until the backend
++      // has actually confirmed it saved. Reordered on request — the previous
++      // version invalidated caches and re-rendered BEFORE this awaited, which
++      // meant a slow/failed save could still leave every view recomputing
++      // against a setting that was never actually persisted.
++      const persisted = await savePersistedSlaSettings();
++
++      if(persisted){
++        invalidateSlaDependentCaches(); // only now — after the backend confirmed the new value is saved
++        renderBranchSlaTable(); // the "افتراضي" column value/labels depend on SLA_TARGET_DAYS — keep it in sync immediately
++        refreshAfterSlaChange();
++        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ الإعداد بنجاح ✓', 'ok');
++      }else{
++        SLA_TARGET_DAYS = oldValue; // roll back — this value was NEVER confirmed saved, so no view may use it
++        showSlaSaveStatus('فشل حفظ الإعداد على الخادم — تم إلغاء التغيير والإبقاء على القيمة السابقة (' + oldValue + ' يوم). لم يتم إعادة حساب أي بيانات. تحقق من الاتصال وحاول مرة أخرى.', 'error');
++      }
+     }catch(e){
+-      // Defensive net (Part 8): a save failure must never blank the whole app.
+-      console.error('[SLA SETTINGS] applySlaBtn handler failed unexpectedly', e);
+-      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ الإعداد. البيانات المعروضة حالياً لم تتأثر — حاول مرة أخرى.', 'error');
++      // Defensive net (Part 8): an unexpected failure anywhere in this flow
++      // must never blank the whole app, and must never leave an unconfirmed
++      // value in memory for something else to pick up and recompute from.
++      SLA_TARGET_DAYS = oldValue;
++      console.error('[SLA SETTINGS] applySlaBtn handler failed unexpectedly — rolled back to previous value', e);
++      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ الإعداد. تم الإبقاء على القيمة السابقة (' + oldValue + ' يوم) ولم يتم إعادة حساب أي بيانات. حاول مرة أخرى.', 'error');
+     }
+   });
+   document.getElementById('applyAttemptBtn').addEventListener('click', ()=>{
+@@ -5921,6 +5938,7 @@ function initSettingsHandlers(){
+     }catch(e){ console.error('[ATTEMPT SETTINGS] applyAttemptBtn handler failed unexpectedly', e); }
+   });
+   document.getElementById('applyBranchSlaBtn').addEventListener('click', async ()=>{
++    const oldBranchTargets = Object.assign({}, BRANCH_SLA_TARGETS); // shallow copy is enough — values are plain numbers
+     try{
+       const inputs = document.querySelectorAll('#branchSlaTable input[data-branch]');
+       inputs.forEach(inp=>{
+@@ -5931,20 +5949,34 @@ function initSettingsHandlers(){
+           else BRANCH_SLA_TARGETS[branch] = v;
+         }
+       });
+-      invalidateSlaDependentCaches(); // must happen BEFORE any refresh so a stale Management Analysis summary is never re-rendered
+-      // The table itself was never re-rendered after Apply, so a saved value
+-      // (and its "مخصّص"/"افتراضي" status pill) never visibly updated even
+-      // though it WAS saved in memory and sent on the next request — this
+-      // could easily look like "nothing changed". Refresh it immediately.
+-      renderBranchSlaTable();
+-      refreshAfterSlaChange();
+-      const persisted = await savePersistedSlaSettings(); // Batch 1: persist so overrides survive a reload
+-      if(persisted && selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓', 'ok');
+-      else if(!persisted) showSlaSaveStatus('تم تطبيق التغييرات في هذه الجلسة، لكن الحفظ الدائم فشل — ستُفقد عند إعادة تحميل الصفحة. تحقق من الاتصال وحاول مرة أخرى.', 'error');
++
++      // Same persistence gate as applySlaBtn: nothing downstream may act on
++      // these new branch overrides until the backend has actually confirmed
++      // they saved.
++      const persisted = await savePersistedSlaSettings();
++
++      if(persisted){
++        invalidateSlaDependentCaches(); // only now — after the backend confirmed the new overrides are saved
++        // The table itself was never re-rendered after Apply, so a saved value
++        // (and its "مخصّص"/"افتراضي" status pill) never visibly updated even
++        // though it WAS saved in memory and sent on the next request — this
++        // could easily look like "nothing changed". Refresh it immediately.
++        renderBranchSlaTable();
++        refreshAfterSlaChange();
++        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓', 'ok');
++      }else{
++        BRANCH_SLA_TARGETS = oldBranchTargets; // roll back — these overrides were NEVER confirmed saved, so no view may use them
++        renderBranchSlaTable(); // reflect the rollback in the table's inputs/pills immediately
++        showSlaSaveStatus('فشل حفظ إعدادات الفروع على الخادم — تم إلغاء التغييرات والإبقاء على الإعدادات السابقة. لم يتم إعادة حساب أي بيانات. تحقق من الاتصال وحاول مرة أخرى.', 'error');
++      }
+     }catch(e){
+-      // Defensive net (Part 8): a save failure must never blank the whole app.
+-      console.error('[SLA SETTINGS] applyBranchSlaBtn handler failed unexpectedly', e);
+-      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ إعدادات الفروع. البيانات المعروضة حالياً لم تتأثر — حاول مرة أخرى.', 'error');
++      // Defensive net (Part 8): an unexpected failure anywhere in this flow
++      // must never blank the whole app, and must never leave unconfirmed
++      // overrides in memory for something else to pick up and recompute from.
++      BRANCH_SLA_TARGETS = oldBranchTargets;
++      try{ renderBranchSlaTable(); }catch(e2){ /* table refresh is best-effort during an already-unexpected failure */ }
++      console.error('[SLA SETTINGS] applyBranchSlaBtn handler failed unexpectedly — rolled back to previous overrides', e);
++      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ إعدادات الفروع. تم الإبقاء على الإعدادات السابقة ولم يتم إعادة حساب أي بيانات. حاول مرة أخرى.', 'error');
+     }
+   });
+ }
