@@ -118,7 +118,7 @@ a{color:var(--accent);}
 
 /* ===== Google Sheet boot / connection-error screens (data-source loading states) ===== */
 #gsheetBootScreen, #gsheetErrorScreen{
-  min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; align-items:center; justify-content:center;
   gap:16px; padding:24px; text-align:center;
   background:
     radial-gradient(1100px 500px at 15% -10%, #16264C 0%, transparent 60%),
@@ -445,6 +445,200 @@ table.data-table tbody tr:last-child td{border-bottom:none;}
 .attempt-bar-track{height:10px; background:var(--surface-2); border-radius:6px; overflow:hidden; border:1px solid var(--border);}
 .attempt-bar-fill{height:100%; border-radius:6px;}
 footer.app-footer{text-align:center; padding:20px; color:var(--text-faint); font-size:11.5px;}
+
+/* ============================================================
+   MOBILE RESPONSIVE LAYER  (revised after mobile QA audit)
+   Additive only — every rule below narrows an existing selector's
+   viewport, nothing above this point was changed. Desktop (>900px)
+   is completely unaffected. Breakpoints: 900 / 640 / 480 / 360.
+
+   Note on the header: .topbar already uses display:flex; flex-wrap:wrap;
+   align-items:center; justify-content:space-between on ALL screen sizes
+   (that's the existing base rule, untouched). The mobile rules below only
+   set flex-basis/order per child, so each "row" is just a flex-wrap line —
+   no flex-direction/align-items override was needed, which keeps this
+   change small and keeps the same layout model desktop already uses.
+   ============================================================ */
+
+@media (max-width:900px){
+  /* Global overflow guard, scoped to mobile only so desktop is never
+     touched. Internal containers (.table-scroll, .tabs-nav, .ms-panel,
+     .ms-options) keep their own independent scroll regardless of this. */
+  html, body{max-width:100%; overflow-x:hidden;}
+  #app{max-width:100%; overflow-x:hidden;}
+
+  /* ---- Header / topbar: compact 3-line layout ----
+     Line 1 (order 0): brand + title + status/quality badges — never hidden.
+     Line 2 (order 1): month selector + primary actions, sharing one line
+       (falls back to two lines gracefully via the existing flex-wrap if a
+       given phone's rendered button text doesn't fit — this never causes
+       horizontal overflow, it just adds a line on the very narrowest
+       widths).
+     Line 3 (order 2): metadata strip — secondary, horizontally scrollable,
+       lowest visual priority, not held sticky with the essential controls. */
+  .topbar{padding:10px 14px; gap:8px;}
+  .topbar-left{flex:1 1 100%; order:0; gap:8px;}
+  .brand-tagline{display:none;}
+  .brand-eyebrow{display:none;}
+  .topbar-titles{flex-direction:row; flex-wrap:wrap; align-items:center; gap:4px 8px;}
+  .topbar-left h1{font-size:13.5px; line-height:1.3; flex:1 1 100%;}
+
+  /* CRITICAL FIX: #validityBadge reflects live JS-driven data-quality
+     state ("● بيانات صالحة" / "● توجد ملاحظات جودة") and must never be
+     hidden. Made compact instead, sitting next to the connection chip. */
+  #validityBadge{font-size:10px; padding:2px 8px; width:auto; white-space:nowrap;}
+  .conn-status-chip{font-size:10px; padding:2px 7px;}
+
+  .month-select-wrap{order:1; flex:1 1 auto; min-width:0; gap:6px;}
+  .month-select-wrap select{flex:1; min-width:0;}
+  .topbar-right{order:1; flex:0 0 auto;}
+  /* Touch targets: 44x44, icon glyph itself (font-size) left unchanged
+     so the symbol stays visually compact inside the larger tap area. */
+  .icon-btn{width:44px; height:44px; min-width:44px; min-height:44px;}
+  .topbar .btn-refresh{min-height:44px;}
+
+  .topbar-meta{
+    order:2; flex:1 1 100%; display:flex; gap:8px; overflow-x:auto;
+    -webkit-overflow-scrolling:touch; padding:2px 0 4px;
+    /* Subtle CSS-only "more content" hint on the trailing (left, in RTL)
+       edge — no JS/markup needed. Degrades harmlessly if unsupported. */
+    -webkit-mask-image:linear-gradient(to left, #000 0, #000 calc(100% - 24px), transparent 100%);
+    mask-image:linear-gradient(to left, #000 0, #000 calc(100% - 24px), transparent 100%);
+  }
+  .topbar-meta span{padding:4px 9px; white-space:nowrap; flex:none; font-size:11px;}
+  .topbar-meta span b{font-size:11.5px;}
+
+  /* ---- Executive summary ---- */
+  .exec-wrap{padding:14px 14px 0;}
+  .exec-title h2{font-size:14px;}
+  .alerts-panel{padding:12px 14px;}
+
+  /* ---- KPI cards: never more than 2 per row on mobile ---- */
+  .kpi-grid{gap:8px;}
+  .kpi-card{padding:12px 12px 10px;}
+  .kpi-value{font-size:20px;}
+  .kpi-label{font-size:11px; margin-bottom:6px;}
+
+  /* ---- Filters: stacked "drawer-style" list instead of a wide row ---- */
+  .filter-bar{
+    margin:0 14px 14px; padding:12px 12px; flex-direction:column; align-items:stretch; gap:12px;
+  }
+  .filter-group{width:100%; min-width:0;}
+  .ms-trigger, .ms{width:100%;}
+  .ms-trigger{min-height:44px; font-size:13px;}
+  .ms-panel{
+    position:fixed; left:12px; right:12px; top:auto; bottom:12px;
+    width:auto; max-width:none; max-height:60vh;
+  }
+  /* Subtle scrim behind the bottom sheet, done purely with a pseudo-element
+     on .ms-panel itself — no new DOM node, no JS. pointer-events:none keeps
+     every existing click/outside-click behavior exactly as it was (clicks
+     pass straight through to whatever the existing document click-listener
+     already expects), so this cannot interfere with desktop or with the
+     current open/close logic. */
+  .ms-panel:not(.hidden)::before{
+    content:""; position:fixed; inset:0; background:rgba(24,38,51,.35);
+    z-index:-1; pointer-events:none;
+  }
+  /* Options list flexes to fill whatever room is left in the sheet instead
+     of a fixed 190px, so it adapts better if the on-screen keyboard shrinks
+     the visible area while the search field is focused. */
+  .ms-options{flex:1 1 auto; max-height:none; min-height:80px;}
+  .ms-actions button{min-height:40px; font-size:12px;}
+  .date-range{flex-direction:column; width:100%;}
+  .date-range input{width:100%; min-height:40px;}
+  .filter-clear{margin-inline-start:0; width:100%;}
+  .filter-clear button{width:100%; min-height:44px;}
+  .filter-count-tag{align-self:flex-start; padding-bottom:0;}
+
+  /* ---- Multi-select chip remove button: bigger hit area, same small × ---- */
+  .ms-chip button{width:28px; height:28px; font-size:9px;}
+
+  /* ---- Tabs: horizontal touch-scroll, never wraps/breaks layout ---- */
+  .tabs-nav{
+    margin:0 14px; -webkit-overflow-scrolling:touch; scroll-snap-type:x proximity;
+  }
+  .tab-btn{padding:10px 12px; font-size:12.5px; scroll-snap-align:start; flex:none;}
+  .tab-panel{padding:16px 14px 40px;}
+
+  /* ---- Cards / section rows stack ---- */
+  .section-row{gap:12px;}
+  .card{padding:14px 14px;}
+  .card-title{font-size:13px;}
+  .card-sub{font-size:12px;}
+
+  /* ---- Charts: shorter, full-width, no forced overflow ---- */
+  .chart-box{height:220px;}
+  .chart-box.tall{height:260px;}
+
+  /* ---- Tables: keep the horizontal scroll INSIDE the card only.
+     Font kept at a comfortable 12.5px floor per the mobile typography
+     requirement — not reduced further at any smaller breakpoint. ---- */
+  .table-scroll{-webkit-overflow-scrolling:touch;}
+  table.data-table{font-size:12.5px;}
+  table.data-table thead th, table.data-table tbody td{padding:9px 10px;}
+  .table-toolbar{gap:8px;}
+  .table-toolbar .sort-controls{width:100%; justify-content:space-between;}
+  .export-row{flex-direction:column;}
+  .export-row button{width:100%; min-height:44px;}
+
+  /* ---- Management analysis: force single-column stacked cards ---- */
+  .mgmt-header{flex-direction:column; align-items:stretch; gap:8px;}
+  .mgmt-header h2{font-size:16px;}
+  .mgmt-controls{flex-direction:column; align-items:stretch; gap:10px;}
+  .mgmt-ctrl{width:100%; min-width:0;}
+  .mgmt-ctrl select{width:100%; min-height:42px;}
+  .mgmt-mini-kpis{grid-template-columns:repeat(2,1fr); gap:8px;}
+  .mgmt-mini-kpi .lbl{font-size:11px;}
+  /* PDF / Excel export: easy to tap, full-width on mobile only. */
+  #mgmtPdfBtn, #mgmtExcelBtn{width:100%;}
+  /* Long branch/customer names wrap in a controlled way: the label side
+     can shrink/wrap, the value side never wraps and stays clearly
+     separated from it. */
+  .mgmt-list li{flex-wrap:wrap; gap:4px 8px; align-items:flex-start;}
+  .mgmt-list li > span:first-child{flex:1 1 auto; min-width:0; word-break:break-word;}
+  .mgmt-list li .amt{flex:0 0 auto; white-space:nowrap;}
+  .mgmt-bxc-head{padding:9px 12px; font-size:12.5px;}
+  .mgmt-insight{font-size:12.5px;}
+
+  /* ---- Data quality grid: 2-up on tablets/phones ---- */
+  .dq-grid{gap:8px;}
+  .dq-card{padding:11px 12px;}
+
+  /* ---- Settings modal fits small screens ---- */
+  .settings-modal{padding:20px 16px; max-width:100%;}
+  .helptext{font-size:12px;}
+
+  /* ---- Buttons: comfortable touch targets everywhere on mobile ---- */
+  .btn-primary, .btn-secondary{min-height:44px;}
+  .btn-sm{min-height:38px;}
+  /* Connection-error screen buttons: full-width + 44px, text wraps
+     instead of overflowing the viewport. */
+  #gsheetErrorScreen .gs-retry-btn{min-height:44px; width:100%; white-space:normal;}
+
+  /* ---- Completeness / warning banners: fit narrow screens, wrap text ---- */
+  #allMonthsCompletenessWarning{
+    margin:8px 14px !important; padding:10px 12px !important; font-size:12.5px !important;
+    line-height:1.5; white-space:normal !important;
+  }
+}
+
+@media (max-width:480px){
+  .kpi-value{font-size:18px;}
+  .topbar-left h1{font-size:13px;}
+  .mgmt-mini-kpis{grid-template-columns:1fr;}
+  .dq-card .n{font-size:18px;}
+  .chart-box{height:200px;}
+  .chart-box.tall{height:230px;}
+}
+
+@media (max-width:360px){
+  .topbar{padding:10px 10px;}
+  .exec-wrap{padding:10px 10px 0;}
+  .filter-bar{margin:0 10px 10px; padding:10px;}
+  .tabs-nav{margin:0 10px;}
+  .tab-panel{padding:12px 10px 32px;}
+}
 </style>
 </head>
 <body>
@@ -5187,17 +5381,40 @@ function makeBarChart(canvasId, labels, datasets, opts={}){
   if(chartLibUnavailable()) return;
   destroyChart(canvasId);
   const ctx = document.getElementById(canvasId).getContext('2d');
+  // Mobile-only readability fix (does not touch labels/datasets/data):
+  // autoSkip:false forces every category to render, which is fine on
+  // desktop but overlaps on narrow phone screens for dense charts (e.g.
+  // Top 10 branches/clients). On narrow screens only, allow Chart.js to
+  // skip/rotate ticks sensibly; the full name is still always available
+  // via the existing, unchanged tooltip on tap/hover.
+  const isNarrowScreen = window.innerWidth <= 480;
+  const defaultOptions = {
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{display: datasets.length>1, position:'top', labels:{boxWidth:10, padding:12}}},
+    scales:{
+      x:{grid:{display:false}, ticks: isNarrowScreen
+        ? {autoSkip:true, maxTicksLimit:6, maxRotation:45, minRotation:45}
+        : {autoSkip:false, maxRotation:opts.rotate?60:0}},
+      y:{grid:{color:CHART_COLORS.grid}, beginAtZero:true}
+    }
+  };
+  const callerOverrides = opts.overrides||{};
+  // Object.assign at the top level is shallow, so a caller-supplied
+  // opts.overrides.scales (e.g. {scales:{y:{max:100}}}) would otherwise
+  // silently replace the ENTIRE default scales object — dropping the
+  // x-axis tick config above, including the mobile autoSkip/maxTicksLimit
+  // settings. Merge scales.x and scales.y individually instead, so each
+  // axis keeps its own defaults and only the keys the caller actually
+  // specified are overridden.
+  const mergedOptions = Object.assign({}, defaultOptions, callerOverrides);
+  mergedOptions.scales = {
+    x: Object.assign({}, defaultOptions.scales.x, (callerOverrides.scales && callerOverrides.scales.x) || {}),
+    y: Object.assign({}, defaultOptions.scales.y, (callerOverrides.scales && callerOverrides.scales.y) || {})
+  };
   STATE.charts[canvasId] = new Chart(ctx, {
     type:'bar',
     data:{labels, datasets},
-    options: Object.assign({
-      responsive:true, maintainAspectRatio:false,
-      plugins:{legend:{display: datasets.length>1, position:'top', labels:{boxWidth:10, padding:12}}},
-      scales:{
-        x:{grid:{display:false}, ticks:{autoSkip:false, maxRotation:opts.rotate?60:0}},
-        y:{grid:{color:CHART_COLORS.grid}, beginAtZero:true}
-      }
-    }, opts.overrides||{})
+    options: mergedOptions
   });
 }
 function makeLineChart(canvasId, labels, datasets, opts={}){
