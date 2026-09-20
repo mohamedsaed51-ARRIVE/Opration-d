@@ -1220,7 +1220,28 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
   // other rule (character classification, weak/neutral resolution,
   // implicit levels, digit runs, bracket mirroring) is unchanged from the
   // first version and was already verified correct.
-  function pdfVisualOrder(str){
+  // Exposed so callers that word-wrap a long string into several lines
+  // BEFORE reordering (see pdfParagraph) can compute the paragraph's base
+  // direction ONCE from the full original text and force every wrapped
+  // line to use it — otherwise a line that happens to start with a Latin
+  // word purely because of where the wrap fell (e.g. an English customer
+  // name landing at the start of line 2 of an Arabic sentence) gets
+  // mis-detected as its own LTR paragraph, corrupting everything on that
+  // line. Confirmed by actual rendering: a real report sentence ending in
+  // "...أبرزهم: كرياتيفو - Creativo، سويتى فرصه كم - Swetiy." wraps with
+  // "Creativo..." starting line 2, which then rendered as if it were an
+  // independent LTR line instead of a continuation of the RTL sentence.
+  function pdfDetectParagraphLevel(str){
+    const chars = Array.from(String(str||''));
+    for(let i=0;i<chars.length;i++){
+      const t = classify(chars[i]);
+      if(t===T.L) return 0;
+      if(isRTLStrong(t)) return 1;
+    }
+    return 0;
+  }
+
+  function pdfVisualOrder(str, forcedLevel){
     if(str===null || str===undefined) return str;
     str = String(str);
     if(!str) return str;
@@ -1239,10 +1260,15 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
     let types = chars.map(classify);
     const origTypes = types.slice();
 
-    let paragraphLevel = 0;
-    for(let i=0;i<n;i++){
-      if(types[i]===T.L){ paragraphLevel = 0; break; }
-      if(isRTLStrong(types[i])){ paragraphLevel = 1; break; }
+    let paragraphLevel;
+    if(forcedLevel===0 || forcedLevel===1){
+      paragraphLevel = forcedLevel;
+    } else {
+      paragraphLevel = 0;
+      for(let i=0;i<n;i++){
+        if(types[i]===T.L){ paragraphLevel = 0; break; }
+        if(isRTLStrong(types[i])){ paragraphLevel = 1; break; }
+      }
     }
 
     let levels = new Array(n).fill(paragraphLevel);
@@ -1384,6 +1410,7 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
   }
 
   global.pdfVisualOrder = pdfVisualOrder;
+  global.pdfDetectParagraphLevel = pdfDetectParagraphLevel;
 })(typeof window!=='undefined' ? window : this);
 </script>
 <!-- Embedded ARRIVE logo (official brand asset) for the PDF header -->
@@ -4106,8 +4133,14 @@ const PDF_RIGHT = PDF_PAGE_W - PDF_MARGIN;
 // text is always drawn in correct visual order. Positioning args (x, y,
 // opts incl. align) are passed through completely unchanged — only the
 // character order of the text itself is affected.
-function pdfText(doc, text, x, y, opts){
-  const reorder = (typeof pdfVisualOrder==='function') ? pdfVisualOrder : (s=>s);
+// `forcedLevel` (0=LTR, 1=RTL, or undefined to auto-detect per string) lets
+// a caller that already split one paragraph into several wrapped lines
+// pass down the paragraph's OWN base direction, computed once from the
+// full original text — see pdfDetectParagraphLevel's comment for why this
+// matters (a wrapped line that happens to start with a Latin word must
+// not be treated as its own separate LTR paragraph).
+function pdfText(doc, text, x, y, opts, forcedLevel){
+  const reorder = (typeof pdfVisualOrder==='function') ? (s=>pdfVisualOrder(s, forcedLevel)) : (s=>s);
   const t = Array.isArray(text) ? text.map(reorder) : reorder(text);
   return doc.text(t, x, y, opts);
 }
@@ -4241,10 +4274,18 @@ function pdfParagraph(doc, font, y, text, opts){
   // Word-wrap on the ORIGINAL text first (so line breaks land on real word
   // boundaries), THEN shape+reorder each wrapped line independently — never
   // the other way around, which could wrap a line mid-ligature.
+  // The paragraph's base direction is computed ONCE from the full,
+  // pre-wrap text and forced onto every wrapped line (see
+  // pdfDetectParagraphLevel) — otherwise a line that happens to start with
+  // a Latin word purely because of where the wrap fell (an English
+  // customer name landing at the start of line 2, say) gets treated as
+  // its own independent LTR paragraph and renders wrong. Confirmed by
+  // actual rendering of a real report sentence that wraps this way.
   const rawLines = doc.splitTextToSize(String(text), PDF_USABLE_W - (opts.indent||0));
   const lines = rawLines;
+  const paraLevel = (typeof pdfDetectParagraphLevel==='function') ? pdfDetectParagraphLevel(text) : undefined;
   y = pdfCheckPageBreak(doc, y, lines.length*13 + 4);
-  pdfText(doc, lines, PDF_RIGHT - (opts.indent||0), y, {align:'right'});
+  pdfText(doc, lines, PDF_RIGHT - (opts.indent||0), y, {align:'right'}, paraLevel);
   return y + lines.length*13 + (opts.gap!==undefined?opts.gap:6);
 }
 function pdfKpiGrid(doc, font, y, cards){
@@ -4585,7 +4626,8 @@ async function mgmtGenerateExecutivePdfReport(){
       pdfText(doc, b.label, bx+infoBoxW-8, y+14, {align:'right'});
       doc.setFontSize(9); doc.setFont(font,'bold'); doc.setTextColor(20,20,20);
       const valLines = doc.splitTextToSize(b.value, infoBoxW-16).slice(0,2);
-      pdfText(doc, valLines, bx+infoBoxW-8, y+27, {align:'right'});
+      const valLevel = (typeof pdfDetectParagraphLevel==='function') ? pdfDetectParagraphLevel(b.value) : undefined;
+      pdfText(doc, valLines, bx+infoBoxW-8, y+27, {align:'right'}, valLevel);
     });
     y += infoBoxH + 16;
 
