@@ -1174,10 +1174,14 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
   const T = { L:'L', R:'R', AL:'AL', EN:'EN', ES:'ES', ET:'ET', AN:'AN',
               CS:'CS', NSM:'NSM', BN:'BN', B:'B', S:'S', WS:'WS', ON:'ON' };
 
+  function isArabicCodepoint(c){
+    return (c>=0x0600 && c<=0x06FF) || (c>=0x0750 && c<=0x077F) ||
+           (c>=0xFB50 && c<=0xFDFF) || (c>=0xFE70 && c<=0xFEFF);
+  }
+
   function classify(ch){
     const c = ch.codePointAt(0);
-    if((c>=0x0600 && c<=0x06FF) || (c>=0x0750 && c<=0x077F) ||
-       (c>=0xFB50 && c<=0xFDFF) || (c>=0xFE70 && c<=0xFEFF)){
+    if(isArabicCodepoint(c)){
       if((c>=0x0660 && c<=0x0669) || (c>=0x06F0 && c<=0x06F9)) return T.AN;
       if(c>=0x064B && c<=0x065F) return T.NSM;
       if(c===0x060C || c===0x061B || c===0x061F) return T.ON;
@@ -1200,6 +1204,22 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
 
   function isRTLStrong(t){ return t===T.R || t===T.AL; }
 
+  // v2 CHANGE NOTE (after real-render verification found v1 wrong): a full
+  // character-level L2 reversal (the originally-shipped version of this
+  // function) turned out to ALSO reverse the letters *within* Arabic
+  // words — confirmed by actually rendering a report through it: "تي وير"
+  // came out as "ريو يت" (correct word order, but each word's own letters
+  // mirrored). This proved the embedded font + jsPDF already display a
+  // homogeneous run of Arabic letters correctly shaped and correctly
+  // right-to-left ON THEIR OWN — only the RELATIVE ORDER of runs of
+  // different scripts/types needed fixing, never the internal letter
+  // order of an Arabic run. v2 therefore groups every maximal run of
+  // Arabic letters into one "locked" atom that always keeps its own
+  // original internal text, and only reorders atoms (Arabic-run atoms,
+  // plus one atom per non-Arabic character) relative to each other. Every
+  // other rule (character classification, weak/neutral resolution,
+  // implicit levels, digit runs, bracket mirroring) is unchanged from the
+  // first version and was already verified correct.
   function pdfVisualOrder(str){
     if(str===null || str===undefined) return str;
     str = String(str);
@@ -1208,6 +1228,13 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
     const chars = Array.from(str);
     const n = chars.length;
     if(n===0) return str;
+
+    const isArabicLetter = chars.map(ch => {
+      const c = ch.codePointAt(0);
+      if(!isArabicCodepoint(c)) return false;
+      if((c>=0x0660 && c<=0x0669) || (c>=0x06F0 && c<=0x06F9)) return false; // Arabic-Indic digits are numbers, not letters
+      return true;
+    });
 
     let types = chars.map(classify);
     const origTypes = types.slice();
@@ -1301,32 +1328,59 @@ window.ARABIC_FONT_BASE64 = "AAEAAAATAQAABAAwR0RFRr/PtUcAArHEAAACzkdQT1OzmaZiAAK
       else break;
     }
 
-    let maxLevel = 0, minOdd = Infinity;
-    for(let i=0;i<n;i++){
-      if(levels[i]>maxLevel) maxLevel = levels[i];
-      if(levels[i]%2===1 && levels[i]<minOdd) minOdd = levels[i];
+    // Build atoms: a maximal run of consecutive Arabic-letter characters
+    // (same level, which they share by construction) collapses into one
+    // "locked" atom carrying its ORIGINAL internal text untouched. Every
+    // other character is its own single-character atom, exactly as before
+    // — this preserves the already-verified digit/EN double-reversal-
+    // cancels-out behavior for numbers/percentages.
+    const atoms = [];
+    {
+      let i=0;
+      while(i<n){
+        if(isArabicLetter[i]){
+          let j=i; while(j<n && isArabicLetter[j] && levels[j]===levels[i]) j++;
+          atoms.push({ text: chars.slice(i,j).join(''), level: levels[i], locked:true });
+          i=j;
+        } else {
+          atoms.push({ text: chars[i], level: levels[i], locked:false });
+          i++;
+        }
+      }
     }
-    const outChars = chars.slice();
-    const outLevels = levels.slice();
+    const m = atoms.length;
+
+    let maxLevel = 0, minOdd = Infinity;
+    for(let i=0;i<m;i++){
+      if(atoms[i].level>maxLevel) maxLevel = atoms[i].level;
+      if(atoms[i].level%2===1 && atoms[i].level<minOdd) minOdd = atoms[i].level;
+    }
+
+    let order = atoms.map((a,i)=>i);
+    const atomLevels = atoms.map(a=>a.level);
     if(minOdd!==Infinity){
       for(let lvl=maxLevel; lvl>=minOdd; lvl--){
         let i=0;
-        while(i<n){
-          if(outLevels[i]>=lvl){
-            let j=i; while(j<n && outLevels[j]>=lvl) j++;
+        while(i<m){
+          if(atomLevels[order[i]]>=lvl){
+            let j=i; while(j<m && atomLevels[order[j]]>=lvl) j++;
             let a=i,b=j-1;
-            while(a<b){ const tmp=outChars[a]; outChars[a]=outChars[b]; outChars[b]=tmp; a++; b--; }
+            while(a<b){ const tmp=order[a]; order[a]=order[b]; order[b]=tmp; a++; b--; }
             i=j;
           } else i++;
         }
       }
     }
 
-    for(let i=0;i<n;i++){
-      if(levels[i]%2===1 && MIRROR[outChars[i]]) outChars[i] = MIRROR[outChars[i]];
-    }
+    const outParts = order.map(idx=>{
+      const a = atoms[idx];
+      if(a.locked) return a.text;
+      let ch = a.text;
+      if(a.level%2===1 && MIRROR[ch]) ch = MIRROR[ch];
+      return ch;
+    });
 
-    return outChars.join('');
+    return outParts.join('');
   }
 
   global.pdfVisualOrder = pdfVisualOrder;
