@@ -1,0 +1,135 @@
+/* ==========================================================================
+   ARRIVE DESIGN SYSTEM — TOKENS (V2.0)
+   Source of truth: ARRIVE_Design_Reporting_Project_Knowledge_V1_0/03_Tokens/tokens/*
+   These values are copied VERBATIM from the approved package (colors.css,
+   typography.css, spacing.css, scales.css). Do not edit values here to restyle
+   the dashboard — change them in the package, then re-copy.
+   Changing --arrive-blue (or any token) here re-colors the dashboard AND the
+   print/report layer, because every component below reads these variables.
+   ========================================================================== */
+:root{
+/* ---- colors.css : Brand palette — official V2.0 ---- */
+--arrive-blue:#0837C9;
+--arrive-teal:#00C7E6;
+--arrive-navy:#0F172A;
+--arrive-light-blue:#E6F4FF;
+--arrive-white:#FFFFFF;
+--arrive-gray:#64748B;
+--arrive-blue-700:#062BA0;
+--arrive-blue-800:#05237F;
+--arrive-blue-900:#0A1E6B;
+--arrive-blue-50:#F2F8FF;
+--arrive-teal-600:#00A9C4;
+--arrive-teal-50:#E0F9FD;
+--gray-50:#F8FAFC;
+--gray-100:#F1F5F9;
+--gray-200:#E2E8F0;
+--gray-300:#CBD5E1;
+--gray-400:#94A3B8;
+--gray-500:#64748B;
+--gray-700:#334155;
+/* Operational status — separate from brand; always pair with text/icon */
+--status-success:#22C55E;
+--status-in-progress:#3B82F6;
+--status-under-action:#F59E0B;
+--status-violation:#EF4444; /* V2.0: «مخالفة / حرجة» — one status; «حرج» uses this token */
+--status-closed:#64748B;
+--status-success-bg:#DCFCE7;
+--status-in-progress-bg:#DBEAFE;
+--status-under-action-bg:#FEF3C7;
+--status-violation-bg:#FEE2E2;
+--status-closed-bg:#F1F5F9;
+--status-success-fg:#15803D;
+--status-in-progress-fg:#1D4ED8;
+--status-under-action-fg:#B45309;
+--status-violation-fg:#B91C1C; /* text-on-tint for contrast only — not a status color */
+--status-closed-fg:#475569;
+/* Semantic aliases */
+--text-primary:var(--arrive-navy);
+--text-secondary:var(--arrive-gray);
+--text-muted:var(--gray-400);
+--text-on-brand:var(--arrive-white);
+--text-link:var(--arrive-blue);
+--text-accent:var(--arrive-teal);
+--surface-page:#F4F8FD;
+--surface-card:var(--arrive-white);
+--surface-subtle:var(--arrive-light-blue);
+--surface-brand:var(--arrive-blue);
+--surface-dark:var(--arrive-navy);
+--surface-sidebar:var(--arrive-navy);
+--border-default:var(--gray-200);
+--border-strong:var(--gray-300);
+--border-brand:var(--arrive-blue);
+--focus-ring:rgba(0,199,230,.45);
+--table-header-bg:var(--arrive-blue);
+--table-header-fg:var(--arrive-white);
+--overlay-blue:rgba(8,55,201,.78);
+--overlay-blue-soft:rgba(8,55,201,.55);
+--overlay-navy:rgba(15,23,42,.6);
+
+/* ---- typography.css ---- */
+--font-arabic:'Cairo',system-ui,sans-serif;
+--font-latin:'Inter',system-ui,sans-serif;
+--font-ui:'Cairo','Inter',system-ui,sans-serif;
+--font-numeric:'Inter','Cairo',system-ui,sans-serif;
+--font-mono:'JetBrains Mono',ui-monospace,monospace; /* implementation option for IDs/technical values — not a brand font */
+--fw-light:300;
+--fw-regular:400;
+--fw-semibold:600;
+--fw-bold:700;
+--fw-black:800;
+--fs-display:48px;
+--fs-kpi:34px;
+--fs-title:30px;
+--fs-section:20px;
+--fs-subtitle:16px;
+--fs-body:14px;
+--fs-small:13px;
+--fs-caption:12px;
+--fs-micro:11px;
+--lh-tight:1.2;
+--lh-snug:1.35;
+--lh-body:1.6;
+
+/* ---- spacing.css ---- */
+--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-8:32px;--space-10:40px;--space-12:48px;--space-16:64px;
+--radius-xs:4px;--radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-xl:20px;--radius-pill:999px;
+--shadow-xs:0 1px 2px rgba(15,23,42,.06);
+--shadow-card:0 1px 3px rgba(15,23,42,.06),0 4px 14px rgba(8,55,201,.06);
+--shadow-raised:0 8px 24px rgba(15,23,42,.12);
+--shadow-focus:0 0 0 3px var(--focus-ring);
+--control-h-sm:32px;--control-h-md:40px;--control-h-lg:48px;
+--sidebar-w:240px;--header-h:64px;
+--ease-standard:cubic-bezier(.2,.0,.0,1);
+--dur-fast:120ms;
+--dur-base:200ms;
+--dur-slow:320ms;
+
+/* ---- scales.css (subset used by the dashboard + report layer) ---- */
+--bp-sm:640px; --bp-md:900px; --bp-lg:1200px; --bp-xl:1440px; /* documentation only — media queries use literals */
+--chart-1:var(--arrive-blue);
+--chart-2:var(--arrive-teal);
+--chart-3:var(--arrive-navy);
+--chart-4:var(--gray-400);
+--chart-5:var(--gray-300);
+--chart-highlight:var(--arrive-teal);
+--chart-target:var(--arrive-teal-600);
+--chart-grid:var(--gray-200);
+--chart-axis:var(--border-strong);
+--chart-label:var(--text-secondary);
+--print-fs-title:30pt;
+--print-fs-section:18pt;
+--print-fs-subsection:14pt;
+--print-fs-body:11pt;
+--print-fs-table:10pt;
+--print-fs-caption:9pt;
+--print-fs-footer:8pt;
+--print-margin-x:56px;
+--print-footer-h:46px;
+--bw-hairline:1px;
+--bw-strong:2px;
+--bw-focus:3px;
+--bw-accent:4px;
+--icon-xs:12px;--icon-sm:14px;--icon-md:16px;--icon-lg:20px;--icon-xl:24px;--icon-disc:52px;
+--z-base:0;--z-sticky:5;--z-header:10;--z-dropdown:20;--z-drawer:30;--z-modal:40;--z-toast:50;
+}
