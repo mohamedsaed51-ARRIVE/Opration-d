@@ -660,6 +660,16 @@ footer.app-footer .grow{flex:1;}
   .chart-box,.chart-box.tall{height:240px;}
   .tabs-nav{display:none;}
 }
+
+/* ---- Updating state: summary + tabs dim and a progress bar runs until the new data is rendered ---- */
+body.ds-updating .exec-wrap .kpi-grid,
+body.ds-updating .exec-wrap .attention,
+body.ds-updating .tab-panel.active{opacity:.45; filter:saturate(.6); pointer-events:none; transition:opacity .15s;}
+body.ds-updating::before{content:""; position:fixed; top:0; inset-inline:0; height:3px; z-index:9999;
+  background:linear-gradient(90deg, transparent, var(--arrive-teal), var(--arrive-blue), transparent); background-size:40% 100%; background-repeat:no-repeat;
+  animation:ds-progress 1s linear infinite;}
+@keyframes ds-progress{from{background-position:-40% 0} to{background-position:140% 0}}
+@media (prefers-reduced-motion:reduce){ body.ds-updating::before{animation:none; background:var(--arrive-blue);} }
 /*ARRIVE-DS-CSS:END*/
 </style>
 </head>
@@ -2855,6 +2865,7 @@ async function switchToMonth(month, opts){
   // flight — the boot screen only appears on a truly empty dashboard;
   // otherwise this is a non-blocking "updating" cue (existing KPIs/charts/
   // tabs stay exactly as they are until we know the outcome).
+  const _dsCue = !silent && !background; if(_dsCue) dsSetUpdating(true);
   if(!silent && !background){
     if(hadDataOnEntry) setConnStatus('updating');
     else showGsheetBoot(true);
@@ -2986,6 +2997,7 @@ async function switchToMonth(month, opts){
   }finally{
     if(!background){
       monthSwitchInFlight = false;
+      if(_dsCue) dsSetUpdating(false);
       if(sel){ sel.value = selectedMonth || month; sel.disabled = false; }
       // The refresh button's loading text is unconditionally resolved here —
       // success, failure, thrown exception, or timeout all funnel through
@@ -6108,7 +6120,26 @@ function withAnchoredDeliveryRate(serverSummary){
 // this function never reaches for STATE.rows or fetchSheetRows() as a
 // substitute.
 let _serverKpiToken = 0;
+// Visible "page is updating" state (presentation only): dims the summary + tabs and shows a progress bar
+// until the server answer is rendered (or fails), so a filter/month choice never looks like "only the chip changed".
+let _dsUpdatingCount = 0;
+function dsSetUpdating(on){
+  _dsUpdatingCount = Math.max(0, _dsUpdatingCount + (on ? 1 : -1));
+  document.body.classList.toggle('ds-updating', _dsUpdatingCount > 0);
+  const tag = document.getElementById('filterCountTag');
+  if(tag){
+    if(_dsUpdatingCount > 0){ tag.dataset.prev = tag.dataset.prev || tag.textContent; tag.textContent = 'جاري تحديث الصفحة...'; }
+    else if(tag.dataset.prev){ delete tag.dataset.prev; if(typeof renderActiveFilterChips==='function') renderActiveFilterChips(); }
+  }
+}
 async function refreshKpiAndOverviewFromServer(month, opts){
+  opts = opts || {};
+  const visible = !!month && !opts.skipDomRender && !opts.useEmptyFilters && !!effectiveWebAppUrl();
+  if(visible) dsSetUpdating(true);
+  try{ return await _refreshKpiAndOverviewCore(month, opts); }
+  finally{ if(visible) dsSetUpdating(false); }
+}
+async function _refreshKpiAndOverviewCore(month, opts){
   opts = opts || {};
   if(!month) return null;
   if(!effectiveWebAppUrl()) return null; // no data source configured — nothing to request; last good render (if any) stays as-is
