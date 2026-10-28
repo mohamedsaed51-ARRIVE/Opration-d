@@ -831,7 +831,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       <button class="icon-btn" id="monthListRefreshBtn" type="button" title="تحديث قائمة الشهور المتاحة" aria-label="تحديث قائمة الشهور المتاحة"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
     </div>
     <div class="topbar-right">
-      <button class="btn-refresh hidden" id="refreshSheetBtn" type="button" title="سحب أحدث بيانات لهذا الشهر من Google Sheets">تحديث الآن</button>
+      <button class="btn-refresh hidden" id="refreshSheetBtn" type="button" title="تحديث الملخصات المحفوظة (الداشبورد + عمر الشحنة) من Google Sheets لهذا الشهر، ثم إعادة تحميل البيانات">تحديث الآن</button>
       <button class="icon-btn" id="printBtn" type="button" title="طباعة / حفظ كملف PDF" aria-label="طباعة"><i class="fa-solid fa-print" aria-hidden="true"></i></button>
       <button class="icon-btn" id="headerSettingsBtn" type="button" title="إعدادات مصدر البيانات" aria-label="إعدادات مصدر البيانات"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>
     </div>
@@ -8050,10 +8050,43 @@ function initMonthSelectorHandlers(){
   }
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(refreshBtn){
-    refreshBtn.addEventListener('click', async ()=>{
-      if(selectedMonth) await switchToMonth(selectedMonth, { force:true });
-    });
+    refreshBtn.addEventListener('click', ()=>rebuildSummariesThenRefresh());
   }
+}
+/* «تحديث الآن»: rebuilds the saved summaries on the server (dashboard summary + shipment-age summary — the same
+   work the Google Sheets menu does) for the selected month (or every available month under «كل الشهور»),
+   then reloads the dashboard from them. Replaces the need to open the spreadsheet and run the menu. */
+let SUMMARY_REBUILD_BUSY = false;
+async function rebuildSummariesThenRefresh(){
+  if(!selectedMonth || SUMMARY_REBUILD_BUSY) return;
+  const btn = document.getElementById('refreshSheetBtn');
+  const months = selectedMonth === ALL_MONTHS_SENTINEL ? availableMonths.slice() : [selectedMonth];
+  SUMMARY_REBUILD_BUSY = true;
+  if(btn) btn.disabled = true;
+  const problems = [];
+  try{
+    for(let i=0; i<months.length; i++){
+      const m = months[i];
+      if(btn) btn.textContent = `جاري تحديث ملخص ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}...`;
+      try{
+        const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'buildSummary', sheet:m }), {cache:'no-store'}, 330000);
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const out = JSON.parse(await res.text());
+        if(out && out.success === false) throw new Error(out.error || 'فشل بناء الملخص');
+        if(out && out.ageSnapshot && out.ageSnapshot.success === false && out.ageSnapshot.skipped !== 'time-budget'){
+          problems.push(`${monthDisplayName(m)} (ملخص عمر الشحنة): ${out.ageSnapshot.error||'فشل'}`);
+        }
+      }catch(e){
+        problems.push(`${monthDisplayName(m)}: ${e && e.message ? e.message : e}`);
+      }
+    }
+  }finally{
+    SUMMARY_REBUILD_BUSY = false;
+    if(btn){ btn.disabled = false; btn.textContent = 'تحديث الآن'; }
+  }
+  AGE.data = null; AGE.failKey = null; // make the shipment-age tab recompute from the fresh summary
+  await switchToMonth(selectedMonth, { force:true });
+  if(problems.length) alert('تم التحديث مع ملاحظات:\n- '+problems.join('\n- ')+'\n\nلو ظهر خطأ بخصوص نسخة Code.gs، تأكد من نشر آخر نسخة (New version).');
 }
 // ARRIVE design-system UI wiring (presentation only): chart defaults, shared table search/pagination, print header, filter chips.
 function initDsUi(){
