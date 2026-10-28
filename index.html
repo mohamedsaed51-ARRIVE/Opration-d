@@ -831,7 +831,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       <button class="icon-btn" id="monthListRefreshBtn" type="button" title="تحديث قائمة الشهور المتاحة" aria-label="تحديث قائمة الشهور المتاحة"><i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i></button>
     </div>
     <div class="topbar-right">
-      <button class="btn-refresh hidden" id="refreshSheetBtn" type="button" title="تحديث الملخصات المحفوظة (الداشبورد + عمر الشحنة) من Google Sheets لهذا الشهر، ثم إعادة تحميل البيانات">تحديث الآن</button>
+      <button class="btn-refresh hidden" id="refreshSheetBtn" type="button" title="سحب أحدث بيانات لهذا الشهر من الملخص المحفوظ">تحديث الآن</button>
       <button class="icon-btn" id="printBtn" type="button" title="طباعة / حفظ كملف PDF" aria-label="طباعة"><i class="fa-solid fa-print" aria-hidden="true"></i></button>
       <button class="icon-btn" id="headerSettingsBtn" type="button" title="إعدادات مصدر البيانات" aria-label="إعدادات مصدر البيانات"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>
     </div>
@@ -1206,6 +1206,18 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   </div>
 
   <div class="tab-panel" id="tab-settings">
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span><i class="fa-solid fa-rotate" aria-hidden="true"></i>تحديث الداش بورد</span></div>
+      <div class="helptext" style="margin-bottom:10px;">
+        يعيد بناء الملخصات المحفوظة من شيتات Google (ملخص الداشبورد + ملخص عمر الشحنة) للشهر المختار أعلى الصفحة، أو لكل الشهور المتاحة عند اختيار «كل الشهور»، ثم يعيد تحميل البيانات.
+        نفس عمل قائمة ARRIVE Dashboard داخل Google Sheets، لكن من هنا. قد يستغرق دقيقة أو أكثر للشهر الواحد — لا تغلق الصفحة أثناء التحديث.
+        زر «تحديث الآن» العلوي يسحب فقط آخر ملخص محفوظ دون إعادة بنائه.
+      </div>
+      <div class="settings-input-row">
+        <button class="btn-primary" id="rebuildDashboardBtn" type="button"><i class="fa-solid fa-rotate" aria-hidden="true"></i> تحديث الداش بورد</button>
+        <span id="rebuildDashboardStatus" class="helptext" style="margin:0;" aria-live="polite"></span>
+      </div>
+    </div>
     <div class="settings-grid">
       <div class="card">
         <div class="card-title">ربط الأعمدة (Column Mapping)</div>
@@ -7140,6 +7152,7 @@ function initShipAge(){
   ageRenderStdTable();
   document.getElementById('ageRunBtn').addEventListener('click', ()=>runAgeReport(true));
   document.getElementById('ageDocxBtn').addEventListener('click', exportAgeDocx);
+  const rb = document.getElementById('rebuildDashboardBtn'); if(rb) rb.addEventListener('click', ()=>rebuildSummariesThenRefresh());
   document.getElementById('ageXlsxBtn').addEventListener('click', exportAgeXlsx);
   document.getElementById('agePrintBtn').addEventListener('click', ()=>window.print());
   document.getElementById('ageStdReset').addEventListener('click', ()=>{
@@ -8050,16 +8063,21 @@ function initMonthSelectorHandlers(){
   }
   const refreshBtn = document.getElementById('refreshSheetBtn');
   if(refreshBtn){
-    refreshBtn.addEventListener('click', ()=>rebuildSummariesThenRefresh());
+    refreshBtn.addEventListener('click', async ()=>{
+      if(selectedMonth) await switchToMonth(selectedMonth, { force:true });
+    });
   }
 }
-/* «تحديث الآن»: rebuilds the saved summaries on the server (dashboard summary + shipment-age summary — the same
-   work the Google Sheets menu does) for the selected month (or every available month under «كل الشهور»),
-   then reloads the dashboard from them. Replaces the need to open the spreadsheet and run the menu. */
+/* الإعدادات ← «تحديث الداش بورد»: rebuilds the saved summaries on the server (dashboard summary + shipment-age summary —
+   the same work the Google Sheets menu does) for the selected month (or every available month under «كل الشهور»),
+   then reloads the dashboard from them. Replaces the need to open the spreadsheet and run the menu.
+   (The top «تحديث الآن» button stays the quick refresh: it just re-reads the already-saved summary.) */
 let SUMMARY_REBUILD_BUSY = false;
 async function rebuildSummariesThenRefresh(){
   if(!selectedMonth || SUMMARY_REBUILD_BUSY) return;
-  const btn = document.getElementById('refreshSheetBtn');
+  const btn = document.getElementById('rebuildDashboardBtn');
+  const note = document.getElementById('rebuildDashboardStatus');
+  const say = t=>{ if(note) note.textContent = t; };
   const months = selectedMonth === ALL_MONTHS_SENTINEL ? availableMonths.slice() : [selectedMonth];
   SUMMARY_REBUILD_BUSY = true;
   if(btn) btn.disabled = true;
@@ -8067,7 +8085,7 @@ async function rebuildSummariesThenRefresh(){
   try{
     for(let i=0; i<months.length; i++){
       const m = months[i];
-      if(btn) btn.textContent = `جاري تحديث ملخص ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}...`;
+      say(`جاري تحديث ملخص ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}... لا تغلق الصفحة.`);
       try{
         const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'buildSummary', sheet:m }), {cache:'no-store'}, 330000);
         if(!res.ok) throw new Error('HTTP '+res.status);
@@ -8082,10 +8100,12 @@ async function rebuildSummariesThenRefresh(){
     }
   }finally{
     SUMMARY_REBUILD_BUSY = false;
-    if(btn){ btn.disabled = false; btn.textContent = 'تحديث الآن'; }
+    if(btn) btn.disabled = false;
   }
+  say('جاري إعادة تحميل البيانات...');
   AGE.data = null; AGE.failKey = null; // make the shipment-age tab recompute from the fresh summary
   await switchToMonth(selectedMonth, { force:true });
+  say(problems.length ? 'اكتمل التحديث مع ملاحظات.' : ('تم تحديث الداش بورد — '+new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'})));
   if(problems.length) alert('تم التحديث مع ملاحظات:\n- '+problems.join('\n- ')+'\n\nلو ظهر خطأ بخصوص نسخة Code.gs، تأكد من نشر آخر نسخة (New version).');
 }
 // ARRIVE design-system UI wiring (presentation only): chart defaults, shared table search/pagination, print header, filter chips.

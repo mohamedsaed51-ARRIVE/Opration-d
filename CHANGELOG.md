@@ -17,7 +17,7 @@
 - دوال القائمة `ARRIVE Dashboard`: `updateCurrentQuarterAgeSnapshots` · `buildMissingAgeSnapshots` · `buildAllAgeSnapshots` (+ `buildAgeSnapshot(month)` وaction `buildAgeSnapshot&sheet=October`).
 - الاستثناءات: فلتر تاريخ أو `live=1` يقرآن الشيت الخام؛ الشهر بلا ملخص يُقرأ مباشرة. تاريخ القياس والمعايير وتصنيف المجموعات تُطبَّق وقت القراءة (لا حاجة لإعادة البناء).
 - `tests/test_age_snapshot.js`: نتائج الملخص = نتائج القراءة المباشرة.
-- زر «تحديث الآن» في الداشبورد صار يبني الملخصات المحفوظة على السيرفر (`action=buildSummary` للشهر المختار، أو لكل الشهور المتاحة تحت «كل الشهور» بالتتابع مع عرض التقدم) ثم يعيد تحميل البيانات — بدل فتح Google Sheets وتشغيل القائمة.
+- زر «تحديث الداش بورد» في تبويب الإعدادات يبني الملخصات المحفوظة على السيرفر (`action=buildSummary` للشهر المختار، أو لكل الشهور المتاحة تحت «كل الشهور» بالتتابع مع عرض التقدم) ثم يعيد تحميل البيانات — بدل فتح Google Sheets وتشغيل القائمة. زر «تحديث الآن» العلوي يبقى تحديثًا سريعًا من الملخص المحفوظ.
 - تحديث ملخص الداشبورد الأصلي (`buildAndSaveMonthSummary`: قائمة Update Current Quarter / Update All 12 / Batch / `action=buildSummary`) صار يحدّث ملخص عمر الشحنة معه تلقائيًا؛ فشله لا يفشل التحديث الأصلي ويظهر في `ageSnapshot` بنتيجة التحديث، ولا يبدأ بعد 215 ثانية من بدء التنفيذ (يُستكمل بـ Build Missing Months Summary).
 
 ### لم يتغير
