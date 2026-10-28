@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — تبويب «عمر الشحنة» (التقرير الإداري والرقابي الموحد للتسليم والمرتجع)
+### Added
+- `Code.gs`: action جديد `?action=ageReport&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&asOf=YYYY-MM-DD[&standards=JSON][&refresh=1]` (دالة `getAgeReport`). تجميع على السيرفر من شيتات الشهور الخام (بدون المرور على الـ snapshots أو فلاتر اللوحة)، مع حذف تكرار رقم البوليصة، وتخزين مؤقت 10 دقائق.
+- ثوابت قابلة للتعديل: `AGE_REPORT_GROUPS` (الفروع الداخلة في كل مجموعة جغرافية + معايير السوق/الشركة/المرتجع)، `AGE_RETURN_CLOSED_STATUSES`، `AGE_RETURN_OPEN_KEYWORDS`.
+- `index.html`: تبويب «عمر الشحنة» في القائمة الجانبية: كروت الملخص التنفيذي (تسليمات / مرتجعات / مفتوحة)، تحليل المجموعات الثلاث، جداول الفروع (تسليم ومرتجع)، الشحنات المفتوحة وأعلى 5 فروع وقائمة الشحنات، الملاحظات الرقابية وجودة البيانات، المنهجية. تصدير Excel (6 شيتات RTL) وطباعة/PDF.
+- `tests/test_age_report.js`: اختبارات منطق الحساب (`node tests/test_age_report.js`).
+
+### لم يتغير
+- لا تغيير في أي دالة حساب/فلترة/SLA/snapshot قائمة. تبويب «عمر الشحنة» مستقل عن فلاتر اللوحة واختيار الشهر.
+
 ## [Unreleased] — إعادة تصميم الواجهة والتقارير بهوية ARRIVE (UI فقط)
 ### Added
 - `design-system/` — نظام تصميم مركزي: `arrive-tokens.css` (الألوان/الخطوط/المسافات — مصدر واحد)، `arrive-components.css`، `arrive-dashboard.css`، `arrive-ds.js` (ألوان الرسوم وPDF تُقرأ من الـ tokens)، `logos.js` (الشعار المعتمد)، `build.py` (يدمج كل شيء داخل `index.html` لأن النشر ملف واحد).

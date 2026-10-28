@@ -164,6 +164,10 @@ function doGet(e) {
       result = buildMissingMonthSnapshots();
     }
 
+    else if (action === "ageReport") {
+      result = getAgeReport(params);
+    }
+
     // --------------------------------------------------------
     // DIAGNOSTIC
     // --------------------------------------------------------
@@ -2350,6 +2354,392 @@ function getAllMonthsDashboardSummary(params) {
   return result;
 }
 
+
+// ============================================================
+// 5D. SHIPMENT AGE REPORT — التقرير الإداري والرقابي لعمر الشحنة
+//
+// Stand-alone aggregation (does NOT touch snapshots / filter cube / SLA
+// settings). Population = shipments whose Pickup Date falls inside
+// [dateFrom, dateTo], de-duplicated by AWB (latest Last-Status wins, same
+// rule as the main dashboard).
+//
+// Age (calendar days, date part only — time of day ignored):
+//   - closed shipments (delivered / closed return): Last Status Date - Pickup Date
+//   - open shipments   (in progress / open return): asOf date        - Pickup Date
+// Two standards per geographic group: market (delivery only) and company
+// (delivery / return). "Within" means age <= standard.
+//
+// Return classification uses the Status column only:
+//   closed return = status listed in AGE_RETURN_CLOSED_STATUSES
+//   open return   = any other status containing one of AGE_RETURN_OPEN_KEYWORDS
+// Rejected ("رفض الاستلام ...") and unrecognised statuses are reported in a
+// separate "other" bucket so totals always reconcile and nothing is hidden.
+// ============================================================
+
+var AGE_REPORT_GROUPS = [
+  { key: "cairo", name: "القاهرة والإسكندرية", marketDays: 2, companyDeliveryDays: 15, companyReturnDays: 5,
+    branches: ["مدينة نصر", "المعادي", "حدائق القبة", "المؤسسة", "العجوزة", "الهرم", "الإسكندرية", "أكتوبر", "الشروق", "رئيسي"] },
+  { key: "delta", name: "الدلتا والقنال", marketDays: 3, companyDeliveryDays: 20, companyReturnDays: 6,
+    branches: ["الإسماعيلية", "المنوفية", "القليوبية", "كفر الشيخ", "المنصورة", "الشرقية", "البحيرة", "طنطا"] },
+  { key: "upper", name: "الصعيد", marketDays: 3, companyDeliveryDays: 20, companyReturnDays: 6,
+    branches: ["الفيوم", "الصعيد"] }
+];
+var AGE_RETURN_CLOSED_STATUSES = ["مرتجعات"];
+var AGE_RETURN_OPEN_KEYWORDS = ["مرتجع", "رجيع", "ارجاع", "إرجاع"];
+var AGE_REPORT_MAX_MONTHS = 4;
+var AGE_REPORT_MAX_OPEN_LIST = 3000;
+var AGE_REPORT_CACHE_TTL_SECONDS = 600;
+
+function ageNormBranch_(name) {
+  return summaryNormalizeArabicForMatch_(summaryNormText(name))
+    .replace(/^فرع\s+/, "")
+    .replace(/\s+/g, "");
+}
+function ageDayNum_(d) {
+  return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+}
+function ageDayNumFromIso_(s) { // "YYYY-MM-DD" -> same scale as ageDayNum_
+  var p = String(s).split("-");
+  return Math.floor(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2])) / 86400000);
+}
+function ageIsoFromDayNum_(n) {
+  var d = new Date(n * 86400000);
+  var m = d.getUTCMonth() + 1, day = d.getUTCDate();
+  return d.getUTCFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (day < 10 ? "0" : "") + day;
+}
+function ageIsoDate_(d) {
+  var m = d.getMonth() + 1, day = d.getDate();
+  return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (day < 10 ? "0" : "") + day;
+}
+
+// kind: delivered | returnClosed | returnOpen | inProgress | other
+function ageClassify_(status) {
+  var bucket = summaryClassifyStatus(status);
+  if (bucket === "delivered") return "delivered";
+  if (bucket === "pending") return "inProgress";
+  if (bucket === "rejected") return "other";
+  var norm = summaryNormalizeArabicForMatch_(summaryNormText(status));
+  var i;
+  if (bucket === "returned") return "returnClosed";
+  for (i = 0; i < AGE_RETURN_CLOSED_STATUSES.length; i++) {
+    if (norm === summaryNormalizeArabicForMatch_(AGE_RETURN_CLOSED_STATUSES[i])) return "returnClosed";
+  }
+  for (i = 0; i < AGE_RETURN_OPEN_KEYWORDS.length; i++) {
+    if (norm.indexOf(summaryNormalizeArabicForMatch_(AGE_RETURN_OPEN_KEYWORDS[i])) !== -1) return "returnOpen";
+  }
+  return "other";
+}
+
+function ageNewAcc_() { return { count: 0, withinMarket: 0, withinCompany: 0, over: 0, sumAge: 0, ageN: 0, noAge: 0 }; }
+function ageFinalizeAcc_(a) {
+  return {
+    count: a.count, withinMarket: a.withinMarket, withinCompany: a.withinCompany, over: a.over, noAge: a.noAge,
+    avgAge: a.ageN > 0 ? a.sumAge / a.ageN : null,
+    marketPct: a.count > 0 ? a.withinMarket / a.count * 100 : null,
+    companyPct: a.count > 0 ? a.withinCompany / a.count * 100 : null,
+    overPct: a.count > 0 ? a.over / a.count * 100 : null
+  };
+}
+function ageAddToAcc_(a, kind, age, std) {
+  a.count++;
+  if (age === null) { a.noAge++; return; }
+  a.sumAge += age; a.ageN++;
+  if (std.delivery < 0) return; // unassigned branch: age statistics only, never judged against a standard
+  if (kind === "delivered" && age <= std.market) a.withinMarket++;
+  var limit = kind === "delivered" || kind === "inProgress" ? std.delivery : std.returns;
+  if (age <= limit) a.withinCompany++; else a.over++;
+}
+function ageNewKindAccs_() {
+  return { delivered: ageNewAcc_(), returnClosed: ageNewAcc_(), returnOpen: ageNewAcc_(), inProgress: ageNewAcc_(), other: ageNewAcc_() };
+}
+function ageFinalizeKindAccs_(k) {
+  return { delivered: ageFinalizeAcc_(k.delivered), returnClosed: ageFinalizeAcc_(k.returnClosed),
+    returnOpen: ageFinalizeAcc_(k.returnOpen), inProgress: ageFinalizeAcc_(k.inProgress), other: ageFinalizeAcc_(k.other) };
+}
+function ageSumKinds_(k) { return k.delivered.count + k.returnClosed.count + k.returnOpen.count + k.inProgress.count + k.other.count; }
+
+// Resolves the effective groups, applying optional overrides
+// {cairo:{market,delivery,returns}, ...}. Non-positive / non-numeric values are ignored.
+function ageResolveGroups_(overrides) {
+  var out = [];
+  for (var i = 0; i < AGE_REPORT_GROUPS.length; i++) {
+    var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {};
+    function pick(v, d) { var n = Number(v); return (v !== undefined && v !== null && v !== "" && isFinite(n) && n > 0) ? n : d; }
+    out.push({ key: g.key, name: g.name, branches: g.branches,
+      market: pick(o.market, g.marketDays), delivery: pick(o.delivery, g.companyDeliveryDays), returns: pick(o.returns, g.companyReturnDays) });
+  }
+  return out;
+}
+
+// records: [{awb, branch, status, pickup:Date, lastStatus:Date|null}] — already de-duplicated and pickup-range filtered.
+function ageReportCompute_(records, groups, asOfNum) {
+  var branchToGroup = {}, groupIdx = {}, gi, bi;
+  var state = [];
+  for (gi = 0; gi < groups.length; gi++) {
+    groupIdx[groups[gi].key] = gi;
+    for (bi = 0; bi < groups[gi].branches.length; bi++) branchToGroup[ageNormBranch_(groups[gi].branches[bi])] = gi;
+    state.push({ kinds: ageNewKindAccs_(), branches: {}, branchOrder: [] });
+  }
+  var unassigned = { kinds: ageNewKindAccs_(), branches: {}, branchOrder: [] };
+  var unmappedBranches = {};
+  var total = ageNewKindAccs_();
+  var statusBreakdown = {};
+  var dq = { invalidPickup: 0, closedWithoutEndDate: 0, negativeAge: 0, missingBranch: 0 };
+  var openList = [];
+  var sumOpenAge = 0, openAgeN = 0, sumPendAge = 0, pendAgeN = 0, sumRetAge = 0, retAgeN = 0;
+  var branchOpenAgg = {};
+
+  for (var r = 0; r < records.length; r++) {
+    var rec = records[r];
+    var kind = ageClassify_(rec.status);
+    var sKey = rec.status || "(بدون حالة)";
+    if (!statusBreakdown[sKey]) statusBreakdown[sKey] = { count: 0, kind: kind };
+    statusBreakdown[sKey].count++;
+
+    var bNorm = ageNormBranch_(rec.branch);
+    var gIndex = bNorm && branchToGroup.hasOwnProperty(bNorm) ? branchToGroup[bNorm] : -1;
+    var gs = gIndex >= 0 ? state[gIndex] : unassigned;
+    var std = gIndex >= 0 ? groups[gIndex] : null;
+    if (!rec.branch) dq.missingBranch++;
+    else if (gIndex < 0) unmappedBranches[rec.branch] = (unmappedBranches[rec.branch] || 0) + 1;
+
+    var branchLabel = rec.branch ? summaryNormText(rec.branch).replace(/^فرع\s+/, "") : "غير محدد";
+    if (gIndex >= 0) {
+      for (bi = 0; bi < groups[gIndex].branches.length; bi++) {
+        if (ageNormBranch_(groups[gIndex].branches[bi]) === bNorm) { branchLabel = groups[gIndex].branches[bi]; break; }
+      }
+    }
+    if (!gs.branches[branchLabel]) { gs.branches[branchLabel] = ageNewKindAccs_(); gs.branchOrder.push(branchLabel); }
+
+    // age
+    var age = null;
+    var isOpen = kind === "inProgress" || kind === "returnOpen";
+    if (!rec.pickup) { dq.invalidPickup++; }
+    else if (kind !== "other") {
+      var pNum = ageDayNum_(rec.pickup);
+      if (isOpen) age = asOfNum - pNum;
+      else if (rec.lastStatus) age = ageDayNum_(rec.lastStatus) - pNum;
+      else dq.closedWithoutEndDate++;
+      if (age !== null && age < 0) { dq.negativeAge++; age = null; }
+    }
+
+    // groups with no std (unassigned) fall back to the first group's standards ONLY for the over/within split display, never silently:
+    // they are reported under "غير مصنّف" with age statistics only.
+    var effStd = std || { market: -1, delivery: -1, returns: -1 };
+    ageAddToAcc_(gs.kinds[kind], kind, age, effStd);
+    ageAddToAcc_(gs.branches[branchLabel][kind], kind, age, effStd);
+    if (std) ageAddToAcc_(total[kind], kind, age, effStd);
+
+    if (isOpen && age !== null) {
+      sumOpenAge += age; openAgeN++;
+      if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else { sumRetAge += age; retAgeN++; }
+    }
+    if (isOpen) {
+      var limit = std ? (kind === "inProgress" ? std.delivery : std.returns) : null;
+      var overdue = (limit !== null && age !== null) ? age > limit : false;
+      var bo = branchOpenAgg[branchLabel] || (branchOpenAgg[branchLabel] = { branch: branchLabel, group: std ? std.name : "غير مصنّف", pending: 0, pendingOver: 0, ret: 0, retOver: 0 });
+      if (kind === "inProgress") { bo.pending++; if (overdue) bo.pendingOver++; } else { bo.ret++; if (overdue) bo.retOver++; }
+      openList.push({ awb: rec.awb, branch: branchLabel, group: std ? std.name : "غير مصنّف", status: rec.status, kind: kind,
+        pickup: rec.pickup ? ageIsoDate_(rec.pickup) : null, age: age, limit: limit, overdue: overdue });
+    }
+  }
+
+  // ---- finalize ----
+  var outGroups = [];
+  function finalizeGroup(gs, meta) {
+    var kinds = ageFinalizeKindAccs_(gs.kinds);
+    var gTotal = ageSumKinds_(gs.kinds);
+    var branches = [];
+    for (var b = 0; b < gs.branchOrder.length; b++) {
+      var name = gs.branchOrder[b], bk = gs.branches[name];
+      branches.push({ name: name, total: ageSumKinds_(bk), kinds: ageFinalizeKindAccs_(bk) });
+    }
+    branches.sort(function (x, y) { return y.total - x.total; });
+    var within = gs.kinds.delivered.withinCompany + gs.kinds.returnClosed.withinCompany + gs.kinds.returnOpen.withinCompany + gs.kinds.inProgress.withinCompany;
+    var over = gs.kinds.delivered.over + gs.kinds.returnClosed.over + gs.kinds.returnOpen.over + gs.kinds.inProgress.over;
+    return Object.assign({ total: gTotal, kinds: kinds, branches: branches,
+      withinCompany: within, over: over,
+      withinPct: gTotal > 0 ? within / gTotal * 100 : null, overPct: gTotal > 0 ? over / gTotal * 100 : null }, meta);
+  }
+  var grandTotal = 0, gj;
+  for (gj = 0; gj < state.length; gj++) grandTotal += ageSumKinds_(state[gj].kinds);
+  var unassignedTotal = ageSumKinds_(unassigned.kinds);
+  grandTotal += unassignedTotal;
+  for (gj = 0; gj < groups.length; gj++) {
+    var fg = finalizeGroup(state[gj], { key: groups[gj].key, name: groups[gj].name, market: groups[gj].market, delivery: groups[gj].delivery, returns: groups[gj].returns });
+    fg.sharePct = grandTotal > 0 ? fg.total / grandTotal * 100 : null;
+    outGroups.push(fg);
+  }
+  var outUnassigned = null;
+  if (unassignedTotal > 0) {
+    outUnassigned = finalizeGroup(unassigned, { key: "unassigned", name: "غير مصنّف (فرع غير مدرج في المجموعات)", market: null, delivery: null, returns: null });
+    outUnassigned.sharePct = grandTotal > 0 ? unassignedTotal / grandTotal * 100 : null;
+  }
+
+  // company-wide KPIs (assigned groups only; unassigned shipments are counted in `shipments` and flagged)
+  var kt = total;
+  var closedUnassigned = unassigned.kinds;
+  var delivered = kt.delivered.count + closedUnassigned.delivered.count;
+  var returnClosed = kt.returnClosed.count + closedUnassigned.returnClosed.count;
+  var returnOpen = kt.returnOpen.count + closedUnassigned.returnOpen.count;
+  var inProgress = kt.inProgress.count + closedUnassigned.inProgress.count;
+  var otherCount = kt.other.count + closedUnassigned.other.count;
+  var returns = returnClosed + returnOpen;
+  function pct(n, d) { return d > 0 ? n / d * 100 : null; }
+  var openTotal = inProgress + returnOpen;
+  var overdueOpen = kt.inProgress.over + kt.returnOpen.over;
+  var kpis = {
+    shipments: grandTotal,
+    delivered: delivered, deliveredPct: pct(delivered, grandTotal),
+    deliveredWithinMarket: kt.delivered.withinMarket, deliveredWithinMarketPct: pct(kt.delivered.withinMarket, delivered),
+    deliveredWithinCompany: kt.delivered.withinCompany, deliveredWithinCompanyPct: pct(kt.delivered.withinCompany, delivered),
+    avgDeliveryAge: ageFinalizeAcc_(kt.delivered).avgAge,
+    returns: returns, returnsPct: pct(returns, grandTotal),
+    returnClosed: returnClosed, returnClosedWithin: kt.returnClosed.withinCompany, returnClosedWithinPct: pct(kt.returnClosed.withinCompany, returns),
+    returnClosedOver: kt.returnClosed.over, returnClosedOverPct: pct(kt.returnClosed.over, returns),
+    returnOpen: returnOpen, returnOpenPct: pct(returnOpen, returns),
+    avgReturnClosedAge: ageFinalizeAcc_(kt.returnClosed).avgAge,
+    open: openTotal, inProgress: inProgress,
+    openOverdue: overdueOpen, openOverduePct: pct(overdueOpen, openTotal),
+    inProgressOverdue: kt.inProgress.over, inProgressOverduePct: pct(kt.inProgress.over, inProgress),
+    returnOpenOverdue: kt.returnOpen.over, returnOpenOverduePct: pct(kt.returnOpen.over, returnOpen),
+    avgOpenAge: openAgeN > 0 ? sumOpenAge / openAgeN : null,
+    avgInProgressAge: pendAgeN > 0 ? sumPendAge / pendAgeN : null,
+    avgOpenReturnAge: retAgeN > 0 ? sumRetAge / retAgeN : null,
+    other: otherCount
+  };
+
+  // open overview by group + top branches by overdue
+  var openByGroup = [];
+  for (gj = 0; gj < outGroups.length; gj++) {
+    var og = outGroups[gj], ik = og.kinds.inProgress, rk = og.kinds.returnOpen;
+    var openN = ik.count + rk.count, overN = ik.over + rk.over;
+    openByGroup.push({ key: og.key, name: og.name, delivery: og.delivery, returns: og.returns,
+      inProgress: ik.count, inProgressOver: ik.over, inProgressOverPct: ik.overPct,
+      returnOpen: rk.count, returnOpenOver: rk.over, returnOpenOverPct: rk.overPct,
+      overTotal: overN, overPctOfOpen: openN > 0 ? overN / openN * 100 : null });
+  }
+  var topBranches = [];
+  for (var bk2 in branchOpenAgg) {
+    if (!branchOpenAgg.hasOwnProperty(bk2)) continue;
+    var x = branchOpenAgg[bk2], openB = x.pending + x.ret, overB = x.pendingOver + x.retOver;
+    topBranches.push({ branch: x.branch, group: x.group, inProgress: x.pending, inProgressOver: x.pendingOver, returnOpen: x.ret, returnOpenOver: x.retOver,
+      overTotal: overB, overPctOfOpen: openB > 0 ? overB / openB * 100 : null });
+  }
+  topBranches.sort(function (a, b) { return b.overTotal - a.overTotal; });
+  topBranches = topBranches.slice(0, 5);
+
+  openList.sort(function (a, b) {
+    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+    return (b.age === null ? -1 : b.age) - (a.age === null ? -1 : a.age);
+  });
+  var openListTruncated = openList.length > AGE_REPORT_MAX_OPEN_LIST;
+  if (openListTruncated) openList = openList.slice(0, AGE_REPORT_MAX_OPEN_LIST);
+
+  return {
+    kpis: kpis, groups: outGroups, unassigned: outUnassigned,
+    open: { byGroup: openByGroup, topBranches: topBranches, list: openList, listTruncated: openListTruncated },
+    statusBreakdown: statusBreakdown,
+    dq: { invalidPickup: dq.invalidPickup, closedWithoutEndDate: dq.closedWithoutEndDate, negativeAge: dq.negativeAge, missingBranch: dq.missingBranch, unmappedBranches: unmappedBranches }
+  };
+}
+
+function ageReportMonthsInRange_(fromNum, toNum) {
+  var out = [], seen = {};
+  for (var n = fromNum; n <= toNum; n += 1) {
+    var d = new Date(n * 86400000);
+    var key = d.getUTCFullYear() + "-" + d.getUTCMonth();
+    if (!seen[key]) { seen[key] = true; out.push(MONTH_ORDER[d.getUTCMonth()]); }
+    if (out.length > AGE_REPORT_MAX_MONTHS) break;
+  }
+  return out;
+}
+
+function getAgeReport(params) {
+  var t0 = new Date().getTime();
+  var dateFrom = summaryNormText(params && params.dateFrom), dateTo = summaryNormText(params && params.dateTo);
+  var isoRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (!isoRe.test(dateFrom) || !isoRe.test(dateTo)) return { success: false, error: "يجب تحديد تاريخ البداية والنهاية بصيغة YYYY-MM-DD." };
+  var fromNum = ageDayNumFromIso_(dateFrom), toNum = ageDayNumFromIso_(dateTo);
+  if (toNum < fromNum) return { success: false, error: "تاريخ النهاية قبل تاريخ البداية." };
+  var asOf = summaryNormText(params && params.asOf);
+  if (!isoRe.test(asOf)) asOf = ageIsoDate_(new Date());
+  var asOfNum = ageDayNumFromIso_(asOf);
+  if (asOfNum < toNum) return { success: false, error: "تاريخ القياس يجب ألا يسبق نهاية الفترة." };
+
+  var overrides = {};
+  if (params && params.standards) { try { overrides = JSON.parse(params.standards) || {}; } catch (e) { overrides = {}; } }
+  var groups = ageResolveGroups_(overrides);
+
+  var months = ageReportMonthsInRange_(fromNum, toNum);
+  if (months.length > AGE_REPORT_MAX_MONTHS) return { success: false, error: "الفترة أطول من " + AGE_REPORT_MAX_MONTHS + " شهور — قلّل المدى." };
+
+  var cache = CacheService.getScriptCache();
+  var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
+  var cacheKey = "agerep_v1_" + summaryHashKey(dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
+  if (!forceRefresh) {
+    var cached = cacheGetChunked(cache, cacheKey);
+    if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }
+  }
+
+  var awbMap = {}, rowsRead = 0, dupRemoved = 0, outOfRange = 0, noAwb = 0;
+  var missingMonths = [], monthsRead = [];
+  for (var mi = 0; mi < months.length; mi++) {
+    var month = months[mi];
+    var quarter = MONTH_SOURCE[month];
+    var ss;
+    try { ss = SpreadsheetApp.openById(SPREADSHEET_IDS[quarter]); }
+    catch (err) { return { success: false, error: "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err) }; }
+    var sheet = ss.getSheetByName(month);
+    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) { missingMonths.push(month); continue; }
+    var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    var headers = values[0];
+    var colMap = summaryDetectColumnMap(headers), idx = {}, mapped = Object.keys(colMap);
+    for (var f = 0; f < mapped.length; f++) idx[mapped[f]] = headers.indexOf(colMap[mapped[f]]);
+    if (idx.awb === undefined || idx.pickup === undefined || idx.status === undefined) {
+      return { success: false, error: "أعمدة مطلوبة غير موجودة في شيت " + month + " (رقم البوليصة / تاريخ البيك أب / حالة الشحنة)." };
+    }
+    monthsRead.push(month);
+    for (var ri = 1; ri < values.length; ri++) {
+      var row = values[ri];
+      if (summaryRowIsAllEmpty(row)) continue;
+      rowsRead++;
+      var awb = summaryNormText(summaryGetField(row, idx, "awb"));
+      if (!awb) { noAwb++; continue; }
+      var pickup = summaryParseDate(summaryGetField(row, idx, "pickup"));
+      if (pickup) { var pn = ageDayNum_(pickup); if (pn < fromNum || pn > toNum) { outOfRange++; continue; } }
+      var rec = {
+        awb: awb, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
+        branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status"))
+      };
+      if (awbMap.hasOwnProperty(awb)) {
+        dupRemoved++;
+        var et = awbMap[awb].lastStatus ? awbMap[awb].lastStatus.getTime() : -Infinity;
+        var rt = rec.lastStatus ? rec.lastStatus.getTime() : -Infinity;
+        if (rt >= et) awbMap[awb] = rec;
+      } else awbMap[awb] = rec;
+    }
+  }
+
+  var records = [];
+  for (var k in awbMap) { if (awbMap.hasOwnProperty(k)) records.push(awbMap[k]); }
+  var computed = ageReportCompute_(records, groups, asOfNum);
+  var result = {
+    success: true, generatedAt: new Date().toISOString(), cached: false,
+    params: { dateFrom: dateFrom, dateTo: dateTo, asOf: asOf },
+    standards: groups.map(function (g) { return { key: g.key, name: g.name, market: g.market, delivery: g.delivery, returns: g.returns }; }),
+    months: monthsRead, missingMonths: missingMonths,
+    kpis: computed.kpis, groups: computed.groups, unassigned: computed.unassigned, open: computed.open,
+    statusBreakdown: computed.statusBreakdown,
+    dq: Object.assign({ rowsRead: rowsRead, uniqueShipments: records.length, duplicatesRemoved: dupRemoved, outsidePeriod: outOfRange, blankAwb: noAwb }, computed.dq),
+    durationMs: new Date().getTime() - t0
+  };
+  try {
+    var ser = JSON.stringify(result);
+    if (ser.length < 2500000) cachePutChunked(cache, cacheKey, ser, AGE_REPORT_CACHE_TTL_SECONDS);
+  } catch (eCache) { /* non-fatal */ }
+  return result;
+}
 
 // ============================================================
 // 6. PAGINATED MONTH DATA
