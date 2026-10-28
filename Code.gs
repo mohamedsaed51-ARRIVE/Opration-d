@@ -3066,6 +3066,57 @@ function listStatusNames() {
   return { success: true, quarter: quarter, months: res.monthsRead, statuses: res.rows.length, unclassified: unknown.length };
 }
 
+
+// ============================================================
+// COLUMN PROFILE — بصمة أعمدة الشيت (لمعرفة أي عمود يميّز مرتجع مفتوح/مغلق وغيره)
+// ▶ قائمة ARRIVE Dashboard ← "Profile Columns (الأعمدة)" — تكتب تبويب COLUMN_PROFILE في الملف المفتوح
+// لأحدث شهر فيه بيانات (أو لشهر تحدده في profileColumns("October")): لكل عمود اسمه وعدد الخانات المعبّأة
+// وعدد القيم المختلفة، وإن كانت القيم المختلفة قليلة (≤ 40) تُكتب كلها مع أعدادها.
+// ============================================================
+var COLUMN_PROFILE_SHEET = "COLUMN_PROFILE";
+function profileColumnsData_(values) {
+  var headers = values[0], out = [];
+  for (var c = 0; c < headers.length; c++) {
+    var counts = {}, distinct = 0, filled = 0, overflow = false;
+    for (var r = 1; r < values.length; r++) {
+      var v = values[r][c];
+      if (v === "" || v === null || v === undefined) continue;
+      filled++;
+      var key = Object.prototype.toString.call(v) === "[object Date]" ? "(تاريخ)" : summaryNormText(v);
+      if (!counts.hasOwnProperty(key)) { if (distinct >= 500) { overflow = true; continue; } counts[key] = 0; distinct++; }
+      counts[key]++;
+    }
+    var vals = "";
+    if (!overflow && distinct <= 40) {
+      vals = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; }).map(function (k) { return k + " (" + counts[k] + ")"; }).join(" | ");
+    }
+    out.push([c + 1, String(headers[c]), filled, overflow ? "500+" : distinct, vals]);
+  }
+  return out;
+}
+function profileColumns(monthName) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), id = ss.getId(), quarter = null;
+  for (var q in SPREADSHEET_IDS) { if (SPREADSHEET_IDS[q] === id) quarter = q; }
+  if (!quarter) throw new Error("هذا الملف ليس أحد ملفات Q1/Q2/Q3/Q4.");
+  var months = MONTH_ORDER.filter(function (mo) { return MONTH_SOURCE[mo] === quarter; }).reverse();
+  var picked = null, values = null;
+  for (var i = 0; i < months.length; i++) {
+    if (monthName && months[i] !== monthName) continue;
+    var sh = ss.getSheetByName(months[i]);
+    if (sh && sh.getLastRow() >= 2 && sh.getLastColumn() >= 1) { picked = months[i]; values = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues(); break; }
+  }
+  if (!picked) throw new Error("لا يوجد شهر به بيانات" + (monthName ? " باسم " + monthName : "") + " في هذا الملف.");
+  var rows = profileColumnsData_(values);
+  var out = ss.getSheetByName(COLUMN_PROFILE_SHEET) || ss.insertSheet(COLUMN_PROFILE_SHEET);
+  out.clear();
+  var table = [["شهر: " + picked, "اسم العمود (Header)", "خانات معبّأة", "عدد القيم المختلفة", "القيم وأعدادها (إن كانت قليلة)"]];
+  rows.forEach(function (r) { table.push(r); });
+  out.getRange(1, 1, table.length, 5).setValues(table);
+  out.setFrozenRows(1);
+  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + COLUMN_PROFILE_SHEET + " (شهر " + picked + ")."); } catch (e) { /* editor run: no UI */ }
+  return { success: true, month: picked, columns: rows.length };
+}
+
 // ============================================================
 // 6. PAGINATED MONTH DATA
 // ============================================================
@@ -3889,6 +3940,7 @@ function onOpen() {
     .addItem("Age Report: Build Missing Months Summary", "buildMissingAgeSnapshots")
     .addItem("Age Report: Update All Months Summary", "buildAllAgeSnapshots")
     .addItem("List Status Names (أسماء الحالات)", "listStatusNames")
+    .addItem("Profile Columns (الأعمدة)", "profileColumns")
     .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
     .addToUi();
 }
