@@ -3178,6 +3178,55 @@ function profileColumns(monthName) {
   return { success: true, month: picked, columns: rows.length };
 }
 
+
+// ============================================================
+// CLEAR / REBUILD ALL SUMMARIES — حذف كل الملخصات ثم بنائها من جديد
+// ▶ 1) "Clear ALL Summaries"  = clearAllSummaries()   : يمسح محتوى تبويبي DASHBOARD_SUMMARY و AGE_SUMMARY في ملفات Q1..Q4
+//      (يبقى الصف الأول/العناوين، والشيتات الخام لا تُمس إطلاقًا) ويصفّر تقدم البناء ويُبطل كاش الداشبورد.
+// ▶ 2) "Rebuild ALL Summaries" = rebuildAllSummaries() : يبني ملخص الداشبورد + ملخص عمر الشحنة لكل شهر، على دفعات
+//      (≈ 4 دقائق للدفعة). شغّلها مرارًا حتى تقول allMonthsComplete: true (تكمل من حيث وقفت).
+// الملخصات قابلة لإعادة البناء بالكامل من الشيتات الخام، لذلك الحذف آمن لكن الداشبورد يكون فارغًا حتى تكتمل إعادة البناء.
+// ============================================================
+function clearAllSummaries() {
+  try {
+    var ui = SpreadsheetApp.getUi();
+    var ans = ui.alert("حذف كل الملخصات", "سيتم مسح ملخصات الداشبورد وعمر الشحنة من ملفات Q1–Q4 (الشيتات الخام لا تتأثر). الداشبورد يبقى فارغًا حتى تعيد البناء. هل تريد المتابعة؟", ui.ButtonSet.YES_NO);
+    if (ans !== ui.Button.YES) return { success: false, cancelled: true };
+  } catch (e) { /* run from the editor / no UI: proceed — running it is itself the confirmation */ }
+  var cleared = [], tabs = [PERSISTENT_SUMMARY_SHEET, AGE_SNAPSHOT_SHEET];
+  for (var q in SPREADSHEET_IDS) {
+    var ss;
+    try { ss = SpreadsheetApp.openById(SPREADSHEET_IDS[q]); }
+    catch (err) { cleared.push({ quarter: q, error: "تعذر فتح الملف: " + String(err && err.message ? err.message : err) }); continue; }
+    for (var t = 0; t < tabs.length; t++) {
+      var sh = ss.getSheetByName(tabs[t]);
+      if (!sh) { cleared.push({ quarter: q, tab: tabs[t], rowsDeleted: 0, note: "غير موجود" }); continue; }
+      var last = sh.getLastRow(), n = last >= 2 ? last - 1 : 0;
+      if (n > 0) sh.deleteRows(2, n);
+      cleared.push({ quarter: q, tab: tabs[t], rowsDeleted: n });
+    }
+  }
+  resetSummaryBuildProgress();
+  bumpSnapshotGenerationStamp_(); // invalidates every cached dashboard / age-report result
+  SpreadsheetApp.flush();
+  var res = { success: true, cleared: cleared, next: "شغّل Rebuild ALL Summaries (أكثر من مرة) حتى allMonthsComplete: true" };
+  Logger.log(JSON.stringify(res, null, 2));
+  try { SpreadsheetApp.getUi().alert("تم حذف كل الملخصات. الآن شغّل «Rebuild ALL Summaries» (كرّرها حتى تكتمل)."); } catch (e2) {}
+  return res;
+}
+
+// Rebuilds, in resumable batches, the dashboard summary AND the age summary of every month (both are built by
+// buildAndSaveMonthSummary). Run it repeatedly: each run continues where the previous one stopped.
+function rebuildAllSummaries() {
+  var rep = buildNextSummaryBatch();
+  var msg = rep.allMonthsComplete
+    ? "اكتملت إعادة بناء كل الملخصات ✔"
+    : "تم بناء: " + (rep.monthsCompletedThisRun.join("، ") || "—") + " — الشهر التالي: " + rep.nextMonthToProcess + ". شغّل الدالة مرة أخرى.";
+  Logger.log(msg);
+  try { SpreadsheetApp.getUi().alert(msg); } catch (e) {}
+  return rep;
+}
+
 // ============================================================
 // 6. PAGINATED MONTH DATA
 // ============================================================
@@ -4003,6 +4052,9 @@ function onOpen() {
     .addItem("List Status Names (أسماء الحالات)", "listStatusNames")
     .addItem("Profile Columns (الأعمدة)", "profileColumns")
     .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
+    .addSeparator()
+    .addItem("⚠ Clear ALL Summaries (حذف كل الملخصات)", "clearAllSummaries")
+    .addItem("Rebuild ALL Summaries (إعادة بناء الكل — كرّرها)", "rebuildAllSummaries")
     .addToUi();
 }
 
