@@ -7328,7 +7328,7 @@ function renderAgeReport(d){
 }
 
 /* ---------- charts (PNG via Chart.js) — shared by the on-screen report and the Word export ---------- */
-const AGE_C = { green:'#16A34A', orange:'#F59E0B', red:'#DC2626', navy:'#1F3A5F', grey:'#64748B' };
+const AGE_C = { green:'#22C55E', orange:'#F59E0B', red:'#EF4444', navy:'#0F172A', grey:'#64748B', blue:'#0837C9', teal:'#00C7E6' }; // ARRIVE status + brand tokens
 const AGE_FONT = "Cairo, 'Segoe UI', Arial, sans-serif";
 const AGE_CHART_PLUGINS = [
   { id:'ageWhiteBg', beforeDraw(ch){ const c=ch.ctx; c.save(); c.globalCompositeOperation='destination-over'; c.fillStyle='#fff'; c.fillRect(0,0,ch.width,ch.height); c.restore(); } },
@@ -7401,8 +7401,8 @@ function ageChartBranchDelivery(d, g){
   const o = ageChartOpts(`التسليم حسب الفرع - ${g.name}`, `نسبة الشحنات المسلّمة ضمن معيار السوق ومعيار الشركة | ${ageSubPeriod(d)}`,
     { yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:rows.length>6?8:10 } } });
   return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>b.name), datasets:[
-    { label:`ضمن معيار السوق (${ageDays(g.market)})`, data:rows.map(b=>b.kinds.delivered.marketPct), backgroundColor:AGE_C.green, borderWidth:0, barPercentage:.9, categoryPercentage:.8 },
-    { label:`ضمن معيار الشركة (${ageDays(g.delivery)})`, data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_C.orange, borderWidth:0, barPercentage:.9, categoryPercentage:.8 } ] }, options:o }, 640, 280);
+    { label:`ضمن معيار السوق (${ageDays(g.market)})`, data:rows.map(b=>b.kinds.delivered.marketPct), backgroundColor:AGE_C.blue, borderWidth:0, barPercentage:.9, categoryPercentage:.8 },
+    { label:`ضمن معيار الشركة (${ageDays(g.delivery)})`, data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_C.teal, borderWidth:0, barPercentage:.9, categoryPercentage:.8 } ] }, options:o }, 640, 280);
 }
 function ageChartReturns(d, g){
   const rows = ageBranchRowsRet(g).filter(b=>b.kinds.returnClosed.count>0); if(!rows.length) return null;
@@ -7473,6 +7473,16 @@ function ageLogoTilePng(){
   });
 }
 
+function ageLogoInfo(){
+  return new Promise(resolve=>{
+    try{
+      const img = new Image();
+      img.onload = ()=>resolve({ url:window.ARRIVE_LOGO_WEB, w:img.naturalWidth, h:img.naturalHeight });
+      img.onerror = ()=>resolve(null);
+      img.src = window.ARRIVE_LOGO_WEB;
+    }catch(e){ resolve(null); }
+  });
+}
 function ageBranchesIntro(d){
   const del = [], ret = [];
   d.groups.forEach(g=>g.branches.forEach(b=>{
@@ -7499,20 +7509,30 @@ async function exportAgeDocx(){
     const lib = await ageLoadDocxLib();
     const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle, AlignmentType,
             VerticalAlign, ImageRun, LineRuleType, Footer, PageNumber, PageBorderDisplay, PageBorderOffsetFrom, TableLayoutType } = lib;
-    const NAVY='1F3A5F', ZEBRA1='F8FAFC', ZEBRA2='F1F5F9', TOTAL='DCE6F0', GRID='CBD5E1', TEAL='0EA5A4', INK='1E293B', MUTE='64748B';
+    const BLUE='0837C9', NAVY='0F172A', TEAL='00C7E6', LIGHT='E6F4FF', ZEBRA1='F8FAFC', ZEBRA2='F1F5F9', TOTAL=LIGHT, GRID='E2E8F0', INK='0F172A', MUTE='64748B', OKC='15803D', WARNC='B45309', BADC='B91C1C', FONT='Cairo';
+    const TONE = { '16A34A':OKC, 'E36C0A':WARNC, 'DC2626':BADC };
     const charts = AGE.charts || ageBuildCharts(d);
-    const logo = await ageLogoTilePng();
+    const logo = await ageLogoInfo();
     const k = d.kpis, std = d.standards;
     const periodTxt = ageRangeText(d.params.dateFrom, d.params.dateTo);
     const asOfTxt = agePlainDate(d.params.asOf);
     const W = 10092;
 
-    const t = (text, o)=>{ o = o||{}; return new TextRun({ text:String(text==null?'':text), rightToLeft:true, font:'Arial', size:o.size||18, bold:!!o.bold, color:o.color||INK }); };
+    const t = (text, o)=>{ o = o||{}; return new TextRun({ text:String(text==null?'':text), rightToLeft:true, font:FONT, size:o.size||18, bold:!!o.bold, color:o.color||INK }); };
     const para = (runs, o)=>{ o = o||{}; return new Paragraph({ bidirectional:true, alignment:o.align||AlignmentType.START, keepNext:!!o.keepNext, keepLines:true,
       spacing:{ before:o.before||0, after:o.after==null?80:o.after, line:o.plain?undefined:276, lineRule:o.plain?undefined:LineRuleType.AUTO }, border:o.border, indent:o.indent, children:Array.isArray(runs)?runs:[runs] }); };
     const spacer = (n)=>para([t('',{size:8})], { after:n==null?60:n });
-    const heading = (num, title)=>para([t(`${num}. ${title}`, { size:20, color:'475569' })], { before:220, after:100, keepNext:true, border:{ bottom:{ style:BorderStyle.SINGLE, size:8, color:TEAL, space:2 } } });
-    const bullet = (title)=>para([t('• '+title, { size:24, bold:true, color:NAVY })], { before:120, after:80, keepNext:true });
+    const heading = (num, title)=>{
+      const nb = { style:BorderStyle.NONE, size:0, color:'FFFFFF' }, none = { top:nb, bottom:nb, left:nb, right:nb };
+      const numCell = new TableCell({ width:{ size:700, type:WidthType.DXA }, borders:none, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:70, bottom:70, left:40, right:40 },
+        children:[ para([t(String(num).padStart(2,'0'),{ size:24, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0, plain:true }) ] });
+      const titleCell = new TableCell({ width:{ size:W-700, type:WidthType.DXA }, borders:{ ...none, right:{ style:BorderStyle.SINGLE, size:24, color:TEAL } }, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:LIGHT }, margins:{ top:70, bottom:70, left:160, right:160 },
+        children:[ para([t(title,{ size:26, bold:true, color:BLUE })],{ after:0, keepNext:true, plain:true }) ] });
+      return [ para([t('',{ size:6 })],{ before:200, after:0, keepNext:true, plain:true }),
+        new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[700, W-700], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[numCell, titleCell] }) ] }),
+        para([t('',{ size:6 })],{ after:60, plain:true }) ];
+    };
+    const bullet = (title)=>para([t('■ ',{ size:16, color:TEAL }), t(title, { size:24, bold:true, color:BLUE })], { before:140, after:80, keepNext:true });
     const sub = (title)=>para([t(title, { size:22, bold:true, color:NAVY })], { before:140, after:60, keepNext:true });
     const line = (b)=>({ style:BorderStyle.SINGLE, size:4, color:GRID });
     const allB = { top:line(), bottom:line(), left:line(), right:line() };
@@ -7521,21 +7541,21 @@ async function exportAgeDocx(){
     function kpiTable(cards){
       const cw = Math.floor(W/cards.length);
       return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cards.map(()=>cw), visuallyRightToLeft:true, layout:TableLayoutType.FIXED,
-        rows:[ new TableRow({ cantSplit:true, children:cards.map(c=>new TableCell({ width:{ size:cw, type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
-          margins:{ top:100, bottom:100, left:80, right:80 },
-          children:[ para([t(c.value,{ size:28, bold:true, color:c.color||NAVY })],{ align:AlignmentType.CENTER, after:20 }),
-                     para([t(c.label,{ size:17, bold:true })],{ align:AlignmentType.CENTER, after:20 }),
+        rows:[ new TableRow({ cantSplit:true, children:cards.map(c=>new TableCell({ width:{ size:cw, type:WidthType.DXA }, borders:{ ...allB, top:{ style:BorderStyle.SINGLE, size:24, color:TEAL } }, verticalAlign:VerticalAlign.CENTER,
+          shading:{ type:ShadingType.CLEAR, color:'auto', fill:'FFFFFF' }, margins:{ top:110, bottom:110, left:80, right:80 },
+          children:[ para([t(c.value,{ size:30, bold:true, color:TONE[c.color]||BLUE })],{ align:AlignmentType.CENTER, after:20 }),
+                     para([t(c.label,{ size:17, bold:true, color:NAVY })],{ align:AlignmentType.CENTER, after:20 }),
                      para([t(c.sub||'',{ size:15, color:MUTE })],{ align:AlignmentType.CENTER, after:0 }) ] })) }) ] });
     }
     // rows: [{cells:[...], total:bool, red:[colIdx]}]; widths = fractions
     function dataTable(heads, rows, fr){
       const sum = fr.reduce((a,b)=>a+b,0), cw = fr.map(x=>Math.round(x/sum*W));
       const head = new TableRow({ tableHeader:true, cantSplit:true, children:heads.map((h,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
-        shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:60, bottom:60, left:50, right:50 },
+        shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:60, bottom:60, left:50, right:50 },
         children:[ para([t(h,{ size:16, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0 }) ] })) });
       const body = rows.map((r,ri)=>new TableRow({ cantSplit:true, children:r.cells.map((v,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
         shading:{ type:ShadingType.CLEAR, color:'auto', fill: r.total ? TOTAL : (ri%2 ? ZEBRA2 : ZEBRA1) }, margins:{ top:50, bottom:50, left:50, right:50 },
-        children:[ para([t(v,{ size:16, bold: r.total || i===0, color: (r.red && r.red.indexOf(i)>=0) ? 'DC2626' : (r.total ? NAVY : INK) })],{ align:AlignmentType.CENTER, after:0 }) ] })) }));
+        children:[ para([t(v,{ size:16, bold: r.total || i===0, color: (r.red && r.red.indexOf(i)>=0) ? BADC : (r.total ? NAVY : INK) })],{ align:AlignmentType.CENTER, after:0 }) ] })) }));
       return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cw, visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[head].concat(body) });
     }
     const redIf = v=>(v!=null && v>=50);
@@ -7543,21 +7563,26 @@ async function exportAgeDocx(){
       if(!url) return null;
       return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:w||640, height:h||300 }, type:'png' }) ], { align:AlignmentType.CENTER, before:60, after:100, plain:true });
     }
+    const pushAll = (arr, items)=>items.forEach(x=>arr.push(x));
     const push = (arr, ...items)=>items.forEach(x=>{ if(x) arr.push(x); });
 
     const children = [];
-    // ---- title block ----
-    const titleCell = new TableCell({ width:{ size:W-1500, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER, children:[
-      para([t('التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',{ size:32, bold:true, color:NAVY })],{ align:AlignmentType.CENTER, after:60 }),
-      para([t(`الفترة: ${periodTxt} (حسب تاريخ استلام البيك أب)`,{ size:20, bold:true, color:'1D4ED8' })],{ align:AlignmentType.CENTER, after:40 }),
-      para([t(`تاريخ الإصدار: ${agePlainDate(ageIso(new Date()))}`,{ size:18, color:MUTE })],{ align:AlignmentType.CENTER, after:0 }) ] });
-    const logoCell = new TableCell({ width:{ size:1500, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER,
-      children:[ logo ? para([ new ImageRun({ data:ageDataUrlBytes(logo), transformation:{ width:84, height:84 }, type:'png' }) ],{ align:AlignmentType.CENTER, after:0, plain:true }) : para([t('ARRIVE',{ bold:true, color:NAVY })],{ align:AlignmentType.CENTER }) ] });
-    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W-1500,1500], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, borders:{ ...noB, insideHorizontal:noB.top, insideVertical:noB.top }, rows:[ new TableRow({ children:[titleCell, logoCell] }) ] }));
-    children.push(spacer(120));
+    // ---- ARRIVE cover banner (navy, logo, teal rule) ----
+    const bn = { style:BorderStyle.NONE, size:0, color:NAVY };
+    const bannerB = { top:bn, bottom:bn, left:bn, right:bn };
+    const LOGO_W = 150, logoH = logo ? Math.round(LOGO_W*logo.h/logo.w) : 0;
+    const titleCell = new TableCell({ width:{ size:W-2600, type:WidthType.DXA }, borders:bannerB, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:260, bottom:260, left:200, right:300 }, children:[
+      para([t('التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',{ size:34, bold:true, color:'FFFFFF' })],{ after:100, plain:true }),
+      para([t(`الفترة: ${periodTxt} (حسب تاريخ استلام البيك أب)`,{ size:21, bold:true, color:TEAL })],{ after:60, plain:true }),
+      para([t(`تاريخ الإصدار: ${agePlainDate(ageIso(new Date()))}  |  قياس الشحنات المفتوحة حتى: ${asOfTxt}`,{ size:17, color:'CBD5E1' })],{ after:0, plain:true }) ] });
+    const logoCell = new TableCell({ width:{ size:2600, type:WidthType.DXA }, borders:bannerB, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:200, bottom:200, left:200, right:200 },
+      children:[ logo ? para([ new ImageRun({ data:ageDataUrlBytes(logo.url), transformation:{ width:LOGO_W, height:logoH }, type:'png' }) ],{ align:AlignmentType.CENTER, after:0, plain:true }) : para([t('ARRIVE',{ bold:true, size:30, color:'FFFFFF' })],{ align:AlignmentType.CENTER, plain:true }) ] });
+    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W-2600,2600], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[titleCell, logoCell] }) ] }));
+    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ children:[ new TableCell({ width:{ size:W, type:WidthType.DXA }, borders:bannerB, shading:{ type:ShadingType.CLEAR, color:'auto', fill:TEAL }, children:[ para([t('',{ size:4 })],{ after:0, plain:true }) ] }) ] }) ] }));
+    children.push(spacer(100));
 
     // ---- 1. goal ----
-    children.push(heading(1,'هدف التقرير'));
+    pushAll(children, heading(1,'هدف التقرير'));
     children.push(para([t('• يهدف هذا التقرير إلى ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم. يقيس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ويقارنها بمعيارين منفصلين: مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.')]));
     children.push(para([t('ويهدف التقرير إلى تحقيق ما يلي:')]));
     ['قياس التزام كل مجموعة جغرافية بمدد التسليم والمرتجع، وتحديد الشحنات المتجاوزة لمدة السوق ولمدة الشركة مع فصل التسليم عن المرتجع.',
@@ -7567,7 +7592,7 @@ async function exportAgeDocx(){
 
     // ---- 2. executive summary ----
     const stdM = ageStdText('market', std), stdC = ageStdText('delivery', std), stdR = ageStdText('returns', std);
-    children.push(heading(2,'الملخص التنفيذي'));
+    pushAll(children, heading(2,'الملخص التنفيذي'));
     children.push(bullet('التسليمات'));
     children.push(kpiTable([
       { value:ageN(k.shipments), label:'إجمالي الشحنات', sub:'شحنة استُلمت من المرسل في الفترة' },
@@ -7587,7 +7612,7 @@ async function exportAgeDocx(){
       { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt}`, color:'E36C0A' } ]));
 
     // ---- 3. geographic groups ----
-    children.push(heading(3,'تحليل المجموعات الجغرافية'));
+    pushAll(children, heading(3,'تحليل المجموعات الجغرافية'));
     const letters = ['أ','ب','ج'];
     d.groups.concat(d.unassigned?[d.unassigned]:[]).forEach((g,gi)=>{
       const judged = g.delivery != null, K = g.kinds, dash = '—';
@@ -7607,7 +7632,7 @@ async function exportAgeDocx(){
     children.push(para([t(`* العمر للشحنات المفتوحة (مرتجع مفتوح / قيد التشغيل) محسوب حتى تاريخ القياس: ${asOfTxt}. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.`,{ size:15, color:MUTE })]));
 
     // ---- 4. branches ----
-    children.push(heading(4,'تحليل الفروع'));
+    pushAll(children, heading(4,'تحليل الفروع'));
     ageBranchesIntro(d).forEach(([lbl, txt])=>children.push(para([t(lbl,{ bold:true }), t(txt)])));
     d.groups.forEach((g,gi)=>{
       children.push(sub(`${gi+1}. ${g.name}`));
@@ -7630,7 +7655,7 @@ async function exportAgeDocx(){
     });
 
     // ---- 5. open shipments ----
-    children.push(heading(5,'شحنات قيد التشغيل والمفتوحة'));
+    pushAll(children, heading(5,'شحنات قيد التشغيل والمفتوحة'));
     children.push(para([t(`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة (${ageP(k.openOverduePct)}) تجاوزت معيارها عند تاريخ القياس.`,{ bold:true }),
       t(k.returnOpen>0 && k.minOpenReturnAge!=null ? ` المرتجعات المفتوحة (${ageN(k.returnOpen)}) أعمارها من ${k.minOpenReturnAge} إلى ${k.maxOpenReturnAge} يومًا.` : '')]));
     children.push(kpiTable([
@@ -7652,7 +7677,7 @@ async function exportAgeDocx(){
     } else children.push(para([t('لا توجد شحنات مفتوحة متجاوزة.',{ color:MUTE })]));
 
     // ---- 6. control notes ----
-    children.push(heading(6,'الملاحظات الرقابية وجودة البيانات'));
+    pushAll(children, heading(6,'الملاحظات الرقابية وجودة البيانات'));
     const q = d.dq, notes = [];
     if(d.missingMonths && d.missingMonths.length) notes.push(`لم يتم العثور على بيانات للشهور: ${d.missingMonths.join('، ')} — الأرقام لا تشمل الفترة الواقعة فيها.`);
     const unm = Object.entries(q.unmappedBranches||{});
@@ -7666,18 +7691,23 @@ async function exportAgeDocx(){
     notes.forEach(n=>children.push(para([t('• '+n)])));
     children.push(para([t(`منهجية الحساب: العمر بالأيام التقويمية (بدون الوقت). للمسلّمة والمرتجع المغلق = تاريخ آخر حالة − تاريخ استلام البيك أب؛ وللمفتوحة = تاريخ القياس (${asOfTxt}) − تاريخ البيك أب. «ضمن المدة» = العمر ≤ المعيار. الشهور المقروءة: ${(d.months||[]).join('، ')||'—'}. الأرقام باللون الأحمر في الجداول تعني نسبة 50% فأكثر في عمود التجاوز.`,{ size:15, color:MUTE })],{ before:80 }));
 
+    // ---- closing banner ----
+    children.push(spacer(200));
+    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[ new TableCell({ width:{ size:W, type:WidthType.DXA }, borders:bannerB, shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:200, bottom:200, left:200, right:200 }, children:[
+      para([t('نهاية التقرير',{ size:26, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:40, plain:true }),
+      para([t(`ARRIVE · لوحة المتابعة التشغيلية  |  ${periodTxt}`,{ size:17, color:'E6F4FF' })],{ align:AlignmentType.CENTER, after:0, plain:true }) ] }) ] }) ] }));
+
     // ---- footer + document ----
-    const footer = new Footer({ children:[ new Paragraph({ bidirectional:true, alignment:AlignmentType.CENTER, children:[
-      new TextRun({ text:`التقرير الإداري والرقابي لعمر الشحنة  |  ${periodTxt}  |  صفحة `, rightToLeft:true, font:'Arial', size:15, color:MUTE }),
-      new TextRun({ children:[PageNumber.CURRENT], rightToLeft:true, font:'Arial', size:15, color:MUTE }),
-      new TextRun({ text:' من ', rightToLeft:true, font:'Arial', size:15, color:MUTE }),
-      new TextRun({ children:[PageNumber.TOTAL_PAGES], rightToLeft:true, font:'Arial', size:15, color:MUTE }) ] }) ] });
-    const bd = { style:BorderStyle.SINGLE, size:6, color:'94A3B8', space:20 };
+    const fr = { font:FONT, size:15, color:MUTE, rightToLeft:true };
+    const footer = new Footer({ children:[ new Paragraph({ bidirectional:true, alignment:AlignmentType.CENTER, border:{ top:{ style:BorderStyle.SINGLE, size:8, color:TEAL, space:4 } }, children:[
+      new TextRun({ text:`ARRIVE  |  التقرير الإداري والرقابي لعمر الشحنة  |  ${periodTxt}  |  صفحة `, ...fr }),
+      new TextRun({ children:[PageNumber.CURRENT], ...fr }),
+      new TextRun({ text:' من ', ...fr }),
+      new TextRun({ children:[PageNumber.TOTAL_PAGES], ...fr }) ] }) ] });
     const doc = new Document({
       creator:'ARRIVE', title:'التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',
-      styles:{ default:{ document:{ run:{ font:'Arial', size:18, rightToLeft:true } } } },
-      sections:[{ properties:{ page:{ size:{ width:11906, height:16838 }, margin:{ top:850, right:907, bottom:1170, left:907, header:720, footer:454 },
-        borders:{ pageBorders:{ display:PageBorderDisplay.ALL_PAGES, offsetFrom:PageBorderOffsetFrom.PAGE }, pageBorderTop:bd, pageBorderBottom:bd, pageBorderLeft:bd, pageBorderRight:bd } } },
+      styles:{ default:{ document:{ run:{ font:FONT, size:18, rightToLeft:true } } } },
+      sections:[{ properties:{ page:{ size:{ width:11906, height:16838 }, margin:{ top:700, right:907, bottom:1100, left:907, header:500, footer:454 } } },
         footers:{ default:footer }, children }]
     });
     const blob = await Packer.toBlob(doc);
