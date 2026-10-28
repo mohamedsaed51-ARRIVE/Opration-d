@@ -679,7 +679,8 @@ function summaryGroupBy(dedupRows, field, topN, branchSlaTargets, slaTargetDefau
     out.push({
       name: key2, shipments: k.total, delivered: k.delivered, deliveryRate: k.deliveryRate,
       returned: k.returned, returnRate: k.returnRate, rejected: k.rejected, rejectedRate: k.rejectedRate,
-      successRate: k.successRate, avgDays: k.avgDays, withinSla: k.withinSla, slaBreach: k.slaBreach, slaPct: k.slaAchievement
+      successRate: k.successRate, avgDays: k.avgDays, withinSla: k.withinSla, slaBreach: k.slaBreach, slaPct: k.slaAchievement,
+      pending: k.pending
     });
   }
   out.sort(function (a, b) { return b.shipments - a.shipments; });
@@ -904,7 +905,8 @@ function summaryFinalizeGroup(name, acc) {
   return {
     name: name, shipments: total, delivered: acc.delivered, deliveryRate: deliveryRate,
     returned: acc.returned, returnRate: returnRate, rejected: acc.rejected, rejectedRate: rejectedRate,
-    successRate: successRate, avgDays: avgDays, withinSla: acc.withinSla, slaBreach: acc.slaBreach, slaPct: slaAchievement
+    successRate: successRate, avgDays: avgDays, withinSla: acc.withinSla, slaBreach: acc.slaBreach, slaPct: slaAchievement,
+    pending: acc.pending
   };
 }
 function summaryFinalizeGroupList(accMap, order, topN) {
@@ -1905,14 +1907,12 @@ function summaryMergeTopKpis(kpisList) {
   };
 }
 
-// Per-entity (branch/customer/province/area) merge across months. Documented
-// approximation: the persisted per-entity summary does not expose pending/
-// unknown counts (only shipments/delivered/returned/rejected/withinSla/
-// slaBreach), so "eligible" here uses resolved = delivered+returned+rejected
-// instead of total-pending. When pending/unknown are near zero (the normal
-// case) this matches the exact formula; it slightly understates eligible
-// (inflating return/reject rate) only when a branch/customer/etc. has a
-// meaningful pending or unclassified-status volume. deliveredWithDate
+// Per-entity (branch/customer/province/area) merge across months. "eligible"
+// is total - pending, exactly as in single-month results. Entities saved
+// BEFORE the `pending` field was added (older snapshots) lack it; for those
+// only, eligible falls back to resolved = delivered+returned+rejected, which
+// overstates return/reject rate when unclassified statuses exist. Rebuilding
+// the summaries ("تحديث الداش بورد") stores `pending` and removes the gap. deliveredWithDate
 // (needed for exact avgDays/slaPct weighting) IS reconstructed exactly as
 // withinSla+slaBreach — no approximation there.
 function summaryMergeGroupLists(listOfArrays, topN) {
@@ -1922,9 +1922,10 @@ function summaryMergeGroupLists(listOfArrays, topN) {
     var arr = listOfArrays[a] || [];
     for (var i = 0; i < arr.length; i++) {
       var e = arr[i];
-      if (!accMap[e.name]) { accMap[e.name] = { shipments:0, delivered:0, returned:0, rejected:0, withinSla:0, slaBreach:0, sumSlaDaysWeighted:0, dwdTotal:0 }; order.push(e.name); }
+      if (!accMap[e.name]) { accMap[e.name] = { shipments:0, delivered:0, returned:0, rejected:0, pending:0, pendingKnown:true, withinSla:0, slaBreach:0, sumSlaDaysWeighted:0, dwdTotal:0 }; order.push(e.name); }
       var acc = accMap[e.name];
       acc.shipments += e.shipments||0; acc.delivered += e.delivered||0; acc.returned += e.returned||0; acc.rejected += e.rejected||0;
+      if (typeof e.pending === "number") acc.pending += e.pending; else acc.pendingKnown = false;
       acc.withinSla += e.withinSla||0; acc.slaBreach += e.slaBreach||0;
       var dwd = (e.withinSla||0) + (e.slaBreach||0);
       acc.sumSlaDaysWeighted += (e.avgDays||0) * dwd;
@@ -1935,7 +1936,7 @@ function summaryMergeGroupLists(listOfArrays, topN) {
   for (var k = 0; k < order.length; k++) {
     var name = order[k];
     var acc = accMap[name];
-    var resolved = acc.delivered + acc.returned + acc.rejected;
+    var resolved = acc.pendingKnown ? (acc.shipments - acc.pending) : (acc.delivered + acc.returned + acc.rejected);
     out.push({
       name: name, shipments: acc.shipments, delivered: acc.delivered,
       deliveryRate: acc.shipments>0 ? (acc.delivered/acc.shipments*100) : null,

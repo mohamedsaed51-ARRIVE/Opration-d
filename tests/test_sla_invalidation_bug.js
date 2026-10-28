@@ -1,5 +1,11 @@
 const fs = require('fs');
-const newCode = fs.readFileSync('/tmp/new_batch_code.js', 'utf8');
+// Extract the real batch-build code from Code.gs (progress helpers through
+// buildNextSummaryBatch) so the test always runs against the shipped code.
+const codeGs = fs.readFileSync(require('path').join(__dirname, '..', 'Code.gs'), 'utf8');
+const startIdx = codeGs.indexOf('var SNAPSHOT_BUILD_PROGRESS_PROPERTY_KEY');
+const endIdx = codeGs.indexOf('function onOpen()');
+if (startIdx < 0 || endIdx < startIdx) throw new Error('Could not locate buildNextSummaryBatch block in Code.gs');
+const newCode = codeGs.slice(startIdx, endIdx);
 const RealDateCtor = Date;
 
 let pass = 0, fail = 0;

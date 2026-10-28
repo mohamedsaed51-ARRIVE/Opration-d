@@ -6450,17 +6450,20 @@ function makeLineChart(canvasId, labels, datasets, opts={}){
   if(chartLibUnavailable()) return;
   destroyChart(canvasId);
   const ctx = document.getElementById(canvasId).getContext('2d');
+  const defaultScales = {
+    x:{grid:{display:false}},
+    y:{grid:{color:CHART_COLORS.grid}, beginAtZero:true}
+  };
+  // Chart.js rejects a scale key whose config is undefined ("Invalid scale configuration for scale: y1"),
+  // so y1 is only added when a dual axis is really requested.
+  if(opts.dualAxis) defaultScales.y1 = {position:'left', grid:{display:false}, beginAtZero:true, display:false};
   STATE.charts[canvasId] = new Chart(ctx, {
     type:'line',
     data:{labels, datasets},
     options: Object.assign({
       responsive:true, maintainAspectRatio:false, interaction:{mode:'index', intersect:false},
       plugins:{legend:{display:true, position:'top', labels:{boxWidth:10, padding:12}}},
-      scales:{
-        x:{grid:{display:false}},
-        y:{grid:{color:CHART_COLORS.grid}, beginAtZero:true},
-        y1:opts.dualAxis ? {position:'left', grid:{display:false}, beginAtZero:true, display:false} : undefined
-      }
+      scales:defaultScales
     }, opts.overrides||{})
   });
 }
