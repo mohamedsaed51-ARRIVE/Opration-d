@@ -1953,6 +1953,18 @@ function summaryMergeGroupLists(listOfArrays, topN) {
   return out;
 }
 
+function summaryLegacyGroupRateMonths_(months, summaries) {
+  var out = [];
+  for (var i = 0; i < summaries.length; i++) {
+    var sm = summaries[i], lists = [sm.branchSummary, sm.customerSummary, sm.provinceSummary, sm.areaSummary], legacy = false;
+    for (var l = 0; l < lists.length && !legacy; l++) {
+      if (lists[l] && lists[l].length && typeof lists[l][0].pending !== "number") legacy = true;
+    }
+    if (legacy) out.push(months[i]);
+  }
+  return out;
+}
+
 function summaryMergeCountMaps(list) {
   var out = {};
   for (var i = 0; i < list.length; i++) {
@@ -2382,6 +2394,9 @@ function getAllMonthsDashboardSummary(params) {
     // fully current. Empty unless a normal/passive request found an
     // incompatible snapshot (allowHeavyLiveFallback === false case).
     staleSlaMonths: staleSlaMonths, slaConfigStale: staleSlaMonths.length > 0,
+    // Months whose saved branch/customer/province/area rows predate the `pending` field: their return/reject rates
+    // in this merged view use the documented approximation until the summaries are rebuilt.
+    legacyGroupRateMonths: summaryLegacyGroupRateMonths_(includedMonths, perMonthSummaries),
     allowedHeavyLiveFallback: allowHeavyLiveFallback,
     monthSources: monthSources,
     cached: false

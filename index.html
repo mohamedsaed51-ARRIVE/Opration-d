@@ -6306,7 +6306,7 @@ function dsBandBadge(cls){
    Source columns: everything from «حالة الشحنة» except the rejection card, which is read from «الحالة النهائية»
    (Code.gs summaryClassifyKind). A saved summary built before this taxonomy has no return split (k.returnClosed is
    undefined) — those three cards then show «—» and a note asks for «تحديث الداش بورد» from Settings. */
-function renderKpiCards(k){
+function renderKpiCards(k, serverSummary){
   const total = k.total || 0;
   const split = k.returnClosed !== undefined && k.returnClosed !== null;
   const pct = n => total>0 ? fmtPct(n/total*100) : '—';
@@ -6328,7 +6328,9 @@ function renderKpiCards(k){
   }
   document.getElementById('kpiGrid').innerHTML = cards.map(dsKpiCardHTML).join('');
   const note = document.getElementById('kpiNote');
-  if(note) note.innerHTML = split ? '' : '<div class="ds-alert info" style="margin-bottom:12px"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>الملخص المحفوظ قديم</b> — تقسيم المرتجعات (مغلق / مفتوح / معلق) وأوردرات الرفض بحسب الحالة النهائية يحتاج إعادة بناء الملخصات: افتح <b>الإعدادات ← تحديث الداش بورد</b>.</div></div>';
+  const legacyRates = serverSummary && serverSummary.legacyGroupRateMonths && serverSummary.legacyGroupRateMonths.length && k.unknown > 0;
+  const legacyNote = legacyRates ? '<div class="ds-alert info" style="margin-bottom:12px"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>نسب الفروع/العملاء/المحافظات في «كل الشهور» تقريبية</b> لأن ملخصات (' + serverSummary.legacyGroupRateMonths.join('، ') + ') محفوظة قبل إضافة عدد «قيد التشغيل» لكل مجموعة، وهناك شحنات غير مصنفة. افتح <b>الإعدادات ← تحديث الداش بورد</b>.</div></div>' : '';
+  if(note) note.innerHTML = (split ? '' : '<div class="ds-alert info" style="margin-bottom:12px"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>الملخص المحفوظ قديم</b> — تقسيم المرتجعات (مغلق / مفتوح / معلق) وأوردرات الرفض بحسب الحالة النهائية يحتاج إعادة بناء الملخصات: افتح <b>الإعدادات ← تحديث الداش بورد</b>.</div></div>') + legacyNote;
 }
 
 /* =========================================================
@@ -6562,7 +6564,7 @@ function applyServerSummaryToDashboard(serverSummary){
     renderKpiCards(ZERO_KPIS);
   }else{
     STATE.grandTotalShipments = serverSummary.grandTotal;
-    renderKpiCards(withAnchoredDeliveryRate(serverSummary));
+    renderKpiCards(withAnchoredDeliveryRate(serverSummary), serverSummary);
   }
   renderAlertsFromServer(serverSummary); // always-visible, like KPI cards — not gated behind a tab click
   ['overview','branches','geo','clients','sla','trend','dq'].forEach(t=>dirtyTabs.add(t));
