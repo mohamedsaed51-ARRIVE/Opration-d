@@ -682,7 +682,6 @@ body.ds-updating::before{content:""; position:fixed; top:0; inset-inline:0; heig
    تقرير عمر الشحنة (tab-shipage) — presentation only, outside the ARRIVE-DS inlined block
    ========================================================================== */
 body.on-shipage .exec-wrap, body.on-shipage .filter-panel{display:none;}
-body.on-shipage .month-select-wrap{display:none;}
 .age-controls{margin-bottom:var(--space-4);}
 .age-ctl-row{display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px;}
 .age-ctl-row .filter-group{max-width:230px;}
@@ -691,7 +690,9 @@ body.on-shipage .month-select-wrap{display:none;}
 .age-std table{min-width:0;}
 .age-std input[type=number]{width:76px; height:34px; text-align:center;}
 .age-std-actions{margin-top:8px;}
-.age-title{background:linear-gradient(135deg,var(--arrive-navy),var(--arrive-blue)); color:#fff; border-radius:var(--radius-md); padding:20px 24px; margin-bottom:var(--space-4);}
+.age-period-chip{height:var(--control-h-md); display:flex; align-items:center; padding:0 12px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--arrive-light-blue); color:var(--arrive-blue); font-weight:var(--fw-bold); font-size:var(--fs-small); white-space:nowrap;}
+.age-ctl-row .filter-group.age-period{max-width:360px;}
+.age-title{display:none; background:linear-gradient(135deg,var(--arrive-navy),var(--arrive-blue)); color:#fff; border-radius:var(--radius-md); padding:20px 24px; margin-bottom:var(--space-4);}
 .age-title h2{margin:0 0 6px; font-size:20px; line-height:1.5; color:#fff;}
 .age-title .meta{font-size:var(--fs-small); opacity:.9; line-height:1.9;}
 .age-sec{margin-bottom:var(--space-5);}
@@ -715,7 +716,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
 .age-loading i{font-size:26px; color:var(--arrive-blue); margin-bottom:10px; display:block;}
 @media print{
   .age-controls,#ageStatus{display:none !important;}
-  .age-title{background:var(--arrive-blue) !important; color:#fff;}
+  .age-title{display:block !important; background:var(--arrive-blue) !important; color:#fff;}
   .age-two{grid-template-columns:1fr 1fr;}
   .age-sec .card{break-inside:auto;}
   .age-gcard{break-inside:avoid;}
@@ -915,8 +916,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   <div class="tab-panel" id="tab-shipage">
     <section class="card age-controls" aria-label="خيارات تقرير عمر الشحنة">
       <div class="age-ctl-row">
-        <div class="filter-group"><label for="ageFrom">من تاريخ استلام البيك أب</label><input type="date" id="ageFrom"></div>
-        <div class="filter-group"><label for="ageTo">إلى تاريخ استلام البيك أب</label><input type="date" id="ageTo"></div>
+        <div class="filter-group age-period"><label>الفترة (مرتبطة بمُحدّد الشهر أعلى الصفحة)</label><div class="age-period-chip" id="agePeriodChip">—</div></div>
         <div class="filter-group"><label for="ageAsOf">قياس عمر الشحنات المفتوحة حتى</label><input type="date" id="ageAsOf"></div>
         <button class="btn-primary" id="ageRunBtn" type="button"><i class="fa-solid fa-play" aria-hidden="true"></i> إنشاء التقرير</button>
         <button class="btn-primary" id="ageDocxBtn" type="button" disabled><i class="fa-solid fa-file-word" aria-hidden="true"></i> تصدير التقرير (Word)</button>
@@ -7074,15 +7074,37 @@ function ageLoadPrefs(){
 function ageSavePrefs(){
   try{ localStorage.setItem(AGE_PREFS_KEY, JSON.stringify({ std: AGE.std })); }catch(e){}
 }
-function ageDefaultDates(){
-  const today = new Date();
-  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  let mi = MONTHS.indexOf(selectedMonth);
-  if(mi < 0) mi = today.getMonth();
-  const year = mi > today.getMonth() ? today.getFullYear()-1 : today.getFullYear();
-  const first = new Date(year, mi, 1), last = new Date(year, mi+1, 0);
-  const to = last < today ? last : today;
-  return { from: ageIso(first), to: ageIso(to), asOf: ageIso(today) };
+const AGE_MONTHS_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+/* the report follows the dashboard period: one month, or every available month when «كل الشهور» is selected */
+function ageSelection(){
+  const all = (selectedMonth === ALL_MONTHS_SENTINEL);
+  const sheets = all ? availableMonths.slice() : (selectedMonth ? [selectedMonth] : []);
+  const f = STATE.filters || {};
+  return { all, sheets, dateFrom: f.dateFrom||'', dateTo: f.dateTo||'' };
+}
+function ageSelLabel(sel){
+  const ar = m=>{ const i = AGE_MONTHS_EN.indexOf(m); return i>=0 ? AGE_MONTHS_AR[i] : m; };
+  const sorted = sel.sheets.slice().sort((a,b)=>AGE_MONTHS_EN.indexOf(a)-AGE_MONTHS_EN.indexOf(b));
+  let txt = sel.all ? ('كل الشهور' + (sorted.length ? ` (${ar(sorted[0])}${sorted.length>1?' – '+ar(sorted[sorted.length-1]):''})` : '')) : ('شهر ' + (sorted[0] ? ar(sorted[0]) : '—'));
+  if(sel.dateFrom || sel.dateTo) txt += ` · من ${sel.dateFrom||'…'} إلى ${sel.dateTo||'…'}`;
+  return txt;
+}
+function ageSelKey(sel){ return JSON.stringify([sel.sheets, sel.dateFrom, sel.dateTo, document.getElementById('ageAsOf').value, AGE.std]); }
+/* period wording used inside the report itself (title, charts, footer) */
+function agePeriodText(d){
+  const ms = (d.months && d.months.length) ? d.months.slice().sort((a,b)=>AGE_MONTHS_EN.indexOf(a)-AGE_MONTHS_EN.indexOf(b)) : [];
+  const ar = m=>AGE_MONTHS_AR[AGE_MONTHS_EN.indexOf(m)] || m;
+  const y1 = d.params.dateFrom ? d.params.dateFrom.slice(0,4) : '', y2 = d.params.dateTo ? d.params.dateTo.slice(0,4) : '';
+  const years = y1 && y2 && y1!==y2 ? `${y1}–${y2}` : (y1||y2);
+  let txt;
+  if(d.params.scope === 'sheets' && ms.length === 1) txt = `شهر ${ar(ms[0])} ${years}`.trim();
+  else if(d.params.scope === 'sheets' && ms.length > 1) txt = `كل الشهور: ${ar(ms[0])} – ${ar(ms[ms.length-1])} ${years}`.trim();
+  else txt = ageRangeText(d.params.dateFrom, d.params.dateTo);
+  if(d.params.scope === 'sheets' && (d.params.boundFrom || d.params.boundTo)) txt += ` (من ${d.params.boundFrom||'…'} إلى ${d.params.boundTo||'…'})`;
+  return txt;
+}
+function ageUpdatePeriodChip(){
+  const el = document.getElementById('agePeriodChip'); if(el) el.textContent = selectedMonth ? ageSelLabel(ageSelection()) : '—';
 }
 function ageRenderStdTable(){
   const t = document.getElementById('ageStdTable'); if(!t) return;
@@ -7104,12 +7126,8 @@ function initShipAge(){
       const v = Number(prefs.std[k] && prefs.std[k][f]); if(isFinite(v) && v>0) AGE.std[k][f] = v;
     }));
   }
-  const d = ageDefaultDates();
-  document.getElementById('ageFrom').value = d.from;
-  document.getElementById('ageTo').value = d.to;
-  document.getElementById('ageAsOf').value = d.asOf;
+  document.getElementById('ageAsOf').value = ageIso(new Date());
   ageRenderStdTable();
-  ['ageFrom','ageTo','ageAsOf'].forEach(id=>document.getElementById(id).addEventListener('change', ()=>{ AGE.inputsTouched = true; }));
   document.getElementById('ageRunBtn').addEventListener('click', ()=>runAgeReport(true));
   document.getElementById('ageDocxBtn').addEventListener('click', exportAgeDocx);
   document.getElementById('ageXlsxBtn').addEventListener('click', exportAgeXlsx);
@@ -7123,29 +7141,33 @@ function ageSetStatus(html){ const el=document.getElementById('ageStatus'); if(e
 
 async function runAgeReport(force){
   if(AGE.loading) return;
-  const from = document.getElementById('ageFrom').value, to = document.getElementById('ageTo').value, asOf = document.getElementById('ageAsOf').value;
-  if(!from || !to || !asOf){ ageSetStatus('<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>بيانات ناقصة</b> — حدّد تاريخ البداية والنهاية وتاريخ القياس.</div></div>'); return; }
-  if(to < from){ ageSetStatus('<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>فترة غير صحيحة</b> — تاريخ النهاية قبل تاريخ البداية.</div></div>'); return; }
-  if(asOf < to){ ageSetStatus('<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>تاريخ القياس غير صحيح</b> — يجب ألا يسبق نهاية الفترة.</div></div>'); return; }
+  const sel = ageSelection(), asOf = document.getElementById('ageAsOf').value;
+  const bad = msg=>{ ageSetStatus(`<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>${msg[0]}</b> — ${msg[1]}</div></div>`); };
+  if(!sel.sheets.length){ bad(['لا توجد شهور','لم يتم تحديد شهر أو لا توجد شهور متاحة بعد.']); return; }
+  if(!asOf){ bad(['بيانات ناقصة','حدّد تاريخ القياس.']); return; }
+  AGE.key = ageSelKey(sel);
+  ageUpdatePeriodChip();
   AGE.loading = true;
   document.getElementById('ageRunBtn').disabled = true;
   ageSetStatus('');
   document.getElementById('ageReport').innerHTML = '<div class="card age-loading"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>جاري حساب أعمار الشحنات من ملفات الشهور… قد تستغرق العملية دقيقة للفترات الكبيرة.</div>';
   try{
-    const params = { action:'ageReport', dateFrom:from, dateTo:to, asOf:asOf, standards: JSON.stringify(AGE.std) };
+    const params = { action:'ageReport', sheets: sel.sheets.join(','), asOf:asOf, standards: JSON.stringify(AGE.std) };
+    if(sel.dateFrom) params.dateFrom = sel.dateFrom;
+    if(sel.dateTo) params.dateTo = sel.dateTo;
     if(force) params.refresh = '1';
     const res = await fetchWithTimeout(buildAppsScriptUrl(params), {cache:'no-store'}, 240000);
     if(!res.ok) throw new Error('تعذر الوصول إلى مصدر البيانات (HTTP '+res.status+').');
     let payload; const text = await res.text();
     try{ payload = JSON.parse(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
     if(payload && payload.success === false) throw new Error(payload.error || 'تعذر إنشاء التقرير.');
-    AGE.data = payload;
+    AGE.data = payload; AGE.failKey = null;
     renderAgeReport(payload);
     document.getElementById('ageXlsxBtn').disabled = false;
     document.getElementById('ageDocxBtn').disabled = false;
     document.getElementById('agePrintBtn').disabled = false;
   }catch(err){
-    AGE.data = null;
+    AGE.data = null; AGE.failKey = AGE.key; // a failed period is not retried automatically — the «إنشاء التقرير» button retries
     document.getElementById('ageReport').innerHTML = '';
     document.getElementById('ageXlsxBtn').disabled = true;
     document.getElementById('ageDocxBtn').disabled = true;
@@ -7155,19 +7177,18 @@ async function runAgeReport(force){
   }finally{
     AGE.loading = false;
     document.getElementById('ageRunBtn').disabled = false;
+    // the month / date filter changed while this request was running — follow the new period
+    if(document.body.classList.contains('on-shipage') && ageSelKey(ageSelection()) !== AGE.key) setTimeout(renderShipAgeTab, 0);
   }
 }
 
 function renderShipAgeTab(){
-  if(AGE.data){ return; } // already rendered; DOM persists across tab switches
-  if(!AGE.autoRan && !AGE.loading){
-    AGE.autoRan = true;
-    if(!AGE.inputsTouched){ // the month list was not known when the tab was wired — default to the selected month now
-      const d = ageDefaultDates();
-      document.getElementById('ageFrom').value = d.from; document.getElementById('ageTo').value = d.to; document.getElementById('ageAsOf').value = d.asOf;
-    }
-    runAgeReport(false);
-  }
+  ageUpdatePeriodChip();
+  if(AGE.loading || !selectedMonth) return;
+  const key = ageSelKey(ageSelection());
+  if(AGE.data && AGE.key === key) return; // already showing this period; DOM persists across tab switches
+  if(AGE.failKey === key) return;
+  runAgeReport(false);
 }
 
 /* ---------- rendering ---------- */
@@ -7258,6 +7279,7 @@ function renderAgeReport(d){
   // ---- data quality & control notes ----
   const q = d.dq, notes = [];
   const alertBox = (cls, title, body)=>`<div class="ds-alert ${cls}" style="margin-bottom:10px"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>${title}</b> — ${body}</div></div>`;
+  if(d.skippedMonths && d.skippedMonths.length) notes.push(alertBox('violation','شهور لم تُقرأ (ضيق الوقت)', `لم يتسع وقت التنفيذ لقراءة: ${ageEsc(d.skippedMonths.join('، '))} — اختر شهورًا أقل أو أعد المحاولة.`));
   if(d.missingMonths && d.missingMonths.length) notes.push(alertBox('violation','شيتات غير موجودة', `لم يتم العثور على بيانات للشهور: ${ageEsc(d.missingMonths.join('، '))} — الأرقام لا تشمل الفترة الواقعة فيها.`));
   const unm = Object.entries(q.unmappedBranches||{});
   if(unm.length) notes.push(alertBox('violation','فروع غير مصنّفة جغرافيًا', `${unm.map(([n,c])=>`${ageEsc(n)} (${ageN(c)})`).join('، ')} — لم تُقارن بالمعايير. أضِفها لمجموعتها في <code>AGE_REPORT_GROUPS</code> داخل Code.gs.`));
@@ -7284,7 +7306,7 @@ function renderAgeReport(d){
 
   document.getElementById('ageReport').innerHTML = `
   <div class="age-title"><h2>التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة</h2>
-    <div class="meta">الفترة: من ${ageArDate(d.params.dateFrom)} إلى ${ageArDate(d.params.dateTo)} (حسب تاريخ استلام البيك أب)<br>قياس أعمار الشحنات المفتوحة حتى: ${asOfTxt}${d.cached?' · (نتيجة محفوظة مؤقتًا)':''}</div></div>
+    <div class="meta">الفترة: ${ageEsc(agePeriodText(d))} (حسب تاريخ استلام البيك أب)<br>قياس أعمار الشحنات المفتوحة حتى: ${asOfTxt}${d.cached?' · (نتيجة محفوظة مؤقتًا)':''}</div></div>
 
   <section class="age-sec card"><div class="card-title">هدف التقرير</div>
     <p class="age-note" style="margin-top:0">ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم: قياس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ومقارنتها بمعيارين منفصلين — مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.</p>
@@ -7324,7 +7346,7 @@ function renderAgeReport(d){
     box.dataset.shown = '1'; btn.textContent = 'إخفاء القائمة';
     try{ ARRIVE_DS.enhanceTable(document.getElementById('ageOpenListTable')); }catch(e){}
   });
-  window.AGE_PRINT_PERIOD = `${d.params.dateFrom} → ${d.params.dateTo}`;
+  window.AGE_PRINT_PERIOD = agePeriodText(d);
 }
 
 /* ---------- charts (PNG via Chart.js) — shared by the on-screen report and the Word export ---------- */
@@ -7376,7 +7398,7 @@ function ageChartOpts(title, sub, o){
     }
   };
 }
-function ageSubPeriod(d){ return 'الفترة: '+ageRangeText(d.params.dateFrom, d.params.dateTo); }
+function ageSubPeriod(d){ return 'الفترة: '+agePeriodText(d); }
 function ageChartDist(d, g){
   const dist = g.dist || []; const sum = dist.reduce((a,b)=>a+b,0); if(!sum) return null;
   const labels = dist.map((_,i)=> i < g.delivery ? String(i+1) : g.delivery+'+');
@@ -7514,7 +7536,7 @@ async function exportAgeDocx(){
     const charts = AGE.charts || ageBuildCharts(d);
     const logo = await ageLogoInfo();
     const k = d.kpis, std = d.standards;
-    const periodTxt = ageRangeText(d.params.dateFrom, d.params.dateTo);
+    const periodTxt = agePeriodText(d);
     const asOfTxt = agePlainDate(d.params.asOf);
     const W = 10092;
 
@@ -7679,6 +7701,7 @@ async function exportAgeDocx(){
     // ---- 6. control notes ----
     pushAll(children, heading(6,'الملاحظات الرقابية وجودة البيانات'));
     const q = d.dq, notes = [];
+    if(d.skippedMonths && d.skippedMonths.length) notes.push(`لم تُقرأ شهور بسبب ضيق وقت التنفيذ: ${d.skippedMonths.join('، ')} — الأرقام لا تشملها.`);
     if(d.missingMonths && d.missingMonths.length) notes.push(`لم يتم العثور على بيانات للشهور: ${d.missingMonths.join('، ')} — الأرقام لا تشمل الفترة الواقعة فيها.`);
     const unm = Object.entries(q.unmappedBranches||{});
     if(unm.length) notes.push(`فروع غير مصنّفة جغرافيًا (لم تُقارن بالمعايير): ${unm.map(([n,c])=>`${n} (${ageN(c)})`).join('، ')}.`);
@@ -7736,7 +7759,7 @@ async function exportAgeXlsx(){
     const ws = wb.addWorksheet(name, { views:[{ rightToLeft:true, state:'frozen', ySplit:3 }] });
     ws.getCell('A1').value = 'التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة — ' + name;
     ws.getCell('A1').font = { bold:true, size:14, color:{argb:NAVY} };
-    ws.getCell('A2').value = `الفترة: من ${d.params.dateFrom} إلى ${d.params.dateTo} (حسب تاريخ استلام البيك أب) · قياس المفتوح حتى ${d.params.asOf}`;
+    ws.getCell('A2').value = `الفترة: ${agePeriodText(d)} (حسب تاريخ استلام البيك أب) · قياس المفتوح حتى ${d.params.asOf}`;
     ws.getCell('A2').font = { size:10, color:{argb:'FF6B7280'} };
     return ws;
   }

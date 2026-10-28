@@ -70,5 +70,30 @@ check('months in range Sep 25 - Oct 3', JSON.stringify(sandbox.ageReportMonthsIn
 check('delivery-day histogram: cairo buckets (0d+1d=2, 2d, 3d, >15d)', cairo.dist.length === 16 && cairo.dist[0] === 2 && cairo.dist[1] === 1 && cairo.dist[2] === 1 && cairo.dist[15] === 1, cairo.dist);
 check('histogram sums to delivered with age', cairo.dist.reduce((a, b) => a + b, 0) === cairo.kinds.delivered.count - cairo.kinds.delivered.noAge);
 check('open return min/max age', out.kpis.minOpenReturnAge === 22 && out.kpis.maxOpenReturnAge === 22, [out.kpis.minOpenReturnAge, out.kpis.maxOpenReturnAge]);
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+
+// ---- getAgeReport end-to-end with a fake spreadsheet (sheets mode / All Months / bounds) ----
+{
+  const mkRows = (month, n) => { // header + n rows; pickup dates inside that month of 2026
+    const mi = ['January','February','March','April','May','June','July','August','September','October','November','December'].indexOf(month);
+    const rows = [['رقم البوليصة','فرع المنطقة','حالة الشحنة','تاريخ استلام البيك أب','تاريخ اخر حالة']];
+    for (let i = 0; i < n; i++) rows.push([month + i, 'مدينة نصر', i % 2 ? 'تسليم ناجح' : 'قيد التشغيل', new Date(2026, mi, 1 + (i % 20)), i % 2 ? new Date(2026, mi, 2 + (i % 20)) : '']);
+    return rows;
+  };
+  const sheets = { September: mkRows('September', 10), October: mkRows('October', 20) };
+  const sb2 = { console, Date, Math, JSON, Object, Number, String, isFinite, Array,
+    Utilities: { computeDigest: () => [1, 2, 3], DigestAlgorithm: { MD5: 1 } },
+    CacheService: { getScriptCache: () => ({ get: () => null, put: () => {}, getAll: () => ({}), putAll: () => {} }) },
+    SpreadsheetApp: { openById: () => ({ getSheetByName: (n) => sheets[n] ? ({ getLastRow: () => sheets[n].length, getLastColumn: () => 5, getRange: () => ({ getValues: () => sheets[n] }) }) : null }) } };
+  vm.createContext(sb2); vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), sb2);
+  const one = sb2.getAgeReport({ sheets: 'October', asOf: '2026-10-28' });
+  check('sheets mode: single month reads only that sheet', one.success && one.months.join() === 'October' && one.kpis.shipments === 20, one.error || one.months);
+  check('sheets mode: observed pickup range reported', one.params.dateFrom === '2026-10-01' && one.params.dateTo === '2026-10-20', one.params);
+  const all = sb2.getAgeReport({ sheets: 'September,October,March', asOf: '2026-10-28' });
+  check('sheets mode: all months, missing sheet reported', all.success && all.months.join() === 'September,October' && all.missingMonths.join() === 'March' && all.kpis.shipments === 30, all.error || all.missingMonths);
+  const bounded = sb2.getAgeReport({ sheets: 'October', dateFrom: '2026-10-01', dateTo: '2026-10-05', asOf: '2026-10-28' });
+  check('sheets mode: dashboard date bounds applied', bounded.success && bounded.kpis.shipments === 5 && bounded.dq.outsidePeriod === 15, bounded.kpis && bounded.kpis.shipments);
+  check('sheets mode: invalid month rejected', sb2.getAgeReport({ sheets: 'Foo' }).success === false);
+  check('legacy range mode still works', sb2.getAgeReport({ dateFrom: '2026-10-01', dateTo: '2026-10-10', asOf: '2026-10-28' }).success === true);
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+}

@@ -2389,6 +2389,7 @@ var AGE_RETURN_OPEN_KEYWORDS = ["مرتجع", "رجيع", "ارجاع", "إرج�
 var AGE_REPORT_MAX_MONTHS = 4;
 var AGE_REPORT_MAX_OPEN_LIST = 3000;
 var AGE_REPORT_CACHE_TTL_SECONDS = 600;
+var AGE_REPORT_TIME_BUDGET_MS = 240000;
 
 function ageNormBranch_(name) {
   return summaryNormalizeArabicForMatch_(summaryNormText(name))
@@ -2665,35 +2666,52 @@ function ageReportMonthsInRange_(fromNum, toNum) {
 
 function getAgeReport(params) {
   var t0 = new Date().getTime();
-  var dateFrom = summaryNormText(params && params.dateFrom), dateTo = summaryNormText(params && params.dateTo);
   var isoRe = /^\d{4}-\d{2}-\d{2}$/;
-  if (!isoRe.test(dateFrom) || !isoRe.test(dateTo)) return { success: false, error: "يجب تحديد تاريخ البداية والنهاية بصيغة YYYY-MM-DD." };
-  var fromNum = ageDayNumFromIso_(dateFrom), toNum = ageDayNumFromIso_(dateTo);
-  if (toNum < fromNum) return { success: false, error: "تاريخ النهاية قبل تاريخ البداية." };
+  var dateFrom = summaryNormText(params && params.dateFrom), dateTo = summaryNormText(params && params.dateTo);
   var asOf = summaryNormText(params && params.asOf);
   if (!isoRe.test(asOf)) asOf = ageIsoDate_(new Date());
   var asOfNum = ageDayNumFromIso_(asOf);
-  if (asOfNum < toNum) return { success: false, error: "تاريخ القياس يجب ألا يسبق نهاية الفترة." };
 
   var overrides = {};
   if (params && params.standards) { try { overrides = JSON.parse(params.standards) || {}; } catch (e) { overrides = {}; } }
   var groups = ageResolveGroups_(overrides);
 
-  var months = ageReportMonthsInRange_(fromNum, toNum);
-  if (months.length > AGE_REPORT_MAX_MONTHS) return { success: false, error: "الفترة أطول من " + AGE_REPORT_MAX_MONTHS + " شهور — قلّل المدى." };
+  // Two modes:
+  //  - sheets mode (dashboard-linked): `sheets=July` or `sheets=January,February,...` (All Months). Whole month sheets are read;
+  //    dateFrom/dateTo are OPTIONAL extra pickup-date bounds (the dashboard's own date filter).
+  //  - legacy range mode: dateFrom + dateTo required; the months overlapping the range are read.
+  var sheetsParam = summaryNormText(params && params.sheets);
+  var months, fromNum = null, toNum = null, sheetsMode = !!sheetsParam;
+  if (dateFrom && !isoRe.test(dateFrom)) return { success: false, error: "تاريخ البداية بصيغة غير صحيحة (YYYY-MM-DD)." };
+  if (dateTo && !isoRe.test(dateTo)) return { success: false, error: "تاريخ النهاية بصيغة غير صحيحة (YYYY-MM-DD)." };
+  if (dateFrom) fromNum = ageDayNumFromIso_(dateFrom);
+  if (dateTo) toNum = ageDayNumFromIso_(dateTo);
+  if (fromNum !== null && toNum !== null && toNum < fromNum) return { success: false, error: "تاريخ النهاية قبل تاريخ البداية." };
+  if (sheetsMode) {
+    var wanted = {};
+    sheetsParam.split(",").forEach(function (m) { m = summaryNormText(m); if (MONTH_SOURCE.hasOwnProperty(m)) wanted[m] = true; });
+    months = MONTH_ORDER.filter(function (m) { return wanted[m]; });
+    if (!months.length) return { success: false, error: "لم يتم تحديد شهر صالح." };
+  } else {
+    if (fromNum === null || toNum === null) return { success: false, error: "يجب تحديد الشهر (sheets) أو تاريخ البداية والنهاية بصيغة YYYY-MM-DD." };
+    if (asOfNum < toNum) return { success: false, error: "تاريخ القياس يجب ألا يسبق نهاية الفترة." };
+    months = ageReportMonthsInRange_(fromNum, toNum);
+    if (months.length > AGE_REPORT_MAX_MONTHS) return { success: false, error: "الفترة أطول من " + AGE_REPORT_MAX_MONTHS + " شهور — قلّل المدى." };
+  }
 
   var cache = CacheService.getScriptCache();
   var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
-  var cacheKey = "agerep_v2_" + summaryHashKey(dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
+  var cacheKey = "agerep_v3_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
   if (!forceRefresh) {
     var cached = cacheGetChunked(cache, cacheKey);
     if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }
   }
 
   var awbMap = {}, rowsRead = 0, dupRemoved = 0, outOfRange = 0, noAwb = 0;
-  var missingMonths = [], monthsRead = [];
+  var missingMonths = [], monthsRead = [], skippedMonths = [];
   for (var mi = 0; mi < months.length; mi++) {
     var month = months[mi];
+    if (new Date().getTime() - t0 > AGE_REPORT_TIME_BUDGET_MS) { skippedMonths.push(month); continue; } // never risk the Apps Script execution ceiling — reported, not hidden
     var quarter = MONTH_SOURCE[month];
     var ss;
     try { ss = SpreadsheetApp.openById(SPREADSHEET_IDS[quarter]); }
@@ -2715,7 +2733,7 @@ function getAgeReport(params) {
       var awb = summaryNormText(summaryGetField(row, idx, "awb"));
       if (!awb) { noAwb++; continue; }
       var pickup = summaryParseDate(summaryGetField(row, idx, "pickup"));
-      if (pickup) { var pn = ageDayNum_(pickup); if (pn < fromNum || pn > toNum) { outOfRange++; continue; } }
+      if (pickup) { var pn = ageDayNum_(pickup); if ((fromNum !== null && pn < fromNum) || (toNum !== null && pn > toNum)) { outOfRange++; continue; } }
       var rec = {
         awb: awb, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
         branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status"))
@@ -2731,12 +2749,20 @@ function getAgeReport(params) {
 
   var records = [];
   for (var k in awbMap) { if (awbMap.hasOwnProperty(k)) records.push(awbMap[k]); }
+  var minP = null, maxP = null;
+  for (var ri2 = 0; ri2 < records.length; ri2++) {
+    if (!records[ri2].pickup) continue;
+    var pnum = ageDayNum_(records[ri2].pickup);
+    if (minP === null || pnum < minP) minP = pnum;
+    if (maxP === null || pnum > maxP) maxP = pnum;
+  }
   var computed = ageReportCompute_(records, groups, asOfNum);
   var result = {
     success: true, generatedAt: new Date().toISOString(), cached: false,
-    params: { dateFrom: dateFrom, dateTo: dateTo, asOf: asOf },
+    params: { dateFrom: minP !== null ? ageIsoFromDayNum_(minP) : dateFrom, dateTo: maxP !== null ? ageIsoFromDayNum_(maxP) : dateTo, asOf: asOf,
+      boundFrom: dateFrom, boundTo: dateTo, scope: sheetsMode ? "sheets" : "range" },
     standards: groups.map(function (g) { return { key: g.key, name: g.name, market: g.market, delivery: g.delivery, returns: g.returns }; }),
-    months: monthsRead, missingMonths: missingMonths,
+    months: monthsRead, missingMonths: missingMonths, skippedMonths: skippedMonths,
     kpis: computed.kpis, groups: computed.groups, unassigned: computed.unassigned, open: computed.open,
     statusBreakdown: computed.statusBreakdown,
     dq: Object.assign({ rowsRead: rowsRead, uniqueShipments: records.length, duplicatesRemoved: dupRemoved, outsidePeriod: outOfRange, blankAwb: noAwb }, computed.dq),
