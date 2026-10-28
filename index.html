@@ -7160,7 +7160,11 @@ async function runAgeReport(force){
     if(!res.ok) throw new Error('تعذر الوصول إلى مصدر البيانات (HTTP '+res.status+').');
     let payload; const text = await res.text();
     try{ payload = JSON.parse(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
-    if(payload && payload.success === false) throw new Error(payload.error || 'تعذر إنشاء التقرير.');
+    if(payload && payload.success === false){
+      // an older Code.gs deployment does not know the `sheets` parameter (month-linked mode) and asks for explicit dates
+      if(/يجب تحديد تاريخ البداية والنهاية/.test(String(payload.error||''))) throw new Error('نسخة Code.gs المنشورة في Apps Script قديمة. الصق آخر Code.gs ثم Deploy ← Manage deployments ← Edit ← New version ← Deploy، وأعد المحاولة.');
+      throw new Error(payload.error || 'تعذر إنشاء التقرير.');
+    }
     AGE.data = payload; AGE.failKey = null;
     renderAgeReport(payload);
     document.getElementById('ageXlsxBtn').disabled = false;
