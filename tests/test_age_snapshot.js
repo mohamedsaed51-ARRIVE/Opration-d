@@ -75,4 +75,14 @@ sb.buildAgeSnapshot = () => { throw new Error('age failed'); };
 sb.getMonthDashboardSummary = () => ({ success: true, totalRows: 10, grandTotal: 10 });
 const bad = sb.buildAndSaveMonthSummary('October');
 check('age summary failure never fails the main update', bad.success && bad.ageSnapshot.success === false && /age failed/.test(bad.ageSnapshot.error), bad.ageSnapshot);
+
+// ---- listStatusNames: distinct status names with counts and classification ----
+{
+  const res = sb.collectStatusNames_({ getSheetByName: n => sheets[n] || null }, ['September', 'October']);
+  const byName = Object.fromEntries(res.rows.map(r => [r.status, r]));
+  check('status names collected for the month that has data', res.monthsRead.join() === 'October');
+  check('known status classified in dashboard + age report', byName['تسليم ناجح'] && byName['تسليم ناجح'].dashboard === 'تم التسليم' && byName['تسليم ناجح'].age === 'تسليم ناجح');
+  check('unknown status flagged as «غير مصنف» yet classified for the age report', byName['مرتجع بالفرع'] && byName['مرتجع بالفرع'].dashboard === 'غير مصنف' && byName['مرتجع بالفرع'].age === 'مرتجع مفتوح', byName['مرتجع بالفرع']);
+  check('counts are per unique AWB', res.rows.reduce((a, r) => a + r.count, 0) === 3000, res.rows.reduce((a, r) => a + r.count, 0));
+}
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
