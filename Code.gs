@@ -2941,6 +2941,24 @@ function ageSnapshotToRecords_(snap, out) {
   }
 }
 
+// Wall-clock start of THIS execution (globals are re-initialised on every Apps Script execution).
+var AGE_EXECUTION_START_MS = new Date().getTime();
+var AGE_WITH_SUMMARY_MAX_START_MS = 215000; // do not START an age build this late in a run — the 6-minute ceiling is shared with the main build
+
+function ageSnapshotWithSummary_(month, mainSummary) {
+  try {
+    if (mainSummary && (mainSummary.empty || mainSummary.noData)) return { success: true, skipped: "empty-month" };
+    if (new Date().getTime() - AGE_EXECUTION_START_MS > AGE_WITH_SUMMARY_MAX_START_MS) {
+      return { success: false, skipped: "time-budget", note: "شغّل «Age Report: Build Missing Months Summary» لاستكمال ملخص عمر الشحنة" };
+    }
+    var r = buildAgeSnapshot(month);
+    return r.success ? { success: true, openShipments: r.openShipments, durationMs: r.durationMs } : { success: false, error: r.error };
+  } catch (e) {
+    console.log("[AGE SNAPSHOT WITH SUMMARY FAILED] " + month + " " + String(e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
 // ---- builders (menu / trigger / doGet) ----
 function buildAgeSnapshot(month) {
   if (!MONTH_SOURCE.hasOwnProperty(month)) return { success: false, error: "شهر غير معروف: " + month };
@@ -3497,7 +3515,12 @@ function buildAndSaveMonthSummary(sheetName) {
   summary.snapshot = true;
   summary.generatedAt = summary.generatedAt || new Date().toISOString();
   var saved = saveMonthSummary_(sheetName, summary);
+  // The shipment-age summary (AGE_SUMMARY) is refreshed together with the main dashboard summary, from the SAME
+  // update entry points (menu items, batch builder, ?action=buildSummary), so one update keeps every tab's numbers
+  // current. A failure here never fails the main snapshot — it is reported in `ageSnapshot` instead.
+  var ageSnapshot = ageSnapshotWithSummary_(sheetName, summary);
   return {
+    ageSnapshot: ageSnapshot,
     success:true,
     month:sheetName,
     source:MONTH_SOURCE[sheetName],

@@ -58,4 +58,21 @@ check('date filter bypasses snapshot (needs raw rows)', bounded.success && bound
 const re = sb.buildAgeSnapshot('October');
 check('rebuild replaces rows (no duplicate chunks)', re.success && store.AGE_SUMMARY.rows.length === re.chunks + 1, store.AGE_SUMMARY.rows.length);
 check('unknown month rejected', sb.buildAgeSnapshot('Foo').success === false);
+
+// ---- the existing dashboard update (buildAndSaveMonthSummary) also refreshes the age summary ----
+store.AGE_SUMMARY.rows.length = 1; // keep header only
+sb.getMonthDashboardSummary = () => ({ success: true, totalRows: 10, grandTotal: 10 });
+sb.saveMonthSummary_ = () => ({ chunks: 1 });
+sb.getPersistedSlaSettings_ = () => ({ slaTargetDefault: 2, branchSlaTargets: {} });
+const upd = sb.buildAndSaveMonthSummary('October');
+check('main update succeeds and reports the age summary', upd.success && upd.ageSnapshot && upd.ageSnapshot.success, upd.ageSnapshot);
+check('main update refreshed AGE_SUMMARY rows', store.AGE_SUMMARY.rows.length > 1);
+sb.getMonthDashboardSummary = () => ({ success: true, empty: true, noData: true });
+const emp = sb.buildAndSaveMonthSummary('October');
+check('empty month skips the age summary without failing', emp.success && emp.ageSnapshot.skipped === 'empty-month');
+sb.ageGetSnapshot_ = () => { throw new Error('boom'); };
+sb.buildAgeSnapshot = () => { throw new Error('age failed'); };
+sb.getMonthDashboardSummary = () => ({ success: true, totalRows: 10, grandTotal: 10 });
+const bad = sb.buildAndSaveMonthSummary('October');
+check('age summary failure never fails the main update', bad.success && bad.ageSnapshot.success === false && /age failed/.test(bad.ageSnapshot.error), bad.ageSnapshot);
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
