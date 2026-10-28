@@ -85,4 +85,11 @@ check('age summary failure never fails the main update', bad.success && bad.ageS
   check('unknown status flagged as «غير مصنف» yet classified for the age report', byName['مرتجع بالفرع'] && byName['مرتجع بالفرع'].dashboard === 'غير مصنف' && byName['مرتجع بالفرع'].age === 'مرتجع مفتوح', byName['مرتجع بالفرع']);
   check('counts are per unique AWB', res.rows.reduce((a, r) => a + r.count, 0) === 3000, res.rows.reduce((a, r) => a + r.count, 0));
 }
+
+// ---- profileColumns data ----
+{
+  const prof = sb.profileColumnsData_([['الحالة النهائية', 'رقم', 'تاريخ'], ['مغلق', 1, new Date(2026, 9, 1)], ['مفتوح', 2, new Date(2026, 9, 2)], ['مغلق', 3, ''], ['', 4, new Date(2026, 9, 3)]]);
+  check('profile: low-cardinality column lists values with counts', prof[0][4] === 'مغلق (2) | مفتوح (1)' && prof[0][2] === 3 && prof[0][3] === 2, prof[0]);
+  check('profile: dates collapsed, empties not counted', prof[2][2] === 3 && prof[2][4] === '(تاريخ) (3)', prof[2]);
+}
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
