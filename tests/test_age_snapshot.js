@@ -9,7 +9,7 @@ function memSheet(rows) {
     getRange(r, c, nr, nc) { const self = this; return {
       getValues() { const out = []; for (let i = 0; i < (nr || 1); i++) { const row = self.rows[r - 1 + i] || []; out.push(Array.from({ length: nc || 1 }, (_, j) => row[c - 1 + j] === undefined ? '' : row[c - 1 + j])); } return out; },
       setValues(vals) { vals.forEach((v, i) => { const idx = r - 1 + i; while (self.rows.length <= idx) self.rows.push([]); v.forEach((x, j) => { self.rows[idx][c - 1 + j] = x; }); }); } }; },
-    deleteRow(n) { this.rows.splice(n - 1, 1); }, setFrozenRows() {} };
+    deleteRow(n) { this.rows.splice(n - 1, 1); }, deleteRows(n, c) { this.rows.splice(n - 1, c); }, setFrozenRows() {} };
   return sh;
 }
 const rnd = (() => { let s = 11; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
@@ -29,7 +29,8 @@ const props = {};
 const sb = { console, Date, Math, JSON, Object, Number, String, isFinite, Array,
   Utilities: { computeDigest: (a, s) => Array.from(String(s)).slice(0, 8).map(c => c.charCodeAt(0) & 127), DigestAlgorithm: { MD5: 1 } },
   CacheService: { getScriptCache: () => ({ get: () => null, put: () => {}, getAll: () => ({}), putAll: () => {} }) },
-  PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
+  PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; }, deleteProperty: k => { delete props[k]; } }) },
+  Logger: { log() {} },
   Session: { getActiveUser: () => ({ getEmail: () => '' }) },
   SpreadsheetApp: { flush() {}, openById: () => ({
     getSheetByName: n => n === 'AGE_SUMMARY' ? (store.AGE_SUMMARY.created ? store.AGE_SUMMARY : null) : (sheets[n] || null),
@@ -117,5 +118,25 @@ check('age summary failure never fails the main update', bad.success && bad.ageS
   check('merge: sub-kinds are summed', m.returnClosed === 4 && m.returnOpen === 1 && m.returnHold === 1 && m.returned === 6, m);
   const old = sb.summaryMergeTopKpis([{ total: 10, returned: 4, returnClosed: 2, returnOpen: 1, returnHold: 1 }, { total: 5, returned: 2 }]);
   check('merge: a month saved before the taxonomy leaves the split undefined (never faked)', old.returnClosed === undefined && old.returned === 6, old);
+}
+
+// ---- clearAllSummaries ----
+{
+  const dash = memSheet([['Month'], ['October'], ['October'], ['September']]);
+  const quarterSheets = { DASHBOARD_SUMMARY: dash };
+  const prevOpen = sb.SpreadsheetApp.openById;
+  sb.SpreadsheetApp.openById = () => ({ getSheetByName: n => n === 'AGE_SUMMARY' ? store.AGE_SUMMARY : (quarterSheets[n] || sheets[n] || null) });
+  props['SNAPSHOT_BUILD_PROGRESS_JSON'] = '{"completed":{"October":{}}}';
+  // make sure AGE_SUMMARY has rows
+  store.AGE_SUMMARY.created = true; store.AGE_SUMMARY.rows = [['Month'], ['October'], ['September']];
+  const before = props['SNAPSHOT_GENERATION_STAMP'];
+  const res = sb.clearAllSummaries();
+  check('clearAllSummaries succeeds without UI (editor run)', res.success === true, res);
+  check('dashboard summary rows deleted, header kept', dash.rows.length === 1 && dash.rows[0][0] === 'Month', dash.rows);
+  check('age summary rows deleted, header kept', store.AGE_SUMMARY.rows.length === 1);
+  check('raw month sheets untouched', sheets.October.rows.length > 3000);
+  check('batch progress reset', !props['SNAPSHOT_BUILD_PROGRESS_JSON']);
+  check('cache stamp bumped (cached dashboards invalidated)', props['SNAPSHOT_GENERATION_STAMP'] !== before, [before, props['SNAPSHOT_GENERATION_STAMP']]);
+  sb.SpreadsheetApp.openById = prevOpen;
 }
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);
