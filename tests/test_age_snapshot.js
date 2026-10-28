@@ -14,12 +14,12 @@ function memSheet(rows) {
 }
 const rnd = (() => { let s = 11; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
 const branches = ['مدينة نصر', 'الهرم', 'طنطا', 'الصعيد', 'فرع غريب', 'فرع الاسكندريه'];
-const statuses = ['تسليم ناجح', 'مرتجعات', 'قيد التشغيل', 'مرتجع بالفرع', 'رفض الاستلام و تم دفع الشحن'];
+const statuses = ['تسليم ناجح', 'مرتجعات', 'قيد التشغيل', 'مرتجع مفتوح', 'رفض الاستلام و تم دفع الشحن'];
 const header = ['رقم البوليصة', 'فرع المنطقة', 'حالة الشحنة', 'تاريخ استلام البيك أب', 'تاريخ اخر حالة'];
 const oct = [header];
 for (let i = 0; i < 3000; i++) {
   const st = statuses[Math.floor(rnd() * statuses.length)], day = 1 + Math.floor(rnd() * 20);
-  const open = st === 'قيد التشغيل' || st === 'مرتجع بالفرع';
+  const open = st === 'قيد التشغيل' || st === 'مرتجع مفتوح';
   oct.push(['A' + i, branches[Math.floor(rnd() * branches.length)], st, i % 97 === 0 ? '' : new Date(2026, 9, day), open ? '' : (i % 89 === 0 ? '' : new Date(2026, 9, day + Math.floor(rnd() * 9) - (i % 200 === 0 ? 12 : 0)))]);
 }
 for (let i = 0; i < 40; i++) oct.push(['A' + i, 'الهرم', 'تسليم ناجح', new Date(2026, 9, 3), new Date(2026, 9, 5 + i)]); // duplicates (later last-status wins)
@@ -81,8 +81,9 @@ check('age summary failure never fails the main update', bad.success && bad.ageS
   const res = sb.collectStatusNames_({ getSheetByName: n => sheets[n] || null }, ['September', 'October']);
   const byName = Object.fromEntries(res.rows.map(r => [r.status, r]));
   check('status names collected for the month that has data', res.monthsRead.join() === 'October');
-  check('known status classified in dashboard + age report', byName['تسليم ناجح'] && byName['تسليم ناجح'].dashboard === 'تم التسليم' && byName['تسليم ناجح'].age === 'تسليم ناجح');
-  check('unknown status flagged as «غير مصنف» yet classified for the age report', byName['مرتجع بالفرع'] && byName['مرتجع بالفرع'].dashboard === 'غير مصنف' && byName['مرتجع بالفرع'].age === 'مرتجع مفتوح', byName['مرتجع بالفرع']);
+  check('known status classified in dashboard + age report', byName['تسليم ناجح'] && byName['تسليم ناجح'].dashboard === 'تسليم' && byName['تسليم ناجح'].age === 'تسليم ناجح');
+  check('open return classified in both', byName['مرتجع مفتوح'] && byName['مرتجع مفتوح'].dashboard === 'مرتجع مفتوح' && byName['مرتجع مفتوح'].age === 'مرتجع مفتوح', byName['مرتجع مفتوح']);
+  check('status-text rejection without a rejecting final status is «غير مصنف» (strict: rejection comes from the final status)', Object.values(byName).some(r => /^رفض الاستلام/.test(r.status) && r.dashboard === 'غير مصنف'));
   check('counts are per unique AWB', res.rows.reduce((a, r) => a + r.count, 0) === 3000, res.rows.reduce((a, r) => a + r.count, 0));
 }
 
@@ -91,5 +92,30 @@ check('age summary failure never fails the main update', bad.success && bad.ageS
   const prof = sb.profileColumnsData_([['الحالة النهائية', 'رقم', 'تاريخ'], ['مغلق', 1, new Date(2026, 9, 1)], ['مفتوح', 2, new Date(2026, 9, 2)], ['مغلق', 3, ''], ['', 4, new Date(2026, 9, 3)]]);
   check('profile: low-cardinality column lists values with counts', prof[0][4] === 'مغلق (2) | مفتوح (1)' && prof[0][2] === 3 && prof[0][3] === 2, prof[0]);
   check('profile: dates collapsed, empties not counted', prof[2][2] === 3 && prof[2][4] === '(تاريخ) (3)', prof[2]);
+}
+
+// ---- 8-card taxonomy ----
+{
+  const K = s => sb.summaryClassifyKind(s);
+  check('kind: delivered both spellings', K('تسليم ناجح') === 'delivered' && K('التسليم ناجح') === 'delivered');
+  check('kind: in progress (double-space variant too)', K('قيد التشغيل') === 'inProgress' && K('قيد  التشغيل') === 'inProgress');
+  check('kind: «مرتجعات» = closed return', K('مرتجعات') === 'returnClosed');
+  check('kind: closed / open / hold returns by keyword', K('مرتجع مغلق') === 'returnClosed' && K('مرتجع مفتوح') === 'returnOpen' && K('مرتجع معلق') === 'returnHold' && K('مرتجع معلّق'.replace('ّ','')) === 'returnHold');
+  check('kind: an unrecognised return wording is «غير مصنف» (never guessed)', K('مرتجع بالفرع') === 'unknown' && K('شيء آخر') === 'unknown' && K('') === 'unknown');
+  const eff = (st, fs) => sb.summaryEffectiveStatus_(st, fs);
+  check('rejection is read from the FINAL status and takes precedence', K(eff('مرتجعات', 'رفض الاستلام و تم دفع الشحن')) === 'rejected' && K(eff('تسليم ناجح', 'رفض الاستلام')) === 'rejected');
+  check('final status without «رفض» leaves the status classification untouched', eff('مرتجعات', 'تم التسليم') === 'مرتجعات' && K(eff('قيد التشغيل', '')) === 'inProgress');
+  check('bucket mapping keeps legacy buckets', sb.summaryClassifyStatus('مرتجع معلق') === 'returned' && sb.summaryClassifyStatus('قيد التشغيل') === 'pending' && sb.summaryClassifyStatus(eff('x', 'رفض')) === 'rejected');
+  // acc: return sub-kinds roll up into `returned`
+  const acc = sb.summaryNewGroupAcc();
+  ['returnClosed', 'returnClosed', 'returnOpen', 'returnHold'].forEach(k => sb.summaryAccumulateRow(acc, { bucket: 'returned', kind: k, slaDays: null, branch: 'b' }, 2));
+  check('acc: returned = closed + open + hold', acc.returned === 4 && acc.returnClosed === 2 && acc.returnOpen === 1 && acc.returnHold === 1, acc);
+  const accC = sb.summaryNewGroupAcc();
+  sb.summaryAccumulateCubeRecord_(accC, [0,0,0,0,0,0,'',5,0,0,0,0,0,0,0], 'returned', 'returnHold');
+  check('cube acc: counts the record multiplicity per sub-kind', accC.returned === 5 && accC.returnHold === 5, accC);
+  const m = sb.summaryMergeTopKpis([{ total: 10, returned: 4, returnClosed: 2, returnOpen: 1, returnHold: 1 }, { total: 5, returned: 2, returnClosed: 2, returnOpen: 0, returnHold: 0 }]);
+  check('merge: sub-kinds are summed', m.returnClosed === 4 && m.returnOpen === 1 && m.returnHold === 1 && m.returned === 6, m);
+  const old = sb.summaryMergeTopKpis([{ total: 10, returned: 4, returnClosed: 2, returnOpen: 1, returnHold: 1 }, { total: 5, returned: 2 }]);
+  check('merge: a month saved before the taxonomy leaves the split undefined (never faked)', old.returnClosed === undefined && old.returned === 6, old);
 }
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

@@ -848,6 +848,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       <div class="section-header"><span class="idx">01</span><h2>الملخص التنفيذي</h2></div>
       <span class="period-tag" id="execFilterTag"></span>
     </div>
+    <div id="kpiNote"></div>
     <div class="kpi-grid" id="kpiGrid"><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div><div class="kpi-card skeleton" aria-hidden="true"><div class="kpi-icon"></div><div class="kpi-body"><div class="ds-skel"></div><div class="ds-skel v"></div></div></div></div>
     <section class="attention">
       <div class="attention-head">
@@ -874,8 +875,8 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
     </div>
     <div class="section-row">
       <div class="card">
-        <div class="card-title">التسليم مقابل المرتجعات والرفض</div>
-        <div class="card-sub">توزيع الشحنات حسب الحالة النهائية</div>
+        <div class="card-title">توزيع الشحنات حسب الحالة</div>
+        <div class="card-sub">التسليمات والمرتجعات (مغلق / مفتوح / معلق) والرفض (من الحالة النهائية) وقيد التشغيل</div>
         <div class="chart-box"><canvas id="chartDeliveryVsReturn"></canvas></div>
       </div>
       <div class="card">
@@ -2013,7 +2014,7 @@ let STATUS_MAP = {
   rejected:  ['رفض الاستلام و تم دفع الشحن','رفض الاستلام و رفض والدفع'],
   pending:   ['قيد التشغيل','قيد  التشغيل']
 };
-const BUCKET_LABELS = {delivered:'تم التسليم', returned:'مرتجع', rejected:'رفض استلام', pending:'قيد التشغيل', unknown:'غير مصنف'};
+const BUCKET_LABELS = {delivered:'التسليمات', returned:'مرتجعات', rejected:'أوردرات الرفض', pending:'قيد التشغيل', unknown:'غير مصنف'};
 const BUCKET_COLOR = {delivered:'pos', returned:'warn', rejected:'neg', pending:'neu', unknown:'neu'};
 
 let SLA_TARGET_DAYS = 2;
@@ -6299,23 +6300,35 @@ function dsBandBadge(cls){
   return cls==='pos' ? {badge:'success', badgeText:'مطابق'} : cls==='warn' ? {badge:'under-action', badgeText:'يحتاج متابعة'} : cls==='neg' ? {badge:'violation'} : {};
 }
 
+/* The 8 overview cards (every card = percentage of «إجمالي الشحنات» + the count, in the same card):
+   1 إجمالي الشحنات · 2 التسليمات · 3 المرتجعات المغلقة · 4 المرتجعات المفتوحة · 5 المرتجعات المعلقة ·
+   6 أوردرات الرفض · 7 قيد التشغيل · 8 غير مصنف (only when there is any).
+   Source columns: everything from «حالة الشحنة» except the rejection card, which is read from «الحالة النهائية»
+   (Code.gs summaryClassifyKind). A saved summary built before this taxonomy has no return split (k.returnClosed is
+   undefined) — those three cards then show «—» and a note asks for «تحديث الداش بورد» from Settings. */
 function renderKpiCards(k){
+  const total = k.total || 0;
+  const split = k.returnClosed !== undefined && k.returnClosed !== null;
+  const pct = n => total>0 ? fmtPct(n/total*100) : '—';
+  const card = (label, n, cls, icon, hint) => ({ label, value: pct(n), cls, icon, sub: `العدد: ${fmtInt(n)}${hint?` · ${hint}`:''}` });
+  const staleCard = (label, cls, icon) => ({ label, value:'—', cls, icon, sub:'يلزم «تحديث الداش بورد» من الإعدادات' });
   const cards = [
-    {label:'إجمالي الشحنات', value:fmtInt(k.total), cls:'neu', icon:'boxes-stacked', sub:`مؤهلة للحساب: ${fmtInt(k.eligible)}`},
-    {label:'تم التسليم', value:fmtInt(k.delivered), cls:'pos', icon:'circle-check', sub:'شحنات مُسلَّمة'},
-    (function(){ const c = pctClass(k.deliveryRate,true,[70,85]); return Object.assign({label:'نسبة التسليم', value:fmtPct(k.deliveryRate), cls:c, icon:'percent', sub:`من إجمالي الشحنات الكلي (${fmtInt(STATE.grandTotalShipments)})`}, dsBandBadge(c)); })(),
-    {label:'المرتجعات', value:fmtInt(k.returned), cls:'warn', icon:'rotate-left', sub:fmtPct(k.returnRate)+' نسبة المرتجعات'},
-    {label:'رفض الاستلام', value:fmtInt(k.rejected), cls:'neg', icon:'ban', sub:fmtPct(k.rejectedRate)+' نسبة الرفض'},
-    {label:'قيد التشغيل', value:fmtInt(k.pending), cls:'neu', icon:'truck-fast', sub:'شحنات مفتوحة'},
+    {label:'إجمالي الشحنات', value:fmtInt(total), cls:'neu', icon:'boxes-stacked', sub:'ضمن الفلاتر المطبّقة'},
+    card('التسليمات', k.delivered, 'pos', 'circle-check'),
+    split ? card('المرتجعات المغلقة', k.returnClosed, 'warn', 'rotate-left') : staleCard('المرتجعات المغلقة', 'warn', 'rotate-left'),
+    split ? card('المرتجعات المفتوحة', k.returnOpen, 'warn', 'box-open') : staleCard('المرتجعات المفتوحة', 'warn', 'box-open'),
+    split ? card('المرتجعات المعلقة', k.returnHold, 'warn', 'pause') : staleCard('المرتجعات المعلقة', 'warn', 'pause'),
+    card('أوردرات الرفض', k.rejected, 'neg', 'ban', 'من الحالة النهائية'),
+    card('قيد التشغيل', k.pending, 'neu', 'truck-fast'),
   ];
-  // Never silently drop shipments whose status doesn't map to one of the
-  // four buckets above — show them explicitly whenever there are any, so
-  // delivered+returned+rejected+pending+unknown always visibly reconciles
-  // to the Total card instead of leaving an unexplained gap.
+  // Never silently drop shipments: «غير مصنف» appears ONLY when some status is not recognised, so the cards
+  // always reconcile to the total (and the Data Quality tab lists the unrecognised status names).
   if(k.unknown){
-    cards.push({label:'غير مصنف', value:fmtInt(k.unknown), cls:'warn', icon:'circle-question', sub:'حالة شحن غير معروفة للنظام'});
+    cards.push(card('غير مصنف', k.unknown, 'warn', 'circle-question', 'حالة غير معروفة للنظام'));
   }
   document.getElementById('kpiGrid').innerHTML = cards.map(dsKpiCardHTML).join('');
+  const note = document.getElementById('kpiNote');
+  if(note) note.innerHTML = split ? '' : '<div class="ds-alert info" style="margin-bottom:12px"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>الملخص المحفوظ قديم</b> — تقسيم المرتجعات (مغلق / مفتوح / معلق) وأوردرات الرفض بحسب الحالة النهائية يحتاج إعادة بناء الملخصات: افتح <b>الإعدادات ← تحديث الداش بورد</b>.</div></div>';
 }
 
 /* =========================================================
@@ -6575,10 +6588,22 @@ function syncTopbarStateFromSummary(serverSummary){
 // STATE.rows.
 function renderOverviewTabFromServer(serverSummary){
   const k = serverSummary.empty ? ZERO_KPIS : serverSummary.kpis;
-  makeDoughnut('chartDeliveryVsReturn',
-    ['تم التسليم','مرتجعات','رفض استلام','قيد التشغيل'],
-    [k.delivered, k.returned, k.rejected, k.pending],
-    [CHART_COLORS.positive, CHART_COLORS.warning, CHART_COLORS.negative, CHART_COLORS.inProgress]);
+  const hasSplit = k.returnClosed !== undefined && k.returnClosed !== null;
+  const slices = hasSplit ? [
+    ['التسليمات', k.delivered, CHART_COLORS.positive],
+    ['مرتجع مغلق', k.returnClosed, CHART_COLORS.warning],
+    ['مرتجع مفتوح', k.returnOpen, '#FBBF24'],
+    ['مرتجع معلق', k.returnHold, '#FCD34D'],
+    ['أوردرات الرفض', k.rejected, CHART_COLORS.negative],
+    ['قيد التشغيل', k.pending, CHART_COLORS.inProgress],
+  ] : [
+    ['التسليمات', k.delivered, CHART_COLORS.positive],
+    ['مرتجعات', k.returned, CHART_COLORS.warning],
+    ['أوردرات الرفض', k.rejected, CHART_COLORS.negative],
+    ['قيد التشغيل', k.pending, CHART_COLORS.inProgress],
+  ];
+  if(k.unknown) slices.push(['غير مصنف', k.unknown, '#94A3B8']);
+  makeDoughnut('chartDeliveryVsReturn', slices.map(x=>x[0]), slices.map(x=>x[1]), slices.map(x=>x[2]));
 
   renderAttemptDistributionFromServer(serverSummary.attemptSummary || {first:0, second:0, other:0, na:0, total:0});
 
@@ -6901,12 +6926,20 @@ function renderSettingsTab(){
   `).join('');
 
   const sbox = document.getElementById('statusMappingBox');
-  sbox.innerHTML = Object.entries(STATUS_MAP).map(([bucket, vals])=>`
+  const rules = [
+    ['التسليمات','pos','عمود «حالة الشحنة»','تسليم ناجح'],
+    ['المرتجعات المغلقة','warn','عمود «حالة الشحنة»','«مرتجعات» أو أي مرتجع فيه كلمة «مغلق»'],
+    ['المرتجعات المفتوحة','warn','عمود «حالة الشحنة»','مرتجع فيه كلمة «مفتوح»'],
+    ['المرتجعات المعلقة','warn','عمود «حالة الشحنة»','مرتجع فيه كلمة «معلق»'],
+    ['أوردرات الرفض','neg','عمود «الحالة النهائية»','أي قيمة فيها كلمة «رفض» (تُحسب مرة واحدة وتسبق حالة الشحنة)'],
+    ['قيد التشغيل','neu','عمود «حالة الشحنة»','قيد التشغيل'],
+    ['غير مصنف','warn','—','أي حالة لا تطابق ما سبق — يظهر كارت «غير مصنف» فقط إن وُجدت'],
+  ];
+  sbox.innerHTML = rules.map(([name, cls, col, rule])=>`
     <div class="status-map-row">
-      <div class="bucket-name"><span class="dot ${BUCKET_COLOR[bucket]}"></span>${BUCKET_LABELS[bucket]} (${bucket})</div>
-      ${vals.map(v=>`<span class="status-chip">${v}</span>`).join('')}
-    </div>
-  `).join('') + `<div class="helptext">هذا التصنيف مبني على القيم الفعلية الموجودة في عمود "حالة الشحنة" بالملف المستورد، وتم اعتماده مع صاحب البيانات. لتعديله لملف مستقبلي بحالات مختلفة، عدّل القيم في كود الإعدادات (STATUS_MAP) لتطابق القيم الجديدة.</div>`;
+      <div class="bucket-name"><span class="dot ${cls}"></span>${name}</div>
+      <span class="status-chip">${col}</span><span class="status-chip">${rule}</span>
+    </div>`).join('') + `<div class="helptext">القواعد معرّفة في Code.gs (دالة <code>summaryClassifyKind</code>) وتُطبَّق عند بناء الملخصات؛ لتعديل كلمة أو إضافة حالة عدّل الثوابت <code>SUMMARY_RETURN_*</code> و<code>SUMMARY_FINAL_REJECT_KEYWORDS</code> ثم اضغط «تحديث الداش بورد». لمعرفة أسماء الحالات المكتوبة فعليًا في الشيتات شغّل «List Status Names» من قائمة ARRIVE Dashboard في Google Sheets.</div>`;
 
   document.getElementById('slaTargetInput').value = SLA_TARGET_DAYS;
   document.getElementById('attemptT1Input').value = ATTEMPT_T1_DAYS;
@@ -7326,7 +7359,7 @@ function renderAgeReport(d){
     <li><b>المجتمع:</b> الشحنات التي وقع تاريخ استلام البيك أب لها بين ${ageArDate(d.params.dateFrom)} و${ageArDate(d.params.dateTo)}، بعد حذف تكرار رقم البوليصة (يُحتفظ بالأحدث حسب تاريخ آخر حالة). الشهور المقروءة: ${ageEsc((d.months||[]).join('، ')||'—')}.</li>
     <li><b>العمر (بالأيام التقويمية، بدون الوقت):</b> للمسلّمة والمرتجع المغلق = تاريخ آخر حالة − تاريخ استلام البيك أب. للمفتوحة (قيد التشغيل / مرتجع مفتوح) = تاريخ القياس (${asOfTxt}) − تاريخ البيك أب. شحنة تُسلَّم في يوم الاستلام عمرها صفر.</li>
     <li><b>«ضمن المدة»:</b> العمر ≤ المعيار. معيار السوق للتسليم فقط؛ معيار الشركة للتسليم يُطبّق على التسليم الناجح وقيد التشغيل، ومعيار المرتجع على المرتجع المغلق والمفتوح.</li>
-    <li><b>تصنيف الحالة (من عمود حالة الشحنة):</b> «تسليم ناجح» = تسليم؛ «مرتجعات» = مرتجع مغلق؛ أي حالة أخرى تحوي كلمة مرتجع/رجيع = مرتجع مفتوح؛ «قيد التشغيل» = قيد التشغيل؛ غير ذلك (مثل رفض الاستلام) = أخرى.</li>
+    <li><b>تصنيف الحالة (نفس كروت الداشبورد):</b> «تسليم ناجح» = تسليم؛ «مرتجعات» أو مرتجع «مغلق» = مرتجع مغلق؛ مرتجع «مفتوح» = مرتجع مفتوح؛ مرتجع «معلق» يُعمَّر مثل المفتوح؛ «قيد التشغيل» = قيد التشغيل؛ الرفض يُقرأ من عمود «الحالة النهائية» ويظهر في «أخرى»؛ وأي حالة غير معروفة = أخرى.</li>
     <li><b>نسب بطاقات المرتجعات</b> محسوبة من إجمالي المرتجعات (مغلق + مفتوح)، أما نسب جداول المجموعات والفروع فمن عدد كل صف.</li>
     <li><b>معايير المدد:</b> ${ageEsc(std.map(g=>`${g.name}: سوق ${g.market} / تسليم ${g.delivery} / مرتجع ${g.returns}`).join(' — '))}.</li>
   </ul>`;

@@ -107,6 +107,7 @@ var ALL_MONTHS_TIME_BUDGET_MS = 260000;
 // a 100k+ row month during normal management viewing.
 var PERSISTENT_SUMMARY_SHEET = "DASHBOARD_SUMMARY";
 var PERSISTENT_SUMMARY_VERSION = "2";
+var SUMMARY_TAXONOMY_VERSION = 2; // 1 = old buckets; 2 = 8-card taxonomy (return closed/open/hold, rejection from final status)
 var PERSISTENT_SUMMARY_CHUNK_SIZE = 45000; // safely below cell-size limits
 
 
@@ -541,6 +542,11 @@ function summaryBuildStatusLookup() {
   var lookup = {};
   var buckets = Object.keys(SUMMARY_STATUS_MAP);
   for (var i = 0; i < buckets.length; i++) {
+    // Returns (closed / open / on-hold) are classified by summaryClassifyKind(); rejection comes from the
+    // «الحالة النهائية» column (see summaryEffectiveStatus_) — the status-text rejection list is used only when
+    // SUMMARY_REJECT_FALLBACK_TO_STATUS is switched on.
+    if (buckets[i] === "returned") continue;
+    if (buckets[i] === "rejected" && !SUMMARY_REJECT_FALLBACK_TO_STATUS) continue;
     var vals = SUMMARY_STATUS_MAP[buckets[i]];
     for (var v = 0; v < vals.length; v++) {
       lookup[summaryNormalizeArabicForMatch_(summaryNormText(vals[v]))] = buckets[i];
@@ -548,11 +554,60 @@ function summaryBuildStatusLookup() {
   }
   return lookup;
 }
-function summaryClassifyStatus(status) {
+// ------------------------------------------------------------
+// STATUS TAXONOMY (the 8 dashboard cards)
+//   delivered      ← «حالة الشحنة» = تسليم ناجح
+//   returnClosed   ← «حالة الشحنة» = مرتجعات / فيها «مغلق»
+//   returnOpen     ← «حالة الشحنة» فيها «مرتجع» + «مفتوح»
+//   returnHold     ← «حالة الشحنة» فيها «مرتجع» + «معلق»
+//   inProgress     ← «حالة الشحنة» = قيد التشغيل
+//   rejected       ← «الحالة النهائية» فيها «رفض»  (the ONE item read from the final-status column)
+//   unknown        ← أي حالة غير مطابقة لما سبق (تظهر في كارت «غير مصنف» فقط إن وُجدت)
+// A row whose final status is a rejection is counted ONCE, as rejected (it takes precedence over its status).
+// The rejection is carried through the whole pipeline as an "effective status" label (prefix + final status), so
+// the saved cube / filters / status breakdown stay consistent with the cards.
+// ------------------------------------------------------------
+var SUMMARY_REJECT_LABEL_PREFIX = "رفض (الحالة النهائية): ";
+var SUMMARY_FINAL_REJECT_KEYWORDS = ["رفض"];
+var SUMMARY_REJECT_FALLBACK_TO_STATUS = false; // true → a status text listed in SUMMARY_STATUS_MAP.rejected also counts as rejected
+var SUMMARY_RETURN_KEYWORDS = ["مرتجع", "رجيع"];
+var SUMMARY_RETURN_CLOSED_EXACT = ["مرتجعات"];
+var SUMMARY_RETURN_CLOSED_KEYWORDS = ["مغلق"];
+var SUMMARY_RETURN_OPEN_KEYWORDS = ["مفتوح"];
+var SUMMARY_RETURN_HOLD_KEYWORDS = ["معلق"];
+
+function summaryHasAnyKeyword_(norm, list) {
+  for (var i = 0; i < list.length; i++) if (norm.indexOf(summaryNormalizeArabicForMatch_(list[i])) !== -1) return true;
+  return false;
+}
+function summaryEffectiveStatus_(status, finalStatus) {
+  var fs = summaryNormText(finalStatus);
+  if (fs && summaryHasAnyKeyword_(summaryNormalizeArabicForMatch_(fs), SUMMARY_FINAL_REJECT_KEYWORDS)) return SUMMARY_REJECT_LABEL_PREFIX + fs;
+  return summaryNormText(status);
+}
+function summaryClassifyKind(status) {
   if (!SUMMARY_STATUS_LOOKUP) SUMMARY_STATUS_LOOKUP = summaryBuildStatusLookup();
   var n = summaryNormalizeArabicForMatch_(summaryNormText(status));
-  return SUMMARY_STATUS_LOOKUP.hasOwnProperty(n) ? SUMMARY_STATUS_LOOKUP[n] : "unknown";
+  if (!n) return "unknown";
+  if (n.indexOf(summaryNormalizeArabicForMatch_(SUMMARY_REJECT_LABEL_PREFIX)) === 0) return "rejected";
+  if (SUMMARY_STATUS_LOOKUP.hasOwnProperty(n)) {
+    var b = SUMMARY_STATUS_LOOKUP[n];
+    return b === "pending" ? "inProgress" : b; // delivered | inProgress | rejected(fallback)
+  }
+  if (summaryHasAnyKeyword_(n, SUMMARY_RETURN_KEYWORDS)) {
+    if (summaryHasAnyKeyword_(n, SUMMARY_RETURN_HOLD_KEYWORDS)) return "returnHold";
+    if (summaryHasAnyKeyword_(n, SUMMARY_RETURN_OPEN_KEYWORDS)) return "returnOpen";
+    for (var i = 0; i < SUMMARY_RETURN_CLOSED_EXACT.length; i++) if (n === summaryNormalizeArabicForMatch_(SUMMARY_RETURN_CLOSED_EXACT[i])) return "returnClosed";
+    if (summaryHasAnyKeyword_(n, SUMMARY_RETURN_CLOSED_KEYWORDS)) return "returnClosed";
+  }
+  return "unknown";
 }
+function summaryKindToBucket_(kind) {
+  if (kind === "returnClosed" || kind === "returnOpen" || kind === "returnHold") return "returned";
+  if (kind === "inProgress") return "pending";
+  return kind; // delivered | rejected | unknown
+}
+function summaryClassifyStatus(status) { return summaryKindToBucket_(summaryClassifyKind(status)); }
 
 function summaryParseDate(v) {
   if (v === null || v === undefined || v === "") return null;
@@ -820,7 +875,7 @@ function summaryHashKey(s) {
 // now) rather than deleted, to keep this change minimal and reviewable.
 // ------------------------------------------------------------
 function summaryNewGroupAcc() {
-  return { total: 0, delivered: 0, returned: 0, rejected: 0, pending: 0, unknown: 0,
+  return { total: 0, delivered: 0, returned: 0, returnClosed: 0, returnOpen: 0, returnHold: 0, rejected: 0, pending: 0, unknown: 0,
     withinSla: 0, slaBreach: 0, sumSlaDays: 0, deliveredWithDate: 0 };
 }
 function summaryAccumulateRow(acc, r, target) {
@@ -832,7 +887,7 @@ function summaryAccumulateRow(acc, r, target) {
       acc.sumSlaDays += r.slaDays;
       if (r.slaDays <= target) acc.withinSla++; else acc.slaBreach++;
     }
-  } else if (r.bucket === "returned") { acc.returned++; }
+  } else if (r.bucket === "returned") { acc.returned++; if (r.kind === "returnClosed") acc.returnClosed++; else if (r.kind === "returnOpen") acc.returnOpen++; else if (r.kind === "returnHold") acc.returnHold++; }
   else if (r.bucket === "rejected") { acc.rejected++; }
   else if (r.bucket === "pending") { acc.pending++; }
   else { acc.unknown++; }
@@ -899,7 +954,7 @@ function summaryCubeRecordMatchesFilters_(rec, dict, filters, excludeDim, fromTi
   }
   return true;
 }
-function summaryAccumulateCubeRecord_(acc, rec, bucket) {
+function summaryAccumulateCubeRecord_(acc, rec, bucket, kind) {
   var n = rec[7];
   acc.total += n;
   if (bucket === "delivered") {
@@ -908,7 +963,7 @@ function summaryAccumulateCubeRecord_(acc, rec, bucket) {
     acc.sumSlaDays += rec[10];
     acc.withinSla += rec[8];
     acc.slaBreach += rec[9];
-  } else if (bucket === "returned") { acc.returned += n; }
+  } else if (bucket === "returned") { acc.returned += n; if (kind === "returnClosed") acc.returnClosed += n; else if (kind === "returnOpen") acc.returnOpen += n; else if (kind === "returnHold") acc.returnHold += n; }
   else if (bucket === "rejected") { acc.rejected += n; }
   else if (bucket === "pending") { acc.pending += n; }
   else { acc.unknown += n; }
@@ -967,17 +1022,18 @@ function summaryComputeFromCube_(cubes, filters, dateFrom, dateTo) {
       if (!summaryCubeRecordMatchesFilters_(rec, dict, filters, null, fromTime, toTime)) continue;
 
       var status = dict.status[rec[4]];
-      var bucket = summaryClassifyStatus(status);
+      var kind = summaryClassifyKind(status);
+      var bucket = summaryKindToBucket_(kind);
       var branchName = dict.branch[rec[2]], clientName = dict.client[rec[3]],
         provinceName = dict.province[rec[0]], areaName = dict.area[rec[1]];
 
-      summaryAccumulateCubeRecord_(topAcc, rec, bucket);
+      summaryAccumulateCubeRecord_(topAcc, rec, bucket, kind);
       if (bucket === "delivered" && (rec[8] + rec[9]) > 0 && (topMaxDays === null || rec[12] > topMaxDays)) topMaxDays = rec[12];
 
-      summaryAccumulateCubeRecord_(ensureAcc(branchAccMap, branchOrder, branchName), rec, bucket);
-      summaryAccumulateCubeRecord_(ensureAcc(customerAccMap, customerOrder, clientName), rec, bucket);
-      summaryAccumulateCubeRecord_(ensureAcc(provinceAccMap, provinceOrder, provinceName), rec, bucket);
-      summaryAccumulateCubeRecord_(ensureAcc(areaAccMap, areaOrder, areaName), rec, bucket);
+      summaryAccumulateCubeRecord_(ensureAcc(branchAccMap, branchOrder, branchName), rec, bucket, kind);
+      summaryAccumulateCubeRecord_(ensureAcc(customerAccMap, customerOrder, clientName), rec, bucket, kind);
+      summaryAccumulateCubeRecord_(ensureAcc(provinceAccMap, provinceOrder, provinceName), rec, bucket, kind);
+      summaryAccumulateCubeRecord_(ensureAcc(areaAccMap, areaOrder, areaName), rec, bucket, kind);
 
       statusSummary[status] = (statusSummary[status] || 0) + rec[7];
       totalCod += rec[13]; totalShipCost += rec[14];
@@ -997,7 +1053,7 @@ function summaryComputeFromCube_(cubes, filters, dateFrom, dateTo) {
 
   var topEligible = topAcc.total - topAcc.pending;
   var kpis = {
-    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, rejected: topAcc.rejected,
+    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, returnClosed: topAcc.returnClosed, returnOpen: topAcc.returnOpen, returnHold: topAcc.returnHold, rejected: topAcc.rejected,
     pending: topAcc.pending, unknown: topAcc.unknown, eligible: topEligible,
     deliveryRate: topAcc.total > 0 ? (topAcc.delivered / topAcc.total * 100) : null,
     returnRate: topEligible > 0 ? (topAcc.returned / topEligible * 100) : null,
@@ -1348,8 +1404,10 @@ function getMonthDashboardSummary(sheetName, params) {
     var deliveryDate = summaryParseDate(summaryGetField(row, idx, "delivery"));
     if (!pickup) invalidDates++;
 
-    var status = summaryNormText(summaryGetField(row, idx, "status"));
-    var bucket = summaryClassifyStatus(status);
+    var finalStatus = summaryNormText(summaryGetField(row, idx, "finalStatus"));
+    var status = summaryEffectiveStatus_(summaryGetField(row, idx, "status"), finalStatus); // rejection comes from the final-status column
+    var kind = summaryClassifyKind(status);
+    var bucket = summaryKindToBucket_(kind);
     if (bucket === "unknown" && status) { unknownStatusSet[status] = (unknownStatusSet[status]||0) + 1; unknownStatusCount++; }
     var branch = summaryNormText(summaryGetField(row, idx, "branch"));
     if (!branch) missingBranch++;
@@ -1358,7 +1416,6 @@ function getMonthDashboardSummary(sheetName, params) {
     var province = summaryNormText(summaryGetField(row, idx, "province"));
     if (!province) missingProvince++;
     var area = summaryNormText(summaryGetField(row, idx, "area"));
-    var finalStatus = summaryNormText(summaryGetField(row, idx, "finalStatus"));
     var cod = parseFloat(summaryGetField(row, idx, "cod")) || 0;
     if (cod < 0) negativeCod++;
     var shipCost = parseFloat(summaryGetField(row, idx, "shipCost")) || 0;
@@ -1394,7 +1451,7 @@ function getMonthDashboardSummary(sheetName, params) {
 
     var rec = {
       awb: awb, client: client, province: province, area: area, branch: branch,
-      status: status, bucket: bucket, finalStatus: finalStatus,
+      status: status, bucket: bucket, kind: kind, finalStatus: finalStatus,
       pickup: pickup, lastStatus: lastStatus, deliveryDate: deliveryDate, slaDays: slaDays, slaEndSource: slaEndSource, cod: cod, shipCost: shipCost,
       attemptCat: attemptCat
     };
@@ -1685,7 +1742,7 @@ function getMonthDashboardSummary(sheetName, params) {
   var topMaxDays = topSlaDaysArr.length ? topSlaDaysArr[topSlaDaysArr.length - 1] : null;
   var topEligible = topAcc.total - topAcc.pending;
   var kpis = {
-    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, rejected: topAcc.rejected,
+    total: topAcc.total, delivered: topAcc.delivered, returned: topAcc.returned, returnClosed: topAcc.returnClosed, returnOpen: topAcc.returnOpen, returnHold: topAcc.returnHold, rejected: topAcc.rejected,
     pending: topAcc.pending, unknown: topAcc.unknown, eligible: topEligible,
     deliveryRate: topAcc.total > 0 ? (topAcc.delivered / topAcc.total * 100) : null,
     returnRate: topEligible > 0 ? (topAcc.returned / topEligible * 100) : null,
@@ -1819,19 +1876,21 @@ function getMonthDashboardSummary(sheetName, params) {
 // medians (median does not combine that way) — left null rather than faked;
 // maxDays IS validly the max of each month's max.
 function summaryMergeTopKpis(kpisList) {
-  var acc = { total:0, delivered:0, returned:0, rejected:0, pending:0, unknown:0, withinSla:0, slaBreach:0, deliveredWithDate:0, sumSlaDaysWeighted:0 };
-  var maxDays = null;
+  var acc = { total:0, delivered:0, returned:0, returnClosed:0, returnOpen:0, returnHold:0, rejected:0, pending:0, unknown:0, withinSla:0, slaBreach:0, deliveredWithDate:0, sumSlaDaysWeighted:0 };
+  var maxDays = null, subKindsKnown = true;
   for (var i = 0; i < kpisList.length; i++) {
     var k = kpisList[i]; if (!k) continue;
     acc.total += k.total||0; acc.delivered += k.delivered||0; acc.returned += k.returned||0;
     acc.rejected += k.rejected||0; acc.pending += k.pending||0; acc.unknown += k.unknown||0;
+    if (k.returnClosed === undefined) subKindsKnown = false; // a month saved before the 8-card taxonomy: its return split is unknown
+    acc.returnClosed += k.returnClosed||0; acc.returnOpen += k.returnOpen||0; acc.returnHold += k.returnHold||0;
     acc.withinSla += k.withinSla||0; acc.slaBreach += k.slaBreach||0; acc.deliveredWithDate += k.deliveredWithDate||0;
     acc.sumSlaDaysWeighted += (k.avgDays||0) * (k.deliveredWithDate||0);
     if (k.maxDays !== null && k.maxDays !== undefined) maxDays = (maxDays===null) ? k.maxDays : Math.max(maxDays, k.maxDays);
   }
   var eligible = acc.total - acc.pending;
   return {
-    total: acc.total, delivered: acc.delivered, returned: acc.returned, rejected: acc.rejected,
+    total: acc.total, delivered: acc.delivered, returned: acc.returned, returnClosed: subKindsKnown ? acc.returnClosed : undefined, returnOpen: subKindsKnown ? acc.returnOpen : undefined, returnHold: subKindsKnown ? acc.returnHold : undefined, rejected: acc.rejected,
     pending: acc.pending, unknown: acc.unknown, eligible: eligible,
     deliveryRate: acc.total>0 ? (acc.delivered/acc.total*100) : null,
     returnRate: eligible>0 ? (acc.returned/eligible*100) : null,
@@ -2375,8 +2434,8 @@ function getAllMonthsDashboardSummary(params) {
 // (delivery / return). "Within" means age <= standard.
 //
 // Return classification uses the Status column only:
-//   closed return = status listed in AGE_RETURN_CLOSED_STATUSES
-//   open return   = any other status containing one of AGE_RETURN_OPEN_KEYWORDS
+//   same taxonomy as the dashboard cards (summaryClassifyKind): closed return = «مرتجعات» / «مغلق»;
+//   open return = «مفتوح» (and on-hold «معلق» returns, aged like open ones); rejection comes from the final-status column
 // Rejected ("رفض الاستلام ...") and unrecognised statuses are reported in a
 // separate "other" bucket so totals always reconcile and nothing is hidden.
 // ============================================================
@@ -2389,8 +2448,6 @@ var AGE_REPORT_GROUPS = [
   { key: "upper", name: "الصعيد", marketDays: 3, companyDeliveryDays: 20, companyReturnDays: 6,
     branches: ["الفيوم", "الصعيد"] }
 ];
-var AGE_RETURN_CLOSED_STATUSES = ["مرتجعات"];
-var AGE_RETURN_OPEN_KEYWORDS = ["مرتجع", "رجيع", "ارجاع", "إرجاع"];
 var AGE_REPORT_MAX_MONTHS = 4;
 var AGE_REPORT_MAX_OPEN_LIST = 3000;
 var AGE_REPORT_CACHE_TTL_SECONDS = 600;
@@ -2420,20 +2477,14 @@ function ageIsoDate_(d) {
 
 // kind: delivered | returnClosed | returnOpen | inProgress | other
 function ageClassify_(status) {
-  var bucket = summaryClassifyStatus(status);
-  if (bucket === "delivered") return "delivered";
-  if (bucket === "pending") return "inProgress";
-  if (bucket === "rejected") return "other";
-  var norm = summaryNormalizeArabicForMatch_(summaryNormText(status));
-  var i;
-  if (bucket === "returned") return "returnClosed";
-  for (i = 0; i < AGE_RETURN_CLOSED_STATUSES.length; i++) {
-    if (norm === summaryNormalizeArabicForMatch_(AGE_RETURN_CLOSED_STATUSES[i])) return "returnClosed";
-  }
-  for (i = 0; i < AGE_RETURN_OPEN_KEYWORDS.length; i++) {
-    if (norm.indexOf(summaryNormalizeArabicForMatch_(AGE_RETURN_OPEN_KEYWORDS[i])) !== -1) return "returnOpen";
-  }
-  return "other";
+  // `status` is the EFFECTIVE status (rejection already carried from the final-status column — see summaryEffectiveStatus_).
+  // On-hold returns are aged like open returns (the shipment is not back with the sender yet).
+  var kind = summaryClassifyKind(status);
+  if (kind === "delivered") return "delivered";
+  if (kind === "inProgress") return "inProgress";
+  if (kind === "returnClosed") return "returnClosed";
+  if (kind === "returnOpen" || kind === "returnHold") return "returnOpen";
+  return "other"; // rejected / unknown — reported separately, never judged against a standard
 }
 
 function ageNewAcc_() { return { count: 0, withinMarket: 0, withinCompany: 0, over: 0, sumAge: 0, ageN: 0, noAge: 0 }; }
@@ -2756,7 +2807,7 @@ function getAgeReport(params) {
       if (pickup) { var pn = ageDayNum_(pickup); if ((fromNum !== null && pn < fromNum) || (toNum !== null && pn > toNum)) { outOfRange++; continue; } }
       var rec = {
         awb: awb, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
-        branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status"))
+        branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryEffectiveStatus_(summaryGetField(row, idx, "status"), summaryGetField(row, idx, "finalStatus"))
       };
       if (awbMap.hasOwnProperty(awb)) {
         dupRemoved++;
@@ -2809,12 +2860,12 @@ function getAgeReport(params) {
 //   open shipments    -> one row each [awb, branch, status, pickupDate]  (their age
 //                        depends on the report's measurement date, so it is computed at read time)
 // Status classification, group mapping and standards are applied at READ time, so changing
-// the standards / branch groups needs no rebuild. Changing AGE_RETURN_* status rules DOES need a rebuild.
+// the standards / branch groups needs no rebuild. Changing the SUMMARY_RETURN_* / rejection rules DOES need a rebuild.
 // A month with no snapshot (or a request with a date filter / refresh=1) falls back to a live raw read.
 // Limitation: AWBs repeated across two different months are not de-duplicated in snapshot mode.
 // ------------------------------------------------------------
 var AGE_SNAPSHOT_SHEET = "AGE_SUMMARY";
-var AGE_SNAPSHOT_VERSION = "1";
+var AGE_SNAPSHOT_VERSION = "2"; // 2 = status stored as the effective status (rejection from the final-status column)
 var AGE_SNAPSHOT_CHUNK = 45000;
 var AGE_SNAPSHOT_BATCH_BUDGET_MS = 270000;
 
@@ -2889,7 +2940,7 @@ function ageBuildSnapshot_(month) {
     var awb = summaryNormText(summaryGetField(row, idx, "awb"));
     if (!awb) { noAwb++; continue; }
     var rec = { awb: awb, pickup: summaryParseDate(summaryGetField(row, idx, "pickup")), lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
-      branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status")) };
+      branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryEffectiveStatus_(summaryGetField(row, idx, "status"), summaryGetField(row, idx, "finalStatus")) };
     if (awbMap.hasOwnProperty(awb)) {
       dup++;
       var et = awbMap[awb].lastStatus ? awbMap[awb].lastStatus.getTime() : -Infinity;
@@ -3011,10 +3062,10 @@ function buildAgeSnapshotOctober() { return buildAgeSnapshot("October"); }
 // ============================================================
 var STATUS_NAMES_SHEET = "STATUS_NAMES";
 var AGE_KIND_LABELS_AR_ = { delivered: "تسليم ناجح", returnClosed: "مرتجع مغلق", returnOpen: "مرتجع مفتوح", inProgress: "قيد التشغيل", other: "أخرى (خارج المعايير)" };
-var DASH_BUCKET_LABELS_AR_ = { delivered: "تم التسليم", returned: "المرتجعات", rejected: "رفض الاستلام", pending: "قيد التشغيل", unknown: "غير مصنف" };
+var DASH_KIND_LABELS_AR_ = { delivered: "تسليم", returnClosed: "مرتجع مغلق", returnOpen: "مرتجع مفتوح", returnHold: "مرتجع معلق", inProgress: "قيد التشغيل", rejected: "رفض (من الحالة النهائية)", unknown: "غير مصنف" };
 
 function collectStatusNames_(ss, months) {
-  var rows = [], monthsRead = [];
+  var rows = [], finals = [], monthsRead = [];
   for (var m = 0; m < months.length; m++) {
     var sheet = ss.getSheetByName(months[m]);
     if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) continue;
@@ -3027,24 +3078,30 @@ function collectStatusNames_(ss, months) {
     for (var r = 1; r < values.length; r++) {
       var row = values[r];
       if (summaryRowIsAllEmpty(row)) continue;
-      var st = summaryNormText(summaryGetField(row, idx, "status"));
+      var fsv = summaryNormText(summaryGetField(row, idx, "finalStatus"));
+      var st = summaryEffectiveStatus_(summaryGetField(row, idx, "status"), fsv);
       var awb = summaryNormText(summaryGetField(row, idx, "awb"));
       if (!awb) continue;
       var last = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
       var prev = byAwb[awb];
-      if (!prev || (last ? last.getTime() : -Infinity) >= prev.t) byAwb[awb] = { s: st, t: last ? last.getTime() : -Infinity };
+      if (!prev || (last ? last.getTime() : -Infinity) >= prev.t) byAwb[awb] = { s: st, f: fsv, t: last ? last.getTime() : -Infinity };
     }
-    var counts = {};
-    for (var a in byAwb) { if (byAwb.hasOwnProperty(a)) { var k = byAwb[a].s || "(فارغ)"; counts[k] = (counts[k] || 0) + 1; } }
+    var counts = {}, finalCounts = {};
+    for (var a in byAwb) { if (byAwb.hasOwnProperty(a)) {
+      var k = byAwb[a].s || "(فارغ)"; counts[k] = (counts[k] || 0) + 1;
+      var fk = byAwb[a].f || "(فارغ)"; finalCounts[fk] = (finalCounts[fk] || 0) + 1;
+    } }
+    for (var fname in finalCounts) { if (finalCounts.hasOwnProperty(fname)) finals.push({ month: months[m], finalStatus: fname, count: finalCounts[fname] }); }
     for (var name in counts) {
       if (!counts.hasOwnProperty(name)) continue;
       var real = name === "(فارغ)" ? "" : name;
       rows.push({ month: months[m], status: name, count: counts[name],
-        dashboard: DASH_BUCKET_LABELS_AR_[summaryClassifyStatus(real)], age: AGE_KIND_LABELS_AR_[ageClassify_(real)] });
+        dashboard: DASH_KIND_LABELS_AR_[summaryClassifyKind(real)], age: AGE_KIND_LABELS_AR_[ageClassify_(real)] });
     }
   }
   rows.sort(function (x, y) { return MONTH_ORDER.indexOf(x.month) - MONTH_ORDER.indexOf(y.month) || y.count - x.count; });
-  return { rows: rows, monthsRead: monthsRead };
+  finals.sort(function (x, y) { return MONTH_ORDER.indexOf(x.month) - MONTH_ORDER.indexOf(y.month) || y.count - x.count; });
+  return { rows: rows, finals: finals, monthsRead: monthsRead };
 }
 
 function listStatusNames() {
@@ -3059,7 +3116,11 @@ function listStatusNames() {
   res.rows.forEach(function (r) { table.push([r.month, r.status, r.count, r.dashboard, r.age]); });
   out.getRange(1, 1, table.length, 5).setValues(table);
   out.setFrozenRows(1);
-  var unknown = res.rows.filter(function (r) { return r.dashboard === DASH_BUCKET_LABELS_AR_.unknown; });
+  // second table: the distinct values of «الحالة النهائية» (the column rejection is read from)
+  var ftable = [["الشهر", "الحالة النهائية (كما هي مكتوبة)", "عدد الشحنات", "تُحسب رفض؟", ""]];
+  res.finals.forEach(function (f) { ftable.push([f.month, f.finalStatus, f.count, summaryEffectiveStatus_("", f.finalStatus === "(فارغ)" ? "" : f.finalStatus) ? "نعم" : "لا", ""]); });
+  out.getRange(1, 7, ftable.length, 5).setValues(ftable);
+  var unknown = res.rows.filter(function (r) { return r.dashboard === DASH_KIND_LABELS_AR_.unknown; });
   Logger.log("STATUS NAMES (" + quarter + ") — months: " + res.monthsRead.join(", ") + "\n" +
     res.rows.map(function (r) { return r.month + " | " + r.status + " | " + r.count + " | " + r.dashboard + " | " + r.age; }).join("\n"));
   try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + STATUS_NAMES_SHEET + " — " + res.rows.length + " صفًا، منها " + unknown.length + " حالة «غير مصنف»."); } catch (e) { /* run from the editor: no UI */ }
