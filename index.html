@@ -705,6 +705,7 @@ body.on-shipage .month-select-wrap{display:none;}
 .age-two{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
 .age-two table.data-table{min-width:0;}
 @media (max-width:1100px){ .age-two{grid-template-columns:1fr;} }
+.age-chart{display:block; width:100%; max-width:720px; height:auto; margin:14px auto 0;}
 .age-bar-cell{font-variant-numeric:tabular-nums; text-align:center;}
 .age-note{font-size:var(--fs-caption); color:var(--text-secondary); line-height:1.8; margin-top:6px;}
 .age-method{font-size:var(--fs-small); line-height:2; margin:0; padding-inline-start:20px;}
@@ -918,6 +919,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <div class="filter-group"><label for="ageTo">إلى تاريخ استلام البيك أب</label><input type="date" id="ageTo"></div>
         <div class="filter-group"><label for="ageAsOf">قياس عمر الشحنات المفتوحة حتى</label><input type="date" id="ageAsOf"></div>
         <button class="btn-primary" id="ageRunBtn" type="button"><i class="fa-solid fa-play" aria-hidden="true"></i> إنشاء التقرير</button>
+        <button class="btn-primary" id="ageDocxBtn" type="button" disabled><i class="fa-solid fa-file-word" aria-hidden="true"></i> تصدير التقرير (Word)</button>
         <button class="btn-secondary" id="ageXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تصدير Excel</button>
         <button class="btn-secondary" id="agePrintBtn" type="button" disabled><i class="fa-solid fa-print" aria-hidden="true"></i> طباعة / PDF</button>
       </div>
@@ -7109,6 +7111,7 @@ function initShipAge(){
   ageRenderStdTable();
   ['ageFrom','ageTo','ageAsOf'].forEach(id=>document.getElementById(id).addEventListener('change', ()=>{ AGE.inputsTouched = true; }));
   document.getElementById('ageRunBtn').addEventListener('click', ()=>runAgeReport(true));
+  document.getElementById('ageDocxBtn').addEventListener('click', exportAgeDocx);
   document.getElementById('ageXlsxBtn').addEventListener('click', exportAgeXlsx);
   document.getElementById('agePrintBtn').addEventListener('click', ()=>window.print());
   document.getElementById('ageStdReset').addEventListener('click', ()=>{
@@ -7139,11 +7142,13 @@ async function runAgeReport(force){
     AGE.data = payload;
     renderAgeReport(payload);
     document.getElementById('ageXlsxBtn').disabled = false;
+    document.getElementById('ageDocxBtn').disabled = false;
     document.getElementById('agePrintBtn').disabled = false;
   }catch(err){
     AGE.data = null;
     document.getElementById('ageReport').innerHTML = '';
     document.getElementById('ageXlsxBtn').disabled = true;
+    document.getElementById('ageDocxBtn').disabled = true;
     document.getElementById('agePrintBtn').disabled = true;
     const msg = (err && err.kind==='timeout') ? err.message : (err && err.message ? err.message : String(err));
     ageSetStatus(`<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>تعذر إنشاء التقرير</b> — ${ageEsc(msg)}</div></div>`);
@@ -7191,8 +7196,7 @@ function ageBranchDeliveryTable(g){
   return ageTable(['الفرع','مسلّمة',`ضمن معيار السوق (${ageDays(g.market)})`,`ضمن معيار الشركة (${ageDays(g.delivery)})`,'تجاوز معيار الشركة','متوسط مدة التسليم (يوم)'], body, {sticky:true});
 }
 function ageBranchReturnTable(g){
-  const rows = g.branches.filter(b=>b.kinds.returnClosed.count>0 || b.kinds.returnOpen.count>0)
-    .sort((a,b)=>(b.kinds.returnClosed.companyPct||0)-(a.kinds.returnClosed.companyPct||0));
+  const rows = ageBranchRowsRet(g);
   if(!rows.length) return '<div class="age-note">لا توجد مرتجعات في هذه المجموعة خلال الفترة.</div>';
   const line = (name, c, o, cls)=>`<tr${cls?` class="${cls}"`:''}><td>${ageEsc(name)}</td><td>${ageN(c.count)}</td>${ageBarCell(c.companyPct)}${ageBarCell(c.overPct,'over')}<td>${ageD(c.avgAge)}</td><td>${ageN(o.count)}</td></tr>`;
   const body = rows.map(b=>line(b.name,b.kinds.returnClosed,b.kinds.returnOpen)).join('') + line('الإجمالي', g.kinds.returnClosed, g.kinds.returnOpen, 'age-total');
@@ -7207,6 +7211,7 @@ function ageSumOpen(byGroup){
 function ageRatio(a,b){ return b>0 ? a/b*100 : null; }
 
 function renderAgeReport(d){
+  AGE.charts = ageBuildCharts(d);
   const k = d.kpis, std = d.standards;
   const deliveredStd = ageStdText('market', std), companyDelStd = ageStdText('delivery', std), companyRetStd = ageStdText('returns', std);
   const asOfTxt = ageArDate(d.params.asOf);
@@ -7234,14 +7239,14 @@ function renderAgeReport(d){
     const letter = ['أ','ب','ج'][i] || '';
     return `<div class="card age-gcard"><div class="card-title">${letter}) ${ageEsc(g.name)}</div>
       <div class="age-gmeta">إجمالي الشحنات: <b>${ageN(g.total)}</b> (${ageP(g.sharePct)} من إجمالي الشركة) &nbsp;|&nbsp; معيار السوق: <b>${ageDays(g.market)}</b> &nbsp;|&nbsp; معيار الشركة للتسليم: <b>${ageDays(g.delivery)}</b> &nbsp;|&nbsp; معيار الشركة للمرتجع: <b>${ageDays(g.returns)}</b></div>
-      ${ageGroupTable(g)}</div>`;
+      ${ageGroupTable(g)}${ageImg(AGE.charts.dist[g.key])}</div>`;
   }).join('') + (d.unassigned ? `<div class="card age-gcard"><div class="card-title">${ageEsc(d.unassigned.name)}</div>
       <div class="age-gmeta">إجمالي الشحنات: <b>${ageN(d.unassigned.total)}</b> — لا يمكن مقارنتها بالمعايير إلا بعد إدراج الفرع في إحدى المجموعات (انظر الملاحظات الرقابية).</div>${ageGroupTable(d.unassigned)}</div>` : '');
   const groupsNote = '<div class="age-note">* العمر للشحنات المفتوحة (مرتجع مفتوح / قيد التشغيل) محسوب حتى تاريخ القياس: '+asOfTxt+'. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.</div>';
 
   const branchesHtml = d.groups.map((g,i)=>`<div class="age-sub">${i+1}. ${ageEsc(g.name)}</div>
-    <div class="card" style="margin-bottom:12px"><div class="card-title">أ) التسليمات حسب الفرع</div>${ageBranchDeliveryTable(g)}</div>
-    <div class="card" style="margin-bottom:18px"><div class="card-title">ب) المرتجعات حسب الفرع</div>${ageBranchReturnTable(g)}</div>`).join('');
+    <div class="card" style="margin-bottom:12px"><div class="card-title">أ) التسليمات حسب الفرع</div>${ageBranchDeliveryTable(g)}${ageImg(AGE.charts.del[g.key])}</div>
+    <div class="card" style="margin-bottom:18px"><div class="card-title">ب) المرتجعات حسب الفرع</div>${ageBranchReturnTable(g)}${ageImg(AGE.charts.ret[g.key])}</div>`).join('');
 
   const ob = d.open.byGroup, ot = ageSumOpen(ob);
   const openRows = ob.map(g=>`<tr><td>${ageEsc(g.name)}</td><td>${ageDays(g.delivery)}</td><td>${ageN(g.inProgress)}</td><td>${ageN(g.inProgressOver)}</td><td>${ageP(g.inProgressOverPct)}</td><td>${ageDays(g.returns)}</td><td>${ageN(g.returnOpen)}</td><td>${ageN(g.returnOpenOver)}</td><td>${ageP(g.returnOpenOverPct)}</td><td>${ageN(g.overTotal)}</td><td>${ageP(g.overPctOfOpen)}</td></tr>`).join('') +
@@ -7297,7 +7302,7 @@ function renderAgeReport(d){
   <section class="age-sec"><div class="section-header"><span class="idx">03</span><h2>تحليل الفروع</h2></div>${branchesHtml}</section>
 
   <section class="age-sec"><div class="section-header"><span class="idx">04</span><h2>شحنات قيد التشغيل والمفتوحة</h2></div>
-    <div class="card" style="margin-bottom:14px"><div class="card-title">المفتوح حسب المجموعة</div>${openTable}
+    <div class="card" style="margin-bottom:14px"><div class="card-title">المفتوح حسب المجموعة</div>${openTable}${ageImg(AGE.charts.open)}
       <div class="age-note">قيد التشغيل يُقاس بمعيار الشركة للتسليم، والمرتجع المفتوح بمعيار الشركة للمرتجع. العمر = ${asOfTxt} − تاريخ استلام البيك أب. النسبة من إجمالي المفتوحة في المجموعة.</div></div>
     <div class="card" style="margin-bottom:14px"><div class="card-title">أعلى 5 فروع بالشحنات المفتوحة المتجاوزة</div>${topTable}</div>
     <div class="card"><div class="card-title">قائمة الشحنات المفتوحة <button class="btn-secondary btn-sm" id="ageOpenListBtn" type="button">عرض القائمة (${ageN(d.open.list.length)}${d.open.listTruncated?'+':''})</button></div>
@@ -7320,6 +7325,370 @@ function renderAgeReport(d){
     try{ ARRIVE_DS.enhanceTable(document.getElementById('ageOpenListTable')); }catch(e){}
   });
   window.AGE_PRINT_PERIOD = `${d.params.dateFrom} → ${d.params.dateTo}`;
+}
+
+/* ---------- charts (PNG via Chart.js) — shared by the on-screen report and the Word export ---------- */
+const AGE_C = { green:'#16A34A', orange:'#F59E0B', red:'#DC2626', navy:'#1F3A5F', grey:'#64748B' };
+const AGE_FONT = "Cairo, 'Segoe UI', Arial, sans-serif";
+const AGE_CHART_PLUGINS = [
+  { id:'ageWhiteBg', beforeDraw(ch){ const c=ch.ctx; c.save(); c.globalCompositeOperation='destination-over'; c.fillStyle='#fff'; c.fillRect(0,0,ch.width,ch.height); c.restore(); } },
+  { id:'ageLabels', afterDatasetsDraw(ch, args, o){
+      if(!o || !o.fmt) return;
+      const c = ch.ctx; c.save(); c.textAlign='center'; c.font = `bold ${o.size||10}px Arial`;
+      ch.data.datasets.forEach((ds,i)=>{
+        const meta = ch.getDatasetMeta(i); if(meta.hidden) return;
+        meta.data.forEach((bar,j)=>{
+          const v = ds.data[j]; if(v==null || isNaN(v)) return;
+          if(o.inside){ if(v < (o.minInside||7)) return; c.fillStyle='#fff'; c.textBaseline='middle'; c.fillText(o.fmt(v), bar.x, (bar.y + bar.base)/2); }
+          else { c.fillStyle=AGE_C.navy; c.textBaseline='bottom'; c.fillText(o.fmt(v), bar.x, bar.y-3); }
+        });
+      });
+      c.restore();
+  } }
+];
+function ageChartImage(cfg, w, h){
+  if(typeof Chart === 'undefined') return null;
+  try{
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h; cv.style.width = w+'px'; cv.style.height = h+'px'; // Chart.js multiplies by devicePixelRatio (2) itself
+    cfg.plugins = AGE_CHART_PLUGINS;
+    cfg.options = Object.assign({ responsive:false, animation:false, devicePixelRatio:2, maintainAspectRatio:false }, cfg.options);
+    const ch = new Chart(cv, cfg);
+    const url = cv.toDataURL('image/png');
+    ch.destroy();
+    return url;
+  }catch(e){ console.warn('[AGE chart]', e); return null; }
+}
+function ageChartOpts(title, sub, o){
+  o = o || {};
+  const font = (size, weight)=>({ size, weight:weight||'normal', family:AGE_FONT });
+  return {
+    layout:{ padding:{ top:4, right:10, left:4, bottom:2 } },
+    plugins: Object.assign({
+      title:{ display:true, text:title, color:AGE_C.navy, font:font(14,'bold') },
+      subtitle:{ display:true, text:sub, color:AGE_C.grey, font:font(10), padding:{ bottom:6 } },
+      legend:{ rtl:true, textDirection:'rtl', position:'top', onClick:()=>{}, labels:Object.assign({ boxWidth:11, boxHeight:11, font:font(10), color:'#334155' }, o.legendLabels||{}) },
+      tooltip:{ enabled:false }
+    }, o.plugins||{}),
+    scales:{
+      x:{ reverse:true, stacked:!!o.stacked, grid:{ display:false }, ticks:{ color:'#334155', font:font(9), maxRotation:0, autoSkip:false } },
+      y:{ position:'left', stacked:!!o.stacked, min:0, max:o.yMax, suggestedMax:o.ySuggested, ticks:{ color:AGE_C.grey, font:font(9), callback:v=>v+'%' }, grid:{ color:'#E5E7EB' } }
+    }
+  };
+}
+function ageSubPeriod(d){ return 'الفترة: '+ageRangeText(d.params.dateFrom, d.params.dateTo); }
+function ageChartDist(d, g){
+  const dist = g.dist || []; const sum = dist.reduce((a,b)=>a+b,0); if(!sum) return null;
+  const labels = dist.map((_,i)=> i < g.delivery ? String(i+1) : g.delivery+'+');
+  const colors = dist.map((_,i)=> i === g.delivery ? AGE_C.red : (i+1 <= g.market ? AGE_C.green : AGE_C.orange));
+  const within = dist.slice(0, g.market).reduce((a,b)=>a+b,0), over = dist[g.delivery] || 0, mid = sum - within - over;
+  const pc = n=>(n/sum*100).toFixed(1);
+  const legend = { generateLabels:()=>[
+    { text:`تسليم خلال ${ageDays(g.market)} أو أقل  ${ageN(within)} (${pc(within)}%)`, fillStyle:AGE_C.green, strokeStyle:AGE_C.green, lineWidth:0, fontColor:'#334155' },
+    { text:`تسليم خلال ${g.market+1} إلى ${ageDays(g.delivery)}  ${ageN(mid)} (${pc(mid)}%)`, fillStyle:AGE_C.orange, strokeStyle:AGE_C.orange, lineWidth:0, fontColor:'#334155' },
+    { text:`تجاوز ${ageDays(g.delivery)}  ${ageN(over)} (${pc(over)}%)`, fillStyle:AGE_C.red, strokeStyle:AGE_C.red, lineWidth:0, fontColor:'#334155' } ] };
+  const o = ageChartOpts(`توزيع الشحنات المسلّمة حسب يوم التسليم - ${g.name}`,
+    `نسبة الشحنات المسلّمة من إجمالي مسلّم المجموعة | معيار السوق: ${ageDays(g.market)} | معيار الشركة: ${ageDays(g.delivery)} | ${ageSubPeriod(d)}`,
+    { ySuggested:20, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:9 } } });
+  o.plugins.legend.labels.generateLabels = legend.generateLabels;
+  o.scales.x.ticks.font.size = 10;
+  return ageChartImage({ type:'bar', data:{ labels, datasets:[{ data:dist.map(n=>n/sum*100), backgroundColor:colors, borderWidth:0, barPercentage:.7, categoryPercentage:.9 }] }, options:o }, 640, 300);
+}
+function ageBranchRowsDel(g){ return g.branches.filter(b=>b.kinds.delivered.count>0).sort((a,b)=>(b.kinds.delivered.marketPct||0)-(a.kinds.delivered.marketPct||0)); }
+function ageBranchRowsRet(g){ return g.branches.filter(b=>b.kinds.returnClosed.count>0||b.kinds.returnOpen.count>0).sort((a,b)=>(a.kinds.returnClosed.companyPct==null?101:a.kinds.returnClosed.companyPct)-(b.kinds.returnClosed.companyPct==null?101:b.kinds.returnClosed.companyPct)); }
+function ageChartBranchDelivery(d, g){
+  const rows = ageBranchRowsDel(g); if(!rows.length) return null;
+  const o = ageChartOpts(`التسليم حسب الفرع - ${g.name}`, `نسبة الشحنات المسلّمة ضمن معيار السوق ومعيار الشركة | ${ageSubPeriod(d)}`,
+    { yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:rows.length>6?8:10 } } });
+  return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>b.name), datasets:[
+    { label:`ضمن معيار السوق (${ageDays(g.market)})`, data:rows.map(b=>b.kinds.delivered.marketPct), backgroundColor:AGE_C.green, borderWidth:0, barPercentage:.9, categoryPercentage:.8 },
+    { label:`ضمن معيار الشركة (${ageDays(g.delivery)})`, data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_C.orange, borderWidth:0, barPercentage:.9, categoryPercentage:.8 } ] }, options:o }, 640, 280);
+}
+function ageChartReturns(d, g){
+  const rows = ageBranchRowsRet(g).filter(b=>b.kinds.returnClosed.count>0); if(!rows.length) return null;
+  const o = ageChartOpts(`المرتجعات المغلقة حسب الفرع - ${g.name}`, `نسبة المرتجعات المغلقة ضمن معيار الشركة (${ageDays(g.returns)}) وتجاوزه | ${ageSubPeriod(d)}`,
+    { stacked:true, yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', inside:true, size:rows.length>6?8:10 } } });
+  return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>b.name), datasets:[
+    { label:'ضمن المعيار', data:rows.map(b=>b.kinds.returnClosed.companyPct), backgroundColor:AGE_C.green, borderWidth:0, barPercentage:.75 },
+    { label:'تجاوز المدة', data:rows.map(b=>b.kinds.returnClosed.overPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.75 } ] }, options:o }, 640, 270);
+}
+function ageChartOpen(d){
+  const g = d.open.byGroup; if(!g.length) return null;
+  const o = ageChartOpts('الشحنات المفتوحة المتجاوزة لمعيارها - حسب المجموعة', `نسبة المتجاوز من المفتوح في كل فئة | العمر حتى ${d.params.asOf}`,
+    { yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:10 } } });
+  return ageChartImage({ type:'bar', data:{ labels:g.map(x=>x.name), datasets:[
+    { label:'قيد التشغيل متجاوز', data:g.map(x=>x.inProgressOverPct), backgroundColor:AGE_C.orange, borderWidth:0, barPercentage:.7 },
+    { label:'مرتجع مفتوح متجاوز', data:g.map(x=>x.returnOpenOverPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.7 } ] }, options:o }, 640, 280);
+}
+function ageBuildCharts(d){
+  const out = { dist:{}, del:{}, ret:{}, open:null };
+  d.groups.forEach(g=>{ out.dist[g.key] = ageChartDist(d,g); out.del[g.key] = ageChartBranchDelivery(d,g); out.ret[g.key] = ageChartReturns(d,g); });
+  out.open = ageChartOpen(d);
+  return out;
+}
+function ageImg(url){ return url ? `<img class="age-chart" alt="رسم بياني" src="${url}">` : ''; }
+
+/* ---------- Word export (docx) — same layout as the approved report ---------- */
+const AGE_DOCX_URLS = [
+  'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js',
+  'https://unpkg.com/docx@8.5.0/build/index.umd.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/docx/8.5.0/index.umd.js'
+];
+function ageLoadDocxLib(){
+  if(window.docx) return Promise.resolve(window.docx);
+  return new Promise((resolve, reject)=>{
+    let i = 0;
+    const next = ()=>{
+      if(i >= AGE_DOCX_URLS.length) return reject(new Error('تعذر تحميل مكتبة Word — تحقق من الاتصال بالإنترنت.'));
+      const s = document.createElement('script');
+      s.src = AGE_DOCX_URLS[i++]; s.async = true;
+      s.onload = ()=> window.docx ? resolve(window.docx) : next();
+      s.onerror = ()=>{ s.remove(); next(); };
+      document.head.appendChild(s);
+    };
+    next();
+  });
+}
+const AGE_MONTHS_AR = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function agePlainDate(iso){ const [y,m,d] = iso.split('-').map(Number); return `${d} ${AGE_MONTHS_AR[m-1]} ${y}`; }
+function ageRangeText(from, to){
+  const [y1,m1,d1] = from.split('-').map(Number), [y2,m2,d2] = to.split('-').map(Number);
+  if(y1===y2 && m1===m2) return `من ${d1} إلى ${d2} ${AGE_MONTHS_AR[m2-1]} ${y2}`;
+  return `من ${agePlainDate(from)} إلى ${agePlainDate(to)}`;
+}
+function ageDataUrlBytes(url){ const b = atob(url.split(',')[1]); const u = new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }
+function ageLogoTilePng(){
+  return new Promise(resolve=>{
+    try{
+      const img = new Image();
+      img.onload = ()=>{
+        const S = 360, cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+        const c = cv.getContext('2d'); c.fillStyle = ARRIVE_DS.tok('--arrive-blue') || '#0037C8'; c.fillRect(0,0,S,S);
+        const w = S*0.78, h = w*img.naturalHeight/img.naturalWidth; c.drawImage(img,(S-w)/2,(S-h)/2,w,h);
+        resolve(cv.toDataURL('image/png'));
+      };
+      img.onerror = ()=>resolve(null);
+      img.src = window.ARRIVE_LOGO_WEB;
+    }catch(e){ resolve(null); }
+  });
+}
+
+function ageBranchesIntro(d){
+  const del = [], ret = [];
+  d.groups.forEach(g=>g.branches.forEach(b=>{
+    if(b.kinds.delivered.count>0) del.push({ name:b.name, m:b.kinds.delivered.marketPct, c:b.kinds.delivered.companyPct });
+    if(b.kinds.returnClosed.count>0) ret.push({ name:b.name, p:b.kinds.returnClosed.companyPct, n:b.kinds.returnClosed.count });
+  }));
+  const parts = [];
+  if(del.length){
+    const byM = del.slice().sort((a,b)=>b.m-a.m), byC = del.slice().sort((a,b)=>a.c-b.c);
+    parts.push(['التسليم: ', `أدنى التزام بمعيار الشركة ${ageP(byC[0].c)} (فرع ${byC[0].name})، والتفاوت في معيار السوق من ${ageP(byM[0].m)} (فرع ${byM[0].name}) إلى ${ageP(byM[byM.length-1].m)} (فرع ${byM[byM.length-1].name}).`]);
+  }
+  if(ret.length){
+    const byP = ret.slice().sort((a,b)=>b.p-a.p), byN = ret.slice().sort((a,b)=>b.n-a.n);
+    parts.push(['المرتجعات: ', `أعلى نسبة التزام بمعيار المرتجع ${ageP(byP[0].p)} (فرع ${byP[0].name}) وأدناها ${ageP(byP[byP.length-1].p)} (فرع ${byP[byP.length-1].name})، وأعلى عدد مرتجعات مغلقة في فرع ${byN[0].name} (${ageN(byN[0].n)}).`]);
+  }
+  return parts;
+}
+
+async function exportAgeDocx(){
+  const d = AGE.data;
+  if(!d){ alert('أنشئ التقرير أولًا ثم صدّره.'); return; }
+  const btn = document.getElementById('ageDocxBtn'); const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = 'جاري إنشاء ملف Word…';
+  try{
+    const lib = await ageLoadDocxLib();
+    const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle, AlignmentType,
+            VerticalAlign, ImageRun, LineRuleType, Footer, PageNumber, PageBorderDisplay, PageBorderOffsetFrom, TableLayoutType } = lib;
+    const NAVY='1F3A5F', ZEBRA1='F8FAFC', ZEBRA2='F1F5F9', TOTAL='DCE6F0', GRID='CBD5E1', TEAL='0EA5A4', INK='1E293B', MUTE='64748B';
+    const charts = AGE.charts || ageBuildCharts(d);
+    const logo = await ageLogoTilePng();
+    const k = d.kpis, std = d.standards;
+    const periodTxt = ageRangeText(d.params.dateFrom, d.params.dateTo);
+    const asOfTxt = agePlainDate(d.params.asOf);
+    const W = 10092;
+
+    const t = (text, o)=>{ o = o||{}; return new TextRun({ text:String(text==null?'':text), rightToLeft:true, font:'Arial', size:o.size||18, bold:!!o.bold, color:o.color||INK }); };
+    const para = (runs, o)=>{ o = o||{}; return new Paragraph({ bidirectional:true, alignment:o.align||AlignmentType.START, keepNext:!!o.keepNext, keepLines:true,
+      spacing:{ before:o.before||0, after:o.after==null?80:o.after, line:o.plain?undefined:276, lineRule:o.plain?undefined:LineRuleType.AUTO }, border:o.border, indent:o.indent, children:Array.isArray(runs)?runs:[runs] }); };
+    const spacer = (n)=>para([t('',{size:8})], { after:n==null?60:n });
+    const heading = (num, title)=>para([t(`${num}. ${title}`, { size:20, color:'475569' })], { before:220, after:100, keepNext:true, border:{ bottom:{ style:BorderStyle.SINGLE, size:8, color:TEAL, space:2 } } });
+    const bullet = (title)=>para([t('• '+title, { size:24, bold:true, color:NAVY })], { before:120, after:80, keepNext:true });
+    const sub = (title)=>para([t(title, { size:22, bold:true, color:NAVY })], { before:140, after:60, keepNext:true });
+    const line = (b)=>({ style:BorderStyle.SINGLE, size:4, color:GRID });
+    const allB = { top:line(), bottom:line(), left:line(), right:line() };
+    const noB = { top:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, bottom:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, left:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, right:{style:BorderStyle.NONE,size:0,color:'FFFFFF'} };
+
+    function kpiTable(cards){
+      const cw = Math.floor(W/cards.length);
+      return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cards.map(()=>cw), visuallyRightToLeft:true, layout:TableLayoutType.FIXED,
+        rows:[ new TableRow({ cantSplit:true, children:cards.map(c=>new TableCell({ width:{ size:cw, type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
+          margins:{ top:100, bottom:100, left:80, right:80 },
+          children:[ para([t(c.value,{ size:28, bold:true, color:c.color||NAVY })],{ align:AlignmentType.CENTER, after:20 }),
+                     para([t(c.label,{ size:17, bold:true })],{ align:AlignmentType.CENTER, after:20 }),
+                     para([t(c.sub||'',{ size:15, color:MUTE })],{ align:AlignmentType.CENTER, after:0 }) ] })) }) ] });
+    }
+    // rows: [{cells:[...], total:bool, red:[colIdx]}]; widths = fractions
+    function dataTable(heads, rows, fr){
+      const sum = fr.reduce((a,b)=>a+b,0), cw = fr.map(x=>Math.round(x/sum*W));
+      const head = new TableRow({ tableHeader:true, cantSplit:true, children:heads.map((h,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
+        shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:60, bottom:60, left:50, right:50 },
+        children:[ para([t(h,{ size:16, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0 }) ] })) });
+      const body = rows.map((r,ri)=>new TableRow({ cantSplit:true, children:r.cells.map((v,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
+        shading:{ type:ShadingType.CLEAR, color:'auto', fill: r.total ? TOTAL : (ri%2 ? ZEBRA2 : ZEBRA1) }, margins:{ top:50, bottom:50, left:50, right:50 },
+        children:[ para([t(v,{ size:16, bold: r.total || i===0, color: (r.red && r.red.indexOf(i)>=0) ? 'DC2626' : (r.total ? NAVY : INK) })],{ align:AlignmentType.CENTER, after:0 }) ] })) }));
+      return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cw, visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[head].concat(body) });
+    }
+    const redIf = v=>(v!=null && v>=50);
+    function image(url, w, h){
+      if(!url) return null;
+      return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:w||640, height:h||300 }, type:'png' }) ], { align:AlignmentType.CENTER, before:60, after:100, plain:true });
+    }
+    const push = (arr, ...items)=>items.forEach(x=>{ if(x) arr.push(x); });
+
+    const children = [];
+    // ---- title block ----
+    const titleCell = new TableCell({ width:{ size:W-1500, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER, children:[
+      para([t('التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',{ size:32, bold:true, color:NAVY })],{ align:AlignmentType.CENTER, after:60 }),
+      para([t(`الفترة: ${periodTxt} (حسب تاريخ استلام البيك أب)`,{ size:20, bold:true, color:'1D4ED8' })],{ align:AlignmentType.CENTER, after:40 }),
+      para([t(`تاريخ الإصدار: ${agePlainDate(ageIso(new Date()))}`,{ size:18, color:MUTE })],{ align:AlignmentType.CENTER, after:0 }) ] });
+    const logoCell = new TableCell({ width:{ size:1500, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER,
+      children:[ logo ? para([ new ImageRun({ data:ageDataUrlBytes(logo), transformation:{ width:84, height:84 }, type:'png' }) ],{ align:AlignmentType.CENTER, after:0, plain:true }) : para([t('ARRIVE',{ bold:true, color:NAVY })],{ align:AlignmentType.CENTER }) ] });
+    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W-1500,1500], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, borders:{ ...noB, insideHorizontal:noB.top, insideVertical:noB.top }, rows:[ new TableRow({ children:[titleCell, logoCell] }) ] }));
+    children.push(spacer(120));
+
+    // ---- 1. goal ----
+    children.push(heading(1,'هدف التقرير'));
+    children.push(para([t('• يهدف هذا التقرير إلى ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم. يقيس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ويقارنها بمعيارين منفصلين: مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.')]));
+    children.push(para([t('ويهدف التقرير إلى تحقيق ما يلي:')]));
+    ['قياس التزام كل مجموعة جغرافية بمدد التسليم والمرتجع، وتحديد الشحنات المتجاوزة لمدة السوق ولمدة الشركة مع فصل التسليم عن المرتجع.',
+     'تحديد الفروع والمناطق التي تحتاج إلى إجراءات تصحيحية، والشحنات المفتوحة (قيد التشغيل والمرتجع المفتوح) التي تتطلب إغلاقًا أو تصعيدًا.',
+     'إبراز الملاحظات الرقابية وجودة البيانات، وتوفير أداة ثابتة للمراجعة الدورية.'
+    ].forEach((x,i)=>children.push(para([t(`${i+1}.  ${x}`)],{ indent:{ start:240 } })));
+
+    // ---- 2. executive summary ----
+    const stdM = ageStdText('market', std), stdC = ageStdText('delivery', std), stdR = ageStdText('returns', std);
+    children.push(heading(2,'الملخص التنفيذي'));
+    children.push(bullet('التسليمات'));
+    children.push(kpiTable([
+      { value:ageN(k.shipments), label:'إجمالي الشحنات', sub:'شحنة استُلمت من المرسل في الفترة' },
+      { value:ageP(k.deliveredPct), label:'التسليم الناجح', sub:`${ageN(k.delivered)} من ${ageN(k.shipments)} شحنة`, color:'E36C0A' },
+      { value:ageP(k.deliveredWithinMarketPct), label:`التسليم ضمن (${stdM})`, sub:`${ageN(k.deliveredWithinMarket)} من ${ageN(k.delivered)} مسلّمة`, color:'E36C0A' },
+      { value:ageP(k.deliveredWithinCompanyPct), label:`التسليم ضمن (${stdC})`, sub:`${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة`, color:'16A34A' } ]));
+    children.push(bullet('المرتجعات'));
+    children.push(kpiTable([
+      { value:ageP(k.returnsPct), label:'إجمالي المرتجعات', sub:`${ageN(k.returns)} من إجمالي الشحنات ${ageN(k.shipments)}` },
+      { value:ageP(k.returnClosedWithinPct), label:`مرتجع مغلق ضمن (${stdR})`, sub:`${ageN(k.returnClosedWithin)} من ${ageN(k.returns)} مرتجعًا`, color:'16A34A' },
+      { value:ageP(k.returnClosedOverPct), label:'مرتجعات مغلقة وتجاوزت المدة', sub:`${ageN(k.returnClosedOver)} من ${ageN(k.returns)} مرتجعًا`, color:'E36C0A' },
+      { value:ageP(k.returnOpenPct), label:'مرتجعات مفتوحة', sub:`${ageN(k.returnOpen)} من ${ageN(k.returns)} مرتجعًا`, color:'DC2626' } ]));
+    children.push(bullet('الشحنات المفتوحة'));
+    children.push(kpiTable([
+      { value:ageN(k.open), label:'إجمالي المفتوحة', sub:`${ageN(k.inProgress)} قيد التشغيل + ${ageN(k.returnOpen)} مرتجع مفتوح` },
+      { value:ageP(k.openOverduePct), label:'متجاوز لمعيار الشركة', sub:`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة`, color:'E36C0A' },
+      { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt}`, color:'E36C0A' } ]));
+
+    // ---- 3. geographic groups ----
+    children.push(heading(3,'تحليل المجموعات الجغرافية'));
+    const letters = ['أ','ب','ج'];
+    d.groups.concat(d.unassigned?[d.unassigned]:[]).forEach((g,gi)=>{
+      const judged = g.delivery != null, K = g.kinds, dash = '—';
+      children.push(sub(`${letters[gi]||''}) ${g.name}`.replace(/^\) /,'')));
+      children.push(para([t(`إجمالي الشحنات: ${ageN(g.total)} (${ageP(g.sharePct)} من إجمالي الشركة)${judged?`  |  معيار السوق: ${ageDays(g.market)}  |  معيار الشركة للتسليم: ${ageDays(g.delivery)}  |  معيار الشركة للمرتجع: ${ageDays(g.returns)}`:''}`,{ size:17, color:MUTE })],{ keepNext:true }));
+      const rows = [];
+      [['delivered',true],['returnClosed',false],['returnOpen',false],['inProgress',false]].forEach(([kind,mk])=>{
+        const a = K[kind]; if(!a.count) return;
+        rows.push({ cells:[ AGE_KIND_LABEL[kind]+(kind==='delivered'?'':' *'), ageN(a.count), (mk&&judged)?ageP(a.marketPct):dash, judged?ageP(a.companyPct):dash, judged?ageP(a.overPct):dash, ageD(a.avgAge) ], red: judged&&redIf(a.overPct)?[4]:[] });
+      });
+      if(K.other.count) rows.push({ cells:[ AGE_KIND_LABEL.other, ageN(K.other.count), dash, dash, dash, dash ] });
+      rows.push({ total:true, cells:[ 'الإجمالي', ageN(g.total), dash, judged?ageP(g.withinPct):dash, judged?ageP(g.overPct):dash, dash ] });
+      children.push(dataTable(['الحالة','عدد الشحنات', judged?`ضمن ${ageDays(g.market)}`:'ضمن معيار السوق', judged?`ضمن ${g.delivery} ${g.delivery<=10?'أيام':'يوم'} (للتسليم) / ${ageDays(g.returns)} (للمرتجع)`:'ضمن معيار الشركة','متجاوز المدة المطبقة','متوسط المدة / العمر (يوم)'], rows, [1.6,1.2,1.1,2.0,1.4,1.3]));
+      if(judged) push(children, image(charts.dist[g.key], 640, 300));
+      else children.push(spacer());
+    });
+    children.push(para([t(`* العمر للشحنات المفتوحة (مرتجع مفتوح / قيد التشغيل) محسوب حتى تاريخ القياس: ${asOfTxt}. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.`,{ size:15, color:MUTE })]));
+
+    // ---- 4. branches ----
+    children.push(heading(4,'تحليل الفروع'));
+    ageBranchesIntro(d).forEach(([lbl, txt])=>children.push(para([t(lbl,{ bold:true }), t(txt)])));
+    d.groups.forEach((g,gi)=>{
+      children.push(sub(`${gi+1}. ${g.name}`));
+      children.push(para([t('أ) التسليمات حسب الفرع',{ bold:true, size:19, color:NAVY })],{ keepNext:true }));
+      const dRows = ageBranchRowsDel(g).map(b=>{ const a=b.kinds.delivered; return { cells:[b.name, ageN(a.count), ageP(a.marketPct), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge)], red:redIf(a.overPct)?[4]:[] }; });
+      const dt = g.kinds.delivered;
+      if(dRows.length){
+        dRows.push({ total:true, cells:['إجمالي المجموعة', ageN(dt.count), ageP(dt.marketPct), ageP(dt.companyPct), ageP(dt.overPct), ageD(dt.avgAge)] });
+        children.push(dataTable(['الفرع','مسلّمة',`ضمن معيار السوق (${ageDays(g.market)})`,`ضمن معيار الشركة (${ageDays(g.delivery)})`,'تجاوز معيار الشركة','متوسط مدة التسليم (يوم)'], dRows, [1.6,1,1.5,1.5,1.3,1.4]));
+        push(children, image(charts.del[g.key], 640, 280));
+      } else children.push(para([t('لا توجد تسليمات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
+      children.push(para([t('ب) المرتجعات حسب الفرع',{ bold:true, size:19, color:NAVY })],{ keepNext:true, before:100 }));
+      const rRows = ageBranchRowsRet(g).map(b=>{ const a=b.kinds.returnClosed; return { cells:[b.name, ageN(a.count), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge), ageN(b.kinds.returnOpen.count)], red:redIf(a.overPct)?[3]:[] }; });
+      const rt = g.kinds.returnClosed;
+      if(rRows.length){
+        rRows.push({ total:true, cells:['إجمالي المجموعة', ageN(rt.count), ageP(rt.companyPct), ageP(rt.overPct), ageD(rt.avgAge), ageN(g.kinds.returnOpen.count)] });
+        children.push(dataTable(['الفرع','مرتجعات مغلقة',`ضمن ${ageDays(g.returns)}`,'تجاوز المدة','متوسط المدة (يوم)','مرتجعات مفتوحة'], rRows, [1.6,1.3,1.2,1.2,1.4,1.3]));
+        push(children, image(charts.ret[g.key], 640, 270));
+      } else children.push(para([t('لا توجد مرتجعات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
+    });
+
+    // ---- 5. open shipments ----
+    children.push(heading(5,'شحنات قيد التشغيل والمفتوحة'));
+    children.push(para([t(`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة (${ageP(k.openOverduePct)}) تجاوزت معيارها عند تاريخ القياس.`,{ bold:true }),
+      t(k.returnOpen>0 && k.minOpenReturnAge!=null ? ` المرتجعات المفتوحة (${ageN(k.returnOpen)}) أعمارها من ${k.minOpenReturnAge} إلى ${k.maxOpenReturnAge} يومًا.` : '')]));
+    children.push(kpiTable([
+      { value:ageN(k.open), label:'إجمالي المفتوحة', sub:`${ageN(k.inProgress)} قيد التشغيل + ${ageN(k.returnOpen)} مرتجع مفتوح` },
+      { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt} | قيد التشغيل ${ageD(k.avgInProgressAge)} | مرتجع ${ageD(k.avgOpenReturnAge)}`, color:'E36C0A' },
+      { value:ageP(k.inProgressOverduePct), label:'قيد التشغيل المتجاوز لمعيار الشركة', sub:`${ageN(k.inProgressOverdue)} من ${ageN(k.inProgress)}`, color:'E36C0A' },
+      { value:ageP(k.returnOpenOverduePct), label:'المرتجعات المفتوحة المتجاوزة', sub:`${ageN(k.returnOpenOverdue)} من ${ageN(k.returnOpen)}`, color:'DC2626' } ]));
+    children.push(spacer());
+    const ob = d.open.byGroup, ot = ageSumOpen(ob);
+    const oRows = ob.map(g=>({ cells:[g.name, ageDays(g.delivery), ageN(g.inProgress), ageN(g.inProgressOver), ageP(g.inProgressOverPct), ageDays(g.returns), ageN(g.returnOpen), ageN(g.returnOpenOver), ageP(g.returnOpenOverPct), ageN(g.overTotal), ageP(g.overPctOfOpen)], red:[redIf(g.inProgressOverPct)?4:-1, redIf(g.returnOpenOverPct)?8:-1] }));
+    oRows.push({ total:true, cells:['الإجمالي','—',ageN(ot.inProgress),ageN(ot.inProgressOver),ageP(ageRatio(ot.inProgressOver,ot.inProgress)),'—',ageN(ot.returnOpen),ageN(ot.returnOpenOver),ageP(ageRatio(ot.returnOpenOver,ot.returnOpen)),ageN(ot.overTotal),ageP(ageRatio(ot.overTotal,ot.inProgress+ot.returnOpen))] });
+    children.push(dataTable(['المجموعة','معيار الشركة (قيد التشغيل)','قيد التشغيل','متجاوز المعيار','النسبة','معيار المرتجع','مرتجع مفتوح','متجاوز المدة','النسبة','إجمالي المتجاوز','نسبة من المفتوح'], oRows, [1.5,1.1,.9,.9,.8,.9,.9,.9,.8,.9,.9]));
+    children.push(para([t(`قيد التشغيل يقاس بمعيار الشركة للتسليم، والمرتجع المفتوح بمعيار الشركة للمرتجع. العمر = ${asOfTxt} − تاريخ استلام البيك أب. نسبة إجمالي المتجاوز من إجمالي المفتوحة في المجموعة.`,{ size:15, color:MUTE })],{ before:60 }));
+    push(children, image(charts.open, 640, 280));
+    children.push(sub('أعلى 5 فروع بالشحنات المفتوحة المتجاوزة'));
+    if(d.open.topBranches.length){
+      children.push(dataTable(['الفرع','قيد التشغيل','المتجاوز منها','مرتجع مفتوح','المتجاوز منها','إجمالي المتجاوز','النسبة من مفتوح الفرع'],
+        d.open.topBranches.map(b=>({ cells:[b.branch, ageN(b.inProgress), ageN(b.inProgressOver), ageN(b.returnOpen), ageN(b.returnOpenOver), ageN(b.overTotal), ageP(b.overPctOfOpen)] })), [1.6,1,1,1,1,1.1,1.3]));
+    } else children.push(para([t('لا توجد شحنات مفتوحة متجاوزة.',{ color:MUTE })]));
+
+    // ---- 6. control notes ----
+    children.push(heading(6,'الملاحظات الرقابية وجودة البيانات'));
+    const q = d.dq, notes = [];
+    if(d.missingMonths && d.missingMonths.length) notes.push(`لم يتم العثور على بيانات للشهور: ${d.missingMonths.join('، ')} — الأرقام لا تشمل الفترة الواقعة فيها.`);
+    const unm = Object.entries(q.unmappedBranches||{});
+    if(unm.length) notes.push(`فروع غير مصنّفة جغرافيًا (لم تُقارن بالمعايير): ${unm.map(([n,c])=>`${n} (${ageN(c)})`).join('، ')}.`);
+    if(k.other>0) notes.push(`${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام) — لا تدخل في نسب المعايير.`);
+    if(q.invalidPickup) notes.push(`${ageN(q.invalidPickup)} شحنة بتاريخ بيك أب غير صالح/فارغ — لا يمكن حساب عمرها.`);
+    if(q.closedWithoutEndDate) notes.push(`${ageN(q.closedWithoutEndDate)} شحنة مغلقة بدون تاريخ آخر حالة — بلا عمر محسوب.`);
+    if(q.negativeAge) notes.push(`${ageN(q.negativeAge)} شحنة بعمر سالب (تاريخ آخر حالة أسبق من البيك أب) — استُبعدت من الأعمار.`);
+    if(q.duplicatesRemoved) notes.push(`تم حذف ${ageN(q.duplicatesRemoved)} سجلًا مكررًا (نفس رقم البوليصة) مع الإبقاء على الأحدث.`);
+    if(!notes.length) notes.push('لا توجد ملاحظات جودة بيانات حرجة: كل الشحنات صُنِّفت وحُسبت أعمارها.');
+    notes.forEach(n=>children.push(para([t('• '+n)])));
+    children.push(para([t(`منهجية الحساب: العمر بالأيام التقويمية (بدون الوقت). للمسلّمة والمرتجع المغلق = تاريخ آخر حالة − تاريخ استلام البيك أب؛ وللمفتوحة = تاريخ القياس (${asOfTxt}) − تاريخ البيك أب. «ضمن المدة» = العمر ≤ المعيار. الشهور المقروءة: ${(d.months||[]).join('، ')||'—'}. الأرقام باللون الأحمر في الجداول تعني نسبة 50% فأكثر في عمود التجاوز.`,{ size:15, color:MUTE })],{ before:80 }));
+
+    // ---- footer + document ----
+    const footer = new Footer({ children:[ new Paragraph({ bidirectional:true, alignment:AlignmentType.CENTER, children:[
+      new TextRun({ text:`التقرير الإداري والرقابي لعمر الشحنة  |  ${periodTxt}  |  صفحة `, rightToLeft:true, font:'Arial', size:15, color:MUTE }),
+      new TextRun({ children:[PageNumber.CURRENT], rightToLeft:true, font:'Arial', size:15, color:MUTE }),
+      new TextRun({ text:' من ', rightToLeft:true, font:'Arial', size:15, color:MUTE }),
+      new TextRun({ children:[PageNumber.TOTAL_PAGES], rightToLeft:true, font:'Arial', size:15, color:MUTE }) ] }) ] });
+    const bd = { style:BorderStyle.SINGLE, size:6, color:'94A3B8', space:20 };
+    const doc = new Document({
+      creator:'ARRIVE', title:'التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',
+      styles:{ default:{ document:{ run:{ font:'Arial', size:18, rightToLeft:true } } } },
+      sections:[{ properties:{ page:{ size:{ width:11906, height:16838 }, margin:{ top:850, right:907, bottom:1170, left:907, header:720, footer:454 },
+        borders:{ pageBorders:{ display:PageBorderDisplay.ALL_PAGES, offsetFrom:PageBorderOffsetFrom.PAGE }, pageBorderTop:bd, pageBorderBottom:bd, pageBorderLeft:bd, pageBorderRight:bd } } },
+        footers:{ default:footer }, children }]
+    });
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `Shipment_Age_Report_${d.params.dateFrom}_${d.params.dateTo}.docx`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 4000);
+  }catch(e){
+    console.error('[AGE DOCX]', e); alert('تعذر إنشاء ملف Word: '+(e && e.message ? e.message : e));
+  }finally{
+    btn.disabled = false; btn.innerHTML = old;
+  }
 }
 
 /* ---------- Excel export (ExcelJS, RTL, ARRIVE colours) ---------- */
@@ -7410,7 +7779,7 @@ async function exportAgeXlsx(){
   r0 = 4;
   d.groups.forEach(g=>{
     ws.getCell(r0,1).value = `${g.name} — معيار المرتجع ${g.returns} يوم`; ws.getCell(r0,1).font = { bold:true, color:{argb:NAVY} };
-    const rows = g.branches.filter(b=>b.kinds.returnClosed.count>0||b.kinds.returnOpen.count>0).sort((a,b)=>(b.kinds.returnClosed.companyPct||0)-(a.kinds.returnClosed.companyPct||0))
+    const rows = ageBranchRowsRet(g)
       .map(b=>({vals:[b.name,b.kinds.returnClosed.count,f(b.kinds.returnClosed.companyPct),f(b.kinds.returnClosed.overPct),b.kinds.returnClosed.avgAge==null?null:Number(b.kinds.returnClosed.avgAge.toFixed(2)),b.kinds.returnOpen.count]}));
     const t = g.kinds.returnClosed; rows.push({total:true, vals:['إجمالي المجموعة',t.count,f(t.companyPct),f(t.overPct),t.avgAge==null?null:Number(t.avgAge.toFixed(2)),g.kinds.returnOpen.count]});
     r0 = table(ws, ['الفرع','مرتجعات مغلقة','ضمن المدة','تجاوز المدة','متوسط المدة (يوم)','مرتجعات مفتوحة'], rows, [null,INT,PCT,PCT,DEC,INT], r0+1) + 1;

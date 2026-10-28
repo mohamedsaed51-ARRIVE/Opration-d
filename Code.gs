@@ -2478,7 +2478,8 @@ function ageReportCompute_(records, groups, asOfNum) {
   for (gi = 0; gi < groups.length; gi++) {
     groupIdx[groups[gi].key] = gi;
     for (bi = 0; bi < groups[gi].branches.length; bi++) branchToGroup[ageNormBranch_(groups[gi].branches[bi])] = gi;
-    state.push({ kinds: ageNewKindAccs_(), branches: {}, branchOrder: [] });
+    var dist = []; for (var di = 0; di <= groups[gi].delivery; di++) dist.push(0); // buckets: 1..delivery, then (delivery+1) = beyond company standard
+    state.push({ kinds: ageNewKindAccs_(), branches: {}, branchOrder: [], dist: dist });
   }
   var unassigned = { kinds: ageNewKindAccs_(), branches: {}, branchOrder: [] };
   var unmappedBranches = {};
@@ -2486,6 +2487,7 @@ function ageReportCompute_(records, groups, asOfNum) {
   var statusBreakdown = {};
   var dq = { invalidPickup: 0, closedWithoutEndDate: 0, negativeAge: 0, missingBranch: 0 };
   var openList = [];
+  var minRetAge = null, maxRetAge = null;
   var sumOpenAge = 0, openAgeN = 0, sumPendAge = 0, pendAgeN = 0, sumRetAge = 0, retAgeN = 0;
   var branchOpenAgg = {};
 
@@ -2526,13 +2528,18 @@ function ageReportCompute_(records, groups, asOfNum) {
     // groups with no std (unassigned) fall back to the first group's standards ONLY for the over/within split display, never silently:
     // they are reported under "غير مصنّف" with age statistics only.
     var effStd = std || { market: -1, delivery: -1, returns: -1 };
+    if (std && kind === "delivered" && age !== null) {
+      // delivery-day histogram: age 0/1 -> bucket 1, age n -> bucket n, > company standard -> last bucket
+      var bucketIdx = age <= 1 ? 0 : (age <= std.delivery ? age - 1 : std.delivery);
+      gs.dist[bucketIdx]++;
+    }
     ageAddToAcc_(gs.kinds[kind], kind, age, effStd);
     ageAddToAcc_(gs.branches[branchLabel][kind], kind, age, effStd);
     if (std) ageAddToAcc_(total[kind], kind, age, effStd);
 
     if (isOpen && age !== null) {
       sumOpenAge += age; openAgeN++;
-      if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else { sumRetAge += age; retAgeN++; }
+      if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else { sumRetAge += age; retAgeN++; if (minRetAge === null || age < minRetAge) minRetAge = age; if (maxRetAge === null || age > maxRetAge) maxRetAge = age; }
     }
     if (isOpen) {
       var limit = std ? (kind === "inProgress" ? std.delivery : std.returns) : null;
@@ -2557,7 +2564,7 @@ function ageReportCompute_(records, groups, asOfNum) {
     branches.sort(function (x, y) { return y.total - x.total; });
     var within = gs.kinds.delivered.withinCompany + gs.kinds.returnClosed.withinCompany + gs.kinds.returnOpen.withinCompany + gs.kinds.inProgress.withinCompany;
     var over = gs.kinds.delivered.over + gs.kinds.returnClosed.over + gs.kinds.returnOpen.over + gs.kinds.inProgress.over;
-    return Object.assign({ total: gTotal, kinds: kinds, branches: branches,
+    return Object.assign({ total: gTotal, kinds: kinds, branches: branches, dist: gs.dist || null,
       withinCompany: within, over: over,
       withinPct: gTotal > 0 ? within / gTotal * 100 : null, overPct: gTotal > 0 ? over / gTotal * 100 : null }, meta);
   }
@@ -2606,6 +2613,7 @@ function ageReportCompute_(records, groups, asOfNum) {
     avgOpenAge: openAgeN > 0 ? sumOpenAge / openAgeN : null,
     avgInProgressAge: pendAgeN > 0 ? sumPendAge / pendAgeN : null,
     avgOpenReturnAge: retAgeN > 0 ? sumRetAge / retAgeN : null,
+    minOpenReturnAge: minRetAge, maxOpenReturnAge: maxRetAge,
     other: otherCount
   };
 
@@ -2676,7 +2684,7 @@ function getAgeReport(params) {
 
   var cache = CacheService.getScriptCache();
   var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
-  var cacheKey = "agerep_v1_" + summaryHashKey(dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
+  var cacheKey = "agerep_v2_" + summaryHashKey(dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
   if (!forceRefresh) {
     var cached = cacheGetChunked(cache, cacheKey);
     if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }

@@ -67,5 +67,8 @@ check('Arabic variants (ه/ة, ا/إ) map to same branch', cairo.branches.filter
 check('sum of group totals + unassigned = shipments', out.groups.reduce((a, x) => a + x.total, 0) + out.unassigned.total === out.kpis.shipments);
 check('standards override applied', sandbox.ageResolveGroups_({ cairo: { market: 4 } })[0].market === 4 && sandbox.ageResolveGroups_({ cairo: { market: -1 } })[0].market === 2);
 check('months in range Sep 25 - Oct 3', JSON.stringify(sandbox.ageReportMonthsInRange_(sandbox.ageDayNumFromIso_('2026-09-25'), sandbox.ageDayNumFromIso_('2026-10-03'))) === '["September","October"]');
+check('delivery-day histogram: cairo buckets (0d+1d=2, 2d, 3d, >15d)', cairo.dist.length === 16 && cairo.dist[0] === 2 && cairo.dist[1] === 1 && cairo.dist[2] === 1 && cairo.dist[15] === 1, cairo.dist);
+check('histogram sums to delivered with age', cairo.dist.reduce((a, b) => a + b, 0) === cairo.kinds.delivered.count - cairo.kinds.delivered.noAge);
+check('open return min/max age', out.kpis.minOpenReturnAge === 22 && out.kpis.maxOpenReturnAge === 22, [out.kpis.minOpenReturnAge, out.kpis.maxOpenReturnAge]);
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
