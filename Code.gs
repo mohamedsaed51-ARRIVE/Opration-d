@@ -3001,6 +3001,71 @@ function buildMissingAgeSnapshots() {
 // ▶ Single month, e.g. run from the editor after editing the month name below.
 function buildAgeSnapshotOctober() { return buildAgeSnapshot("October"); }
 
+
+// ============================================================
+// STATUS NAMES — أسماء الحالات المكتوبة فعليًا في الشيتات
+// ▶ شغّلها من قائمة ARRIVE Dashboard ← "List Status Names" (أو من محرر Apps Script).
+// تمر على شهور الملف المفتوح (Q1/Q2/Q3/Q4) وتكتب تبويب اسمه STATUS_NAMES فيه كل اسم حالة
+// مع عدد الشحنات (بعد حذف تكرار رقم البوليصة) وتصنيفه في الداشبورد وفي تقرير عمر الشحنة.
+// الحالات «غير مصنف» هي التي يصنفها الداشبورد unknown.
+// ============================================================
+var STATUS_NAMES_SHEET = "STATUS_NAMES";
+var AGE_KIND_LABELS_AR_ = { delivered: "تسليم ناجح", returnClosed: "مرتجع مغلق", returnOpen: "مرتجع مفتوح", inProgress: "قيد التشغيل", other: "أخرى (خارج المعايير)" };
+var DASH_BUCKET_LABELS_AR_ = { delivered: "تم التسليم", returned: "المرتجعات", rejected: "رفض الاستلام", pending: "قيد التشغيل", unknown: "غير مصنف" };
+
+function collectStatusNames_(ss, months) {
+  var rows = [], monthsRead = [];
+  for (var m = 0; m < months.length; m++) {
+    var sheet = ss.getSheetByName(months[m]);
+    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) continue;
+    var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    var headers = values[0], colMap = summaryDetectColumnMap(headers), idx = {}, mapped = Object.keys(colMap);
+    for (var f = 0; f < mapped.length; f++) idx[mapped[f]] = headers.indexOf(colMap[mapped[f]]);
+    if (idx.status === undefined) continue;
+    monthsRead.push(months[m]);
+    var byAwb = {}, noAwb = [];
+    for (var r = 1; r < values.length; r++) {
+      var row = values[r];
+      if (summaryRowIsAllEmpty(row)) continue;
+      var st = summaryNormText(summaryGetField(row, idx, "status"));
+      var awb = summaryNormText(summaryGetField(row, idx, "awb"));
+      if (!awb) continue;
+      var last = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
+      var prev = byAwb[awb];
+      if (!prev || (last ? last.getTime() : -Infinity) >= prev.t) byAwb[awb] = { s: st, t: last ? last.getTime() : -Infinity };
+    }
+    var counts = {};
+    for (var a in byAwb) { if (byAwb.hasOwnProperty(a)) { var k = byAwb[a].s || "(فارغ)"; counts[k] = (counts[k] || 0) + 1; } }
+    for (var name in counts) {
+      if (!counts.hasOwnProperty(name)) continue;
+      var real = name === "(فارغ)" ? "" : name;
+      rows.push({ month: months[m], status: name, count: counts[name],
+        dashboard: DASH_BUCKET_LABELS_AR_[summaryClassifyStatus(real)], age: AGE_KIND_LABELS_AR_[ageClassify_(real)] });
+    }
+  }
+  rows.sort(function (x, y) { return MONTH_ORDER.indexOf(x.month) - MONTH_ORDER.indexOf(y.month) || y.count - x.count; });
+  return { rows: rows, monthsRead: monthsRead };
+}
+
+function listStatusNames() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), id = ss.getId(), quarter = null;
+  for (var q in SPREADSHEET_IDS) { if (SPREADSHEET_IDS[q] === id) quarter = q; }
+  if (!quarter) throw new Error("هذا الملف ليس أحد ملفات Q1/Q2/Q3/Q4.");
+  var months = MONTH_ORDER.filter(function (mo) { return MONTH_SOURCE[mo] === quarter; });
+  var res = collectStatusNames_(ss, months);
+  var out = ss.getSheetByName(STATUS_NAMES_SHEET) || ss.insertSheet(STATUS_NAMES_SHEET);
+  out.clear();
+  var table = [["الشهر", "اسم الحالة (كما هو مكتوب)", "عدد الشحنات", "تصنيفه في الداشبورد", "تصنيفه في تقرير عمر الشحنة"]];
+  res.rows.forEach(function (r) { table.push([r.month, r.status, r.count, r.dashboard, r.age]); });
+  out.getRange(1, 1, table.length, 5).setValues(table);
+  out.setFrozenRows(1);
+  var unknown = res.rows.filter(function (r) { return r.dashboard === DASH_BUCKET_LABELS_AR_.unknown; });
+  Logger.log("STATUS NAMES (" + quarter + ") — months: " + res.monthsRead.join(", ") + "\n" +
+    res.rows.map(function (r) { return r.month + " | " + r.status + " | " + r.count + " | " + r.dashboard + " | " + r.age; }).join("\n"));
+  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + STATUS_NAMES_SHEET + " — " + res.rows.length + " صفًا، منها " + unknown.length + " حالة «غير مصنف»."); } catch (e) { /* run from the editor: no UI */ }
+  return { success: true, quarter: quarter, months: res.monthsRead, statuses: res.rows.length, unclassified: unknown.length };
+}
+
 // ============================================================
 // 6. PAGINATED MONTH DATA
 // ============================================================
@@ -3823,6 +3888,7 @@ function onOpen() {
     .addItem("Age Report: Update Current Quarter Summary", "updateCurrentQuarterAgeSnapshots")
     .addItem("Age Report: Build Missing Months Summary", "buildMissingAgeSnapshots")
     .addItem("Age Report: Update All Months Summary", "buildAllAgeSnapshots")
+    .addItem("List Status Names (أسماء الحالات)", "listStatusNames")
     .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
     .addToUi();
 }
