@@ -168,6 +168,11 @@ function doGet(e) {
       result = getAgeReport(params);
     }
 
+    else if (action === "buildAgeSnapshot") {
+      if (!sheetName) result = { success: false, error: "لم يتم تحديد الشهر." };
+      else result = buildAgeSnapshot(sheetName);
+    }
+
     // --------------------------------------------------------
     // DIAGNOSTIC
     // --------------------------------------------------------
@@ -2701,13 +2706,16 @@ function getAgeReport(params) {
 
   var cache = CacheService.getScriptCache();
   var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
-  var cacheKey = "agerep_v3_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
+  var cacheKey = "agerep_v4_g" + getSnapshotGenerationStamp_() + "_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
   if (!forceRefresh) {
     var cached = cacheGetChunked(cache, cacheKey);
     if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }
   }
 
   var awbMap = {}, rowsRead = 0, dupRemoved = 0, outOfRange = 0, noAwb = 0;
+  var snapRecords = [], sources = [], snapMin = null, snapMax = null;
+  var forceLive = !!(params && (params.live === "1" || params.live === "true"));
+  var useSnapshots = sheetsMode && fromNum === null && toNum === null && !forceLive; // a date filter (or live=1) needs the raw rows; refresh=1 only skips the result cache
   var missingMonths = [], monthsRead = [], skippedMonths = [];
   for (var mi = 0; mi < months.length; mi++) {
     var month = months[mi];
@@ -2716,6 +2724,18 @@ function getAgeReport(params) {
     var ss;
     try { ss = SpreadsheetApp.openById(SPREADSHEET_IDS[quarter]); }
     catch (err) { return { success: false, error: "تعذر فتح Spreadsheet " + quarter + ": " + String(err && err.message ? err.message : err) }; }
+    if (useSnapshots) {
+      var snap = null;
+      try { snap = ageGetSnapshot_(month); } catch (eSnap) { snap = null; }
+      if (snap) {
+        ageSnapshotToRecords_(snap, snapRecords);
+        rowsRead += snap.rowsRead; dupRemoved += snap.duplicates; noAwb += snap.blankAwb;
+        if (snap.minPickup && (snapMin === null || snap.minPickup < snapMin)) snapMin = snap.minPickup;
+        if (snap.maxPickup && (snapMax === null || snap.maxPickup > snapMax)) snapMax = snap.maxPickup;
+        monthsRead.push(month); sources.push({ month: month, source: "snapshot", generatedAt: snap.generatedAt });
+        continue;
+      }
+    }
     var sheet = ss.getSheetByName(month);
     if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) { missingMonths.push(month); continue; }
     var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
@@ -2725,7 +2745,7 @@ function getAgeReport(params) {
     if (idx.awb === undefined || idx.pickup === undefined || idx.status === undefined) {
       return { success: false, error: "أعمدة مطلوبة غير موجودة في شيت " + month + " (رقم البوليصة / تاريخ البيك أب / حالة الشحنة)." };
     }
-    monthsRead.push(month);
+    monthsRead.push(month); sources.push({ month: month, source: "live", generatedAt: null });
     for (var ri = 1; ri < values.length; ri++) {
       var row = values[ri];
       if (summaryRowIsAllEmpty(row)) continue;
@@ -2747,12 +2767,12 @@ function getAgeReport(params) {
     }
   }
 
-  var records = [];
+  var records = snapRecords;
   for (var k in awbMap) { if (awbMap.hasOwnProperty(k)) records.push(awbMap[k]); }
-  var minP = null, maxP = null;
-  for (var ri2 = 0; ri2 < records.length; ri2++) {
-    if (!records[ri2].pickup) continue;
-    var pnum = ageDayNum_(records[ri2].pickup);
+  var minP = snapMin ? ageDayNumFromIso_(snapMin) : null, maxP = snapMax ? ageDayNumFromIso_(snapMax) : null;
+  for (var lk in awbMap) { // live-read rows only (snapshot rows carry placeholder dates; their range comes from the snapshot)
+    if (!awbMap.hasOwnProperty(lk) || !awbMap[lk].pickup) continue;
+    var pnum = ageDayNum_(awbMap[lk].pickup);
     if (minP === null || pnum < minP) minP = pnum;
     if (maxP === null || pnum > maxP) maxP = pnum;
   }
@@ -2762,7 +2782,7 @@ function getAgeReport(params) {
     params: { dateFrom: minP !== null ? ageIsoFromDayNum_(minP) : dateFrom, dateTo: maxP !== null ? ageIsoFromDayNum_(maxP) : dateTo, asOf: asOf,
       boundFrom: dateFrom, boundTo: dateTo, scope: sheetsMode ? "sheets" : "range" },
     standards: groups.map(function (g) { return { key: g.key, name: g.name, market: g.market, delivery: g.delivery, returns: g.returns }; }),
-    months: monthsRead, missingMonths: missingMonths, skippedMonths: skippedMonths,
+    months: monthsRead, missingMonths: missingMonths, skippedMonths: skippedMonths, sources: sources,
     kpis: computed.kpis, groups: computed.groups, unassigned: computed.unassigned, open: computed.open,
     statusBreakdown: computed.statusBreakdown,
     dq: Object.assign({ rowsRead: rowsRead, uniqueShipments: records.length, duplicatesRemoved: dupRemoved, outsidePeriod: outOfRange, blankAwb: noAwb }, computed.dq),
@@ -2774,6 +2794,194 @@ function getAgeReport(params) {
   } catch (eCache) { /* non-fatal */ }
   return result;
 }
+
+
+// ------------------------------------------------------------
+// 5D-2. AGE REPORT — PERSISTENT SNAPSHOTS (ملخص عمر الشحنة المحفوظ في الشيتات)
+//
+// Same idea as the main dashboard's DASHBOARD_SUMMARY: the heavy raw-sheet
+// read is done ONCE (by the menu function / trigger below) and stored in a tab
+// named AGE_SUMMARY inside each quarter spreadsheet. The age report then reads
+// that compact snapshot instead of re-reading 100k+ raw rows on every request.
+//
+// What is stored per month (after de-duplicating AWB inside the month):
+//   closed shipments  -> aggregated counts per [branch, status, age-in-days]
+//   open shipments    -> one row each [awb, branch, status, pickupDate]  (their age
+//                        depends on the report's measurement date, so it is computed at read time)
+// Status classification, group mapping and standards are applied at READ time, so changing
+// the standards / branch groups needs no rebuild. Changing AGE_RETURN_* status rules DOES need a rebuild.
+// A month with no snapshot (or a request with a date filter / refresh=1) falls back to a live raw read.
+// Limitation: AWBs repeated across two different months are not de-duplicated in snapshot mode.
+// ------------------------------------------------------------
+var AGE_SNAPSHOT_SHEET = "AGE_SUMMARY";
+var AGE_SNAPSHOT_VERSION = "1";
+var AGE_SNAPSHOT_CHUNK = 45000;
+var AGE_SNAPSHOT_BATCH_BUDGET_MS = 270000;
+
+function ageSnapshotSheet_(quarter) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS[quarter]);
+  var sh = ss.getSheetByName(AGE_SNAPSHOT_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(AGE_SNAPSHOT_SHEET);
+    sh.getRange(1, 1, 1, 6).setValues([["Month", "Version", "Generated At", "Chunk Index", "Chunk Count", "JSON Chunk"]]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function ageGetSnapshot_(month) {
+  if (!MONTH_SOURCE.hasOwnProperty(month)) return null;
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS[MONTH_SOURCE[month]]);
+  var sh = ss.getSheetByName(AGE_SNAPSHOT_SHEET);
+  if (!sh || sh.getLastRow() < 2) return null;
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  var parts = [];
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i][0] || "").trim() === month && String(rows[i][1] || "") === AGE_SNAPSHOT_VERSION) parts.push(rows[i]);
+  }
+  if (!parts.length) return null;
+  parts.sort(function (a, b) { return Number(a[3]) - Number(b[3]); });
+  var expected = Number(parts[0][4]) || 0;
+  if (!expected || parts.length !== expected) return null;
+  var json = "";
+  for (var j = 0; j < parts.length; j++) {
+    if (Number(parts[j][3]) !== j) return null;
+    json += String(parts[j][5] || "");
+  }
+  try { return JSON.parse(json); } catch (e) { console.log("[AGE SNAPSHOT INVALID] " + month + " " + String(e)); return null; }
+}
+
+function ageSaveSnapshot_(month, snap) {
+  var sh = ageSnapshotSheet_(MONTH_SOURCE[month]);
+  var json = JSON.stringify(snap), chunks = [];
+  for (var i = 0; i < json.length; i += AGE_SNAPSHOT_CHUNK) chunks.push(json.substring(i, i + AGE_SNAPSHOT_CHUNK));
+  if (!chunks.length) chunks.push("{}");
+  var last = sh.getLastRow();
+  if (last >= 2) {
+    var existing = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var r = existing.length - 1; r >= 0; r--) {
+      if (String(existing[r][0] || "").trim() === month) sh.deleteRow(r + 2);
+    }
+  }
+  var values = [];
+  for (var c = 0; c < chunks.length; c++) values.push([month, AGE_SNAPSHOT_VERSION, snap.generatedAt, c, chunks.length, chunks[c]]);
+  sh.getRange(sh.getLastRow() + 1, 1, values.length, 6).setValues(values);
+  SpreadsheetApp.flush();
+  bumpSnapshotGenerationStamp_(); // invalidates cached age-report results (their cache key includes this stamp)
+  return chunks.length;
+}
+
+function ageBuildSnapshot_(month) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS[MONTH_SOURCE[month]]);
+  var sheet = ss.getSheetByName(month);
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return { success: false, error: "الشيت غير موجود أو فارغ: " + month };
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+  var headers = values[0], colMap = summaryDetectColumnMap(headers), idx = {}, mapped = Object.keys(colMap);
+  for (var f = 0; f < mapped.length; f++) idx[mapped[f]] = headers.indexOf(colMap[mapped[f]]);
+  if (idx.awb === undefined || idx.pickup === undefined || idx.status === undefined) {
+    return { success: false, error: "أعمدة مطلوبة غير موجودة في شيت " + month + " (رقم البوليصة / تاريخ البيك أب / حالة الشحنة)." };
+  }
+  var awbMap = {}, rowsRead = 0, dup = 0, noAwb = 0;
+  for (var ri = 1; ri < values.length; ri++) {
+    var row = values[ri];
+    if (summaryRowIsAllEmpty(row)) continue;
+    rowsRead++;
+    var awb = summaryNormText(summaryGetField(row, idx, "awb"));
+    if (!awb) { noAwb++; continue; }
+    var rec = { awb: awb, pickup: summaryParseDate(summaryGetField(row, idx, "pickup")), lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
+      branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status")) };
+    if (awbMap.hasOwnProperty(awb)) {
+      dup++;
+      var et = awbMap[awb].lastStatus ? awbMap[awb].lastStatus.getTime() : -Infinity;
+      var rt = rec.lastStatus ? rec.lastStatus.getTime() : -Infinity;
+      if (rt >= et) awbMap[awb] = rec;
+    } else awbMap[awb] = rec;
+  }
+  var closedAgg = {}, closedKeys = [], open = [], unique = 0, minP = null, maxP = null;
+  for (var k in awbMap) {
+    if (!awbMap.hasOwnProperty(k)) continue;
+    var r = awbMap[k]; unique++;
+    var kind = ageClassify_(r.status);
+    var pn = r.pickup ? ageDayNum_(r.pickup) : null;
+    if (pn !== null) { if (minP === null || pn < minP) minP = pn; if (maxP === null || pn > maxP) maxP = pn; }
+    if (kind === "inProgress" || kind === "returnOpen") {
+      open.push([r.awb, r.branch, r.status, r.pickup ? ageIsoDate_(r.pickup) : null]);
+      continue;
+    }
+    var age;
+    if (pn === null) age = "P";                       // missing / invalid pickup date
+    else if (kind === "other") age = 0;               // age is not used for "other" statuses
+    else if (!r.lastStatus) age = "E";                // closed but no last-status date
+    else age = ageDayNum_(r.lastStatus) - pn;         // may be negative -> flagged by the report
+    var key = r.branch + "\u0001" + r.status + "\u0001" + age;
+    if (!closedAgg[key]) { closedAgg[key] = [r.branch, r.status, age, 0]; closedKeys.push(key); }
+    closedAgg[key][3]++;
+  }
+  var closed = closedKeys.map(function (kk) { return closedAgg[kk]; });
+  return { success: true, snapshot: { version: AGE_SNAPSHOT_VERSION, month: month, generatedAt: new Date().toISOString(),
+    rowsRead: rowsRead, blankAwb: noAwb, duplicates: dup, unique: unique,
+    minPickup: minP !== null ? ageIsoFromDayNum_(minP) : null, maxPickup: maxP !== null ? ageIsoFromDayNum_(maxP) : null,
+    closed: closed, open: open } };
+}
+
+function ageSnapshotToRecords_(snap, out) {
+  var base = new Date(2000, 0, 1), lastCache = {}, i;
+  function lastFor(age) { if (!lastCache.hasOwnProperty(age)) lastCache[age] = new Date(2000, 0, 1 + age); return lastCache[age]; }
+  for (i = 0; i < snap.closed.length; i++) {
+    var c = snap.closed[i], age = c[2], pickup = base, last = null;
+    if (age === "P") pickup = null;
+    else if (age === "E") last = null;
+    else last = lastFor(age);
+    for (var n = 0; n < c[3]; n++) out.push({ awb: "S", branch: c[0], status: c[1], pickup: pickup, lastStatus: last });
+  }
+  for (i = 0; i < snap.open.length; i++) {
+    var o = snap.open[i], pd = null;
+    if (o[3]) { var p = o[3].split("-"); pd = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); }
+    out.push({ awb: o[0], branch: o[1], status: o[2], pickup: pd, lastStatus: null });
+  }
+}
+
+// ---- builders (menu / trigger / doGet) ----
+function buildAgeSnapshot(month) {
+  if (!MONTH_SOURCE.hasOwnProperty(month)) return { success: false, error: "شهر غير معروف: " + month };
+  var t0 = new Date().getTime();
+  var built = ageBuildSnapshot_(month);
+  if (!built.success) return built;
+  var chunks = ageSaveSnapshot_(month, built.snapshot);
+  var sn = built.snapshot;
+  return { success: true, month: month, uniqueShipments: sn.unique, openShipments: sn.open.length, closedRowsAggregated: sn.closed.length,
+    chunks: chunks, generatedAt: sn.generatedAt, durationMs: new Date().getTime() - t0 };
+}
+
+// Builds snapshots for the given months, stopping before the Apps Script time ceiling. Months not reached are listed.
+function ageBuildSnapshotsFor_(months) {
+  var t0 = new Date().getTime(), done = [], failed = [], notReached = [];
+  for (var i = 0; i < months.length; i++) {
+    if (new Date().getTime() - t0 > AGE_SNAPSHOT_BATCH_BUDGET_MS) { notReached.push(months[i]); continue; }
+    try {
+      var r = buildAgeSnapshot(months[i]);
+      if (r.success) done.push(months[i]); else failed.push({ month: months[i], error: r.error });
+    } catch (e) { failed.push({ month: months[i], error: String(e && e.message ? e.message : e) }); }
+  }
+  var res = { success: failed.length === 0, done: done, failed: failed, notReached: notReached, durationMs: new Date().getTime() - t0 };
+  console.log("[AGE SNAPSHOTS] " + JSON.stringify(res));
+  return res;
+}
+
+// ▶ Run from the "ARRIVE Dashboard" menu (or Apps Script editor): updates the age summary of the CURRENT quarter's months.
+function updateCurrentQuarterAgeSnapshots() {
+  var q = Math.floor(new Date().getMonth() / 3), months = MONTH_ORDER.slice(q * 3, q * 3 + 3);
+  return ageBuildSnapshotsFor_(months);
+}
+// ▶ Updates the age summary of all 12 months (months with no data are reported as failed/empty; re-run to continue if some were not reached).
+function buildAllAgeSnapshots() { return ageBuildSnapshotsFor_(MONTH_ORDER.slice()); }
+// ▶ Builds only the months that have no age snapshot yet.
+function buildMissingAgeSnapshots() {
+  var missing = MONTH_ORDER.filter(function (m) { try { return !ageGetSnapshot_(m); } catch (e) { return true; } });
+  return ageBuildSnapshotsFor_(missing);
+}
+// ▶ Single month, e.g. run from the editor after editing the month name below.
+function buildAgeSnapshotOctober() { return buildAgeSnapshot("October"); }
 
 // ============================================================
 // 6. PAGINATED MONTH DATA
@@ -3589,6 +3797,9 @@ function onOpen() {
     .addItem("Update All 12 Month Summaries", "buildAllDashboardSummaries")
     .addItem("Build Missing Month Snapshots Only", "buildMissingMonthSnapshots")
     .addItem("Build Next Snapshot Batch (resumable)", "buildNextSummaryBatch")
+    .addItem("Age Report: Update Current Quarter Summary", "updateCurrentQuarterAgeSnapshots")
+    .addItem("Age Report: Build Missing Months Summary", "buildMissingAgeSnapshots")
+    .addItem("Age Report: Update All Months Summary", "buildAllAgeSnapshots")
     .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
     .addToUi();
 }
