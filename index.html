@@ -2043,7 +2043,7 @@ async function loadPersistedSlaSettings(){
     const url = buildAppsScriptUrl({ action:'getSlaSettings' });
     const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
     if(!res.ok) throw new Error('HTTP '+res.status);
-    const payload = JSON.parse(await res.text());
+    const payload = parseServerJson(await res.text());
     if(!payload || payload.success !== true) throw new Error('استجابة غير صالحة من getSlaSettings');
     if(payload.slaTargetDefault!=null && !isNaN(payload.slaTargetDefault) && payload.slaTargetDefault>0){
       SLA_TARGET_DAYS = Number(payload.slaTargetDefault);
@@ -2069,7 +2069,7 @@ async function savePersistedSlaSettings(){
     });
     const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
     if(!res.ok) throw new Error('HTTP '+res.status);
-    const payload = JSON.parse(await res.text());
+    const payload = parseServerJson(await res.text());
     if(!payload || payload.success !== true) throw new Error((payload&&payload.error)||'فشل حفظ إعدادات SLA');
     console.info('[SLA SETTINGS SAVED]', { slaTargetDefault: SLA_TARGET_DAYS, branchOverrideCount: Object.keys(BRANCH_SLA_TARGETS).length });
     return true;
@@ -2173,6 +2173,18 @@ function monthDisplayName(month){
 // fetch() with no timeout meant a slow/cold-starting Apps Script deployment,
 // or a silently stalled connection, left the awaiting caller pending forever
 // — even inside a try/catch, since a promise that never settles never throws.
+// ---- أمان: تعقيم كل ما يصل من الخادم + ترميز عند الإدراج ----
+// الأسماء (فروع/عملاء/حالات/مناطق) لا تحتوي أصلًا على < > " ؛ تُستبدل بمشابهاتها عند نقطة الدخول (القيم والمفاتيح).
+const SAFEC = {'<':'\u2039','>':'\u203a','"':'\u2033'};
+function safeTxt(v){ return String(v).replace(/[<>"]/g, c=>SAFEC[c]); }
+function deepSafe(x){
+  if(typeof x === 'string') return safeTxt(x);
+  if(Array.isArray(x)) return x.map(deepSafe);
+  if(x && typeof x === 'object'){ const o = {}; for(const k of Object.keys(x)) o[safeTxt(k)] = deepSafe(x[k]); return o; }
+  return x;
+}
+function parseServerJson(text){ return deepSafe(JSON.parse(text)); }
+function escH(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function fetchWithTimeout(url, options, timeoutMs){
   timeoutMs = timeoutMs || FETCH_TIMEOUT_MS;
   const controller = new AbortController();
@@ -2720,7 +2732,8 @@ function parseExcelDate(v){
 }
 function dateOnly(d){ return d ? new Date(d.getFullYear(), d.getMonth(), d.getDate()) : null; }
 function isoDate(d){ if(!d) return ''; const p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
-function csvEscape(v){ if(v===null||v===undefined) return ''; const s=String(v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
+// Formula Injection: نص يبدأ بـ = + - @ Tab CR يُسبق بـ ' (الأرقام الحقيقية لا تُمس)
+function csvEscape(v){ if(v===null||v===undefined) return ''; let s=String(v); if(typeof v==='string' && /^[=+\-@\t\r]/.test(s)) s="'"+s; return /[",\n\r']/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
 function downloadCSV(filename, rows){
   const csv = rows.map(r=>r.map(csvEscape).join(',')).join('\r\n');
   const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
@@ -2766,7 +2779,7 @@ function fetchAvailableMonths(){
     const url = buildAppsScriptUrl({ action:'listSheets' });
     const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
     if(!res.ok) throw new Error('HTTP '+res.status);
-    const payload = JSON.parse(await res.text());
+    const payload = parseServerJson(await res.text());
     if(!payload || payload.success !== true || !Array.isArray(payload.sheets)) throw new Error('unsupported listSheets response');
     return payload.sheets;
   });
@@ -2848,7 +2861,7 @@ function fetchMonthDashboardSummary(month, opts){
     }
     const text = await res.text();
     let payload;
-    try{ payload = JSON.parse(text); }
+    try{ payload = parseServerJson(text); }
     catch(parseErr){ const err = new Error('استجابة غير صالحة من مصدر البيانات.'); err.kind='error'; throw err; }
     if(payload && payload.success === false){
       const notFound = /غير موجود/.test(String(payload.error||''));
@@ -2886,7 +2899,7 @@ function fetchSheetRows(month, opts){
       const text = await res.text();
       let payload;
       try{
-        payload = JSON.parse(text);
+        payload = parseServerJson(text);
       }catch(parseErr){
         const err = new Error('استجابة غير صالحة من مصدر البيانات (تعذر تحليل JSON). تأكد إن الرابط بتاع /exec مش /dev.');
         err.kind = 'error'; throw err;
@@ -3528,7 +3541,7 @@ async function handleWorkbook(wb, fileName){
   let bestSheet = null, bestRows = -1, bestHeaders = null, bestData = null;
   for(const sn of wb.SheetNames){
     const ws = wb.Sheets[sn];
-    const json = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null, blankrows:false});
+    const json = deepSafe(XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null, blankrows:false})); // أمان: ملف مرفوع يدويًا
     const parsed = findHeaderRowAndData(json);
     if(!parsed) continue;
     if(parsed.dataRows.length > bestRows){
@@ -4150,7 +4163,7 @@ function mgmtPopulateMonthSelects(){
   const fromSel = document.getElementById('mgmtFromMonth');
   const toSel = document.getElementById('mgmtToMonth');
   if(!fromSel || !toSel || !chrono.length) return;
-  const optionsHtml = chrono.map(m=>`<option value="${m.replace(/"/g,'&quot;')}">${m}</option>`).join('');
+  const optionsHtml = chrono.map(m=>`<option value="${escH(m)}">${escH(m)}</option>`).join('');
   if(fromSel.options.length !== chrono.length) fromSel.innerHTML = optionsHtml;
   if(toSel.options.length !== chrono.length) toSel.innerHTML = optionsHtml;
   // Default period = a SINGLE month (the latest available), never the full
@@ -4174,8 +4187,8 @@ function mgmtPopulateEntityFilters(months){
   }
   const branchSel = document.getElementById('mgmtBranchFilter');
   const custSel = document.getElementById('mgmtCustomerFilter');
-  if(branchSel){ branchSel.innerHTML = '<option value="">كل الفروع</option>' + [...branchNames].sort((a,b)=>a.localeCompare(b,'ar')).map(n=>`<option value="${n.replace(/"/g,'&quot;')}">${n}</option>`).join(''); branchSel.value = branchNames.has(MGMT.branch)?MGMT.branch:''; MGMT.branch = branchSel.value; }
-  if(custSel){ custSel.innerHTML = '<option value="">كل العملاء</option>' + [...customerNames].sort((a,b)=>a.localeCompare(b,'ar')).map(n=>`<option value="${n.replace(/"/g,'&quot;')}">${n}</option>`).join(''); custSel.value = customerNames.has(MGMT.customer)?MGMT.customer:''; MGMT.customer = custSel.value; }
+  if(branchSel){ branchSel.innerHTML = '<option value="">كل الفروع</option>' + [...branchNames].sort((a,b)=>a.localeCompare(b,'ar')).map(n=>`<option value="${escH(n)}">${escH(n)}</option>`).join(''); branchSel.value = branchNames.has(MGMT.branch)?MGMT.branch:''; MGMT.branch = branchSel.value; }
+  if(custSel){ custSel.innerHTML = '<option value="">كل العملاء</option>' + [...customerNames].sort((a,b)=>a.localeCompare(b,'ar')).map(n=>`<option value="${escH(n)}">${escH(n)}</option>`).join(''); custSel.value = customerNames.has(MGMT.customer)?MGMT.customer:''; MGMT.customer = custSel.value; }
 }
 
 /* ---------- KPI cards ---------- */
@@ -4226,7 +4239,7 @@ function mgmtRenderEntityAnalysis(bodyId, series, selectedName, months, entityLa
   if(!body) return;
   if(!selectedName){ body.innerHTML = `<div class="mgmt-empty-note">اختر ${entityLabel} من القوائم أعلى الصفحة لعرض تحليل تفصيلي له عبر الفترة المختارة.</div>`; return; }
   const entry = series.get(selectedName);
-  if(!entry){ body.innerHTML = `<div class="mgmt-empty-note">لا توجد بيانات لـ "${selectedName}" في الفترة المختارة.</div>`; return; }
+  if(!entry){ body.innerHTML = `<div class="mgmt-empty-note">لا توجد بيانات لـ "${escH(selectedName)}" في الفترة المختارة.</div>`; return; }
   const st = mgmtEntryStats(entry, months);
   const bestMonth = months.filter(m=>entry.byMonth[m]).sort((a,b)=>(entry.byMonth[b].count)-(entry.byMonth[a].count))[0];
   const worstMonth = months.filter(m=>entry.byMonth[m]).sort((a,b)=>(entry.byMonth[a].count)-(entry.byMonth[b].count))[0];
@@ -4281,7 +4294,7 @@ async function mgmtRenderBranchCustomer(months){
   if(myMgmtToken !== _mgmtRenderToken) return; // superseded by a newer render (e.g. a different branch was selected meanwhile) — never overwrite it
   const custSeries = mgmtBuildSeries('client', months, { branchScoped });
   const entries = mgmtSortedEntries(custSeries, months);
-  if(!entries.length){ body.innerHTML = `<div class="mgmt-empty-note">لا يوجد عملاء لفرع "${branchAtRequestTime}" في الفترة المختارة.</div>`; return; }
+  if(!entries.length){ body.innerHTML = `<div class="mgmt-empty-note">لا يوجد عملاء لفرع "${escH(branchAtRequestTime)}" في الفترة المختارة.</div>`; return; }
   let html = `<div class="mgmt-bxc-block"><div class="mgmt-bxc-head"><span>${branchAtRequestTime}</span><span style="font-weight:400; font-size:11.5px; color:var(--text-faint);">${entries.length} عميل</span></div>
   <div class="table-scroll"><table class="data-table"><thead><tr><th>العميل</th><th>Volume</th><th>S.R %</th><th>Growth</th><th>الاتجاه</th></tr></thead><tbody>`;
   html += entries.map(e=>`<tr><td>${e.name}</td><td>${fmtInt(e.stats.totalVolume)}</td><td>${fmtPct(e.stats.avgSr)}</td><td>${fmtPct(e.stats.volGrowth,1)}</td><td><span class="mgmt-trend-tag ${e.stats.trend.cls}">${e.stats.trend.arrow} ${e.stats.trend.label}</span></td></tr>`).join('');
@@ -6895,7 +6908,7 @@ function renderDqTabFromServer(serverSummary){
       <table style="width:100%;font-size:13px;"><thead><tr><th>الحالة الأصلية</th><th>عدد الشحنات</th><th>النسبة</th><th>التصنيف الحالي</th></tr></thead><tbody>${rows}</tbody></table>
     </div>`;
   }else if(dq.unknownStatusList && dq.unknownStatusList.length){
-    document.getElementById('dqGrid').innerHTML += `<div class="dq-card bad" style="grid-column:1/-1;"><div class="l" style="margin-top:0;">قيم الحالة غير المصنفة الموجودة فعلياً في الملف: <b>${dq.unknownStatusList.join('، ')}</b> — يجب إضافتها إلى تصنيف الحالات من تبويب الإعدادات.</div></div>`;
+    document.getElementById('dqGrid').innerHTML += `<div class="dq-card bad" style="grid-column:1/-1;"><div class="l" style="margin-top:0;">قيم الحالة غير المصنفة الموجودة فعلياً في الملف: <b>${dq.unknownStatusList.map(escH).join('، ')}</b> — يجب إضافتها إلى تصنيف الحالات من تبويب الإعدادات.</div></div>`;
   }
 
   // duplicateRecords is a compact, server-computed diagnostic list (capped —
@@ -7215,7 +7228,7 @@ async function runAgeReport(force){
     const res = await fetchWithTimeout(buildAppsScriptUrl(params), {cache:'no-store'}, 240000);
     if(!res.ok) throw new Error('تعذر الوصول إلى مصدر البيانات (HTTP '+res.status+').');
     let payload; const text = await res.text();
-    try{ payload = JSON.parse(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
+    try{ payload = parseServerJson(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
     if(payload && payload.success === false){
       // an older Code.gs deployment does not know the `sheets` parameter (month-linked mode) and asks for explicit dates
       if(/يجب تحديد تاريخ البداية والنهاية/.test(String(payload.error||''))) throw new Error('نسخة Code.gs المنشورة في Apps Script قديمة. الصق آخر Code.gs ثم Deploy ← Manage deployments ← Edit ← New version ← Deploy، وأعد المحاولة.');
