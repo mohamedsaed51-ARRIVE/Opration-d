@@ -213,6 +213,14 @@ function doGet(e) {
       result = saveBranchConfigPayload(params);
     }
 
+    else if (action === "getAgeStandards") {
+      result = getAgeStandardsPayload();
+    }
+
+    else if (action === "saveAgeStandards") {
+      result = saveAgeStandardsPayload(params);
+    }
+
     else if (action === "getStatusMapping") {
       result = getStatusMappingPayload();
     }
@@ -598,6 +606,44 @@ function saveBranchConfigPayload(params) {
     return { success: true, config: clean };
   } catch (e) {
     console.log("[BRANCH CONFIG SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// ============================================================
+// 4F. AGE STANDARDS PER REGION (days), entered in the Settings tab
+// ============================================================
+// { cairo:{market,delivery,returns}, delta:{...}, upper:{...} } — used as the base of
+// ageResolveGroups_ (a per-request override still wins; built-in AGE_REPORT_GROUPS values are the fallback).
+var AGE_STANDARDS_PROPERTY_KEY = "AGE_STANDARDS_JSON";
+function getPersistedAgeStandards_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(AGE_STANDARDS_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[AGE STANDARDS READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getAgeStandardsPayload() { return { success: true, standards: getPersistedAgeStandards_() }; }
+function saveAgeStandardsPayload(params) {
+  try {
+    var parsed = (params && params.standards) ? JSON.parse(params.standards) : {};
+    var clean = {};
+    for (var i = 0; i < BRANCH_REGION_KEYS.length; i++) {
+      var k = BRANCH_REGION_KEYS[i], o = parsed[k] || {}, entry = {}, any = false;
+      ["market", "delivery", "returns"].forEach(function (f) {
+        var n = Number(o[f]);
+        if (o[f] !== null && o[f] !== undefined && o[f] !== "" && isFinite(n) && n > 0) { entry[f] = n; any = true; }
+      });
+      if (any) clean[k] = entry;
+    }
+    PropertiesService.getScriptProperties().setProperty(AGE_STANDARDS_PROPERTY_KEY, JSON.stringify(clean));
+    return { success: true, standards: clean };
+  } catch (e) {
+    console.log("[AGE STANDARDS SAVE FAILED] " + String(e && e.message ? e.message : e));
     return { success: false, error: String(e && e.message ? e.message : e) };
   }
 }
@@ -2635,12 +2681,12 @@ function ageSumKinds_(k) { return k.delivered.count + k.returnClosed.count + k.r
 // Resolves the effective groups, applying optional overrides
 // {cairo:{market,delivery,returns}, ...}. Non-positive / non-numeric values are ignored.
 function ageResolveGroups_(overrides) {
-  var out = [];
+  var out = [], persistedStd = getPersistedAgeStandards_();
   for (var i = 0; i < AGE_REPORT_GROUPS.length; i++) {
-    var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {};
+    var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {}, saved = persistedStd[g.key] || {};
     function pick(v, d) { var n = Number(v); return (v !== undefined && v !== null && v !== "" && isFinite(n) && n > 0) ? n : d; }
     out.push({ key: g.key, name: g.name, branches: g.branches.slice(),
-      market: pick(o.market, g.marketDays), delivery: pick(o.delivery, g.companyDeliveryDays), returns: pick(o.returns, g.companyReturnDays) });
+      market: pick(o.market, pick(saved.market, g.marketDays)), delivery: pick(o.delivery, pick(saved.delivery, g.companyDeliveryDays)), returns: pick(o.returns, pick(saved.returns, g.companyReturnDays)) });
   }
   // Region chosen per branch in Settings wins over the built-in lists.
   var cfg = getPersistedBranchConfig_();

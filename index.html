@@ -1249,6 +1249,16 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
 
     <div class="card" style="margin-top:16px;">
       <div class="table-toolbar">
+        <div class="card-title" style="margin-bottom:0;">حدود الأيام لكل إقليم (عمر الشحنة)</div>
+        <button class="btn-primary btn-sm" id="applyAgeStdBtn" type="button">حفظ حدود الأيام</button>
+      </div>
+      <div class="card-sub">اكتب عدد الأيام المعتمد لكل إقليم، ثم احفظ واضغط «تحديث الداش بورد». تُطبَّق على تقرير عمر الشحنة بحسب الإقليم المحدد لكل فرع في جدول الفروع.</div>
+      <div id="ageStdSaveStatus" class="helptext" style="margin:6px 0 10px; display:none;" aria-live="polite"></div>
+      <div class="table-scroll"><table class="data-table" id="ageStdSettingsTable"></table></div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="table-toolbar">
         <div class="card-title" style="margin-bottom:0;">جدول الفروع (الإقليم وSLA)</div>
         <button class="btn-primary btn-sm" id="applyBranchSlaBtn">حفظ إعدادات الفروع</button>
       </div>
@@ -7238,15 +7248,63 @@ function ageRenderStdTable(){
   }));
 }
 
+let AGE_STD_FROM_SERVER = false;
+async function loadPersistedAgeStd(){
+  try{
+    if(!effectiveWebAppUrl()) return;
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'getAgeStandards' }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true || !payload.standards) return;
+    Object.keys(AGE_DEFAULT_STD).forEach(k=>['market','delivery','returns'].forEach(f=>{
+      const v = Number(payload.standards[k] && payload.standards[k][f]); if(isFinite(v) && v>0) AGE.std[k][f] = v;
+    }));
+    AGE_STD_FROM_SERVER = true;
+    ageSavePrefs();
+    try{ ageRenderStdTable(); renderAgeStdSettings(); }catch(e){}
+  }catch(e){ console.warn('[AGE STANDARDS LOAD FAILED]', e); }
+}
+function renderAgeStdSettings(){
+  const t = document.getElementById('ageStdSettingsTable'); if(!t) return;
+  const st = 'width:80px; padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:var(--mono); font-size:12px;';
+  t.innerHTML = '<thead><tr><th>الإقليم</th><th>معيار السوق (تسليم) — يوم</th><th>معيار الشركة للتسليم — يوم</th><th>معيار الشركة للمرتجع — يوم</th></tr></thead><tbody>'
+    + Object.keys(AGE_GROUP_NAMES).map(k=>`<tr><td>${AGE_GROUP_NAMES[k]}</td>`
+      + ['market','delivery','returns'].map(f=>`<td><input type="number" min="1" step="1" data-g="${k}" data-f="${f}" value="${AGE.std[k][f]}" style="${st}"></td>`).join('') + '</tr>').join('') + '</tbody>';
+}
+function initAgeStdSettings(){
+  renderAgeStdSettings();
+  const btn = document.getElementById('applyAgeStdBtn'); if(!btn) return;
+  btn.addEventListener('click', async ()=>{
+    const el = document.getElementById('ageStdSaveStatus'); const old = JSON.parse(JSON.stringify(AGE.std));
+    const next = JSON.parse(JSON.stringify(AGE.std));
+    document.querySelectorAll('#ageStdSettingsTable input[data-g]').forEach(inp=>{
+      const v = Number(inp.value); if(isFinite(v) && v>0) next[inp.dataset.g][inp.dataset.f] = Math.round(v);
+    });
+    btn.disabled = true; el.style.display='block'; el.style.color=''; el.textContent='جاري الحفظ...';
+    try{
+      const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'saveAgeStandards', standards: JSON.stringify(next) }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+      const payload = JSON.parse(await res.text());
+      if(!res.ok || !payload || payload.success !== true) throw new Error((payload&&payload.error)||'HTTP '+res.status);
+      AGE.std = next; AGE_STD_FROM_SERVER = true; ageSavePrefs(); try{ ageRenderStdTable(); }catch(e){}
+      el.style.color='var(--positive)'; el.textContent='تم الحفظ ✓ — اضغط «تحديث الداش بورد» لتطبيقه.';
+    }catch(e){
+      AGE.std = old; renderAgeStdSettings();
+      el.style.color='var(--negative)'; el.textContent='تعذر الحفظ على الخادم — لم يتغير شيء.';
+    }
+    btn.disabled = false;
+  });
+}
+
 function initShipAge(){
   const prefs = ageLoadPrefs();
-  if(prefs && prefs.std){
+  if(prefs && prefs.std && !AGE_STD_FROM_SERVER){
     Object.keys(AGE_DEFAULT_STD).forEach(k=>['market','delivery','returns'].forEach(f=>{
       const v = Number(prefs.std[k] && prefs.std[k][f]); if(isFinite(v) && v>0) AGE.std[k][f] = v;
     }));
   }
   document.getElementById('ageAsOf').value = ageIso(new Date());
   ageRenderStdTable();
+  initAgeStdSettings();
   document.getElementById('ageRunBtn').addEventListener('click', ()=>runAgeReport(true));
   document.getElementById('ageDocxBtn').addEventListener('click', exportAgeDocx);
   const rb = document.getElementById('rebuildDashboardBtn'); if(rb) rb.addEventListener('click', ()=>rebuildSummariesThenRefresh());
@@ -8075,6 +8133,7 @@ async function init(){
   // correct branch-specific SLA configuration instead of the hardcoded 2/{}.
   try{ await loadPersistedStatusMapping(); }catch(e){}
   try{ await loadPersistedBranchConfig(); }catch(e){}
+  try{ await loadPersistedAgeStd(); }catch(e){}
   try{ await loadPersistedSlaSettings(); }
   catch(slaErr){ console.error('[INIT] loadPersistedSlaSettings failed — continuing with default SLA settings', slaErr); }
 
