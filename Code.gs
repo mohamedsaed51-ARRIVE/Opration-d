@@ -2970,7 +2970,7 @@ function getAgeReport(params) {
 
   var cache = CacheService.getScriptCache();
   var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
-  var cacheKey = "agerep_v4_g" + getSnapshotGenerationStamp_() + "_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns, g.branches]; })) + "|" + JSON.stringify(getPersistedBranchConfig_()));
+  var cacheKey = "agerep_v4_g" + getSnapshotGenerationStamp_() + "_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns, g.branches]; })) + "|" + JSON.stringify(getPersistedBranchConfig_()) + "|" + statusMappingSig_());
   if (!forceRefresh) {
     var cached = cacheGetChunked(cache, cacheKey);
     if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }
