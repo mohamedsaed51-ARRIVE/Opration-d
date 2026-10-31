@@ -2080,6 +2080,34 @@ async function savePersistedSlaSettings(){
 // Per-branch region + market SLA (Settings branch table). Stored server-side (Code.gs BRANCH_CONFIG_JSON).
 let BRANCH_CONFIG = {};
 let BUILTIN_BRANCH_REGIONS = {};
+let BRANCH_CONFIG_LOADED = false, BRANCH_SEED_DONE = false;
+// One-time automatic fill: a branch tied to a region (built-in lists) that has no saved branch settings is saved with
+// that region's market / company days. Never overwrites anything already saved; skipped when settings could not be loaded.
+async function autoSeedBranchDefaults(){
+  if(BRANCH_SEED_DONE || !BRANCH_CONFIG_LOADED || !AGE_STD_FROM_SERVER) return;
+  BRANCH_SEED_DONE = true;
+  const oldTargets = Object.assign({}, BRANCH_SLA_TARGETS), oldConfig = JSON.parse(JSON.stringify(BRANCH_CONFIG));
+  let changed = 0;
+  (STATE.dims.branches||[]).forEach(b=>{
+    if(BRANCH_CONFIG[b]) return;
+    const region = branchEffectiveRegion(b), rs = region ? AGE.std[region] : null;
+    if(!rs) return;
+    BRANCH_CONFIG[b] = { region, slaMarket: rs.market, slaCompany: rs.delivery };
+    if(BRANCH_SLA_TARGETS[b]===undefined){ if(rs.market !== SLA_TARGET_DAYS) BRANCH_SLA_TARGETS[b] = rs.market; }
+    changed++;
+  });
+  if(!changed) return;
+  const ok = (await savePersistedBranchConfig()) && (await savePersistedSlaSettings());
+  if(ok){
+    invalidateSlaDependentCaches();
+    try{ renderBranchSlaTable(); }catch(e){}
+    console.info('[BRANCH DEFAULTS SEEDED]', changed);
+    showSlaSaveStatus(`تم حفظ مدد الأقاليم تلقائياً لـ ${changed} فرع — اضغط «تحديث الداش بورد» لتطبيقها على الأرقام.`, 'ok');
+  }else{
+    BRANCH_SLA_TARGETS = oldTargets; BRANCH_CONFIG = oldConfig; BRANCH_SEED_DONE = false;
+    console.warn('[BRANCH DEFAULTS SEED FAILED] — nothing changed');
+  }
+}
 function normBranchKey(n){ return String(n||'').trim().replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').replace(/\s+/g,' ').replace(/^فرع\s+/,'').replace(/\s+/g,''); }
 function branchEffectiveRegion(b){ const c = BRANCH_CONFIG[b]; return (c && c.region) || BUILTIN_BRANCH_REGIONS[normBranchKey(b)] || ''; }
 const REGION_OPTIONS = [['','غير محدد'],['cairo','القاهرة والإسكندرية'],['delta','الدلتا والقنال'],['upper','الصعيد']];
@@ -2091,6 +2119,7 @@ async function loadPersistedBranchConfig(){
     const payload = JSON.parse(await res.text());
     if(payload && payload.success === true && payload.config && typeof payload.config === 'object') BRANCH_CONFIG = payload.config;
     if(payload && payload.builtinRegions && typeof payload.builtinRegions === 'object') BUILTIN_BRANCH_REGIONS = payload.builtinRegions;
+    if(payload && payload.success === true) BRANCH_CONFIG_LOADED = true;
   }catch(e){ console.warn('[BRANCH CONFIG LOAD FAILED]', e); }
 }
 async function savePersistedBranchConfig(){
@@ -3627,6 +3656,7 @@ function buildDimensionsFromFacets(facets){
   STATE.dims.provinces = arSort(facets.provinces);
   STATE.dims.areas = arSort(facets.areasAll);
   STATE.dims.branches = arSort(facets.branches);
+  setTimeout(()=>{ autoSeedBranchDefaults().catch(e=>console.warn('[BRANCH SEED]', e)); }, 0);
   STATE.dims.clients = arSort(facets.clients);
   STATE.dims.statuses = arSort(facets.statuses);
   STATE.dims.attempts = [ATTEMPT_LABELS.first, ATTEMPT_LABELS.second, ATTEMPT_LABELS.other, ATTEMPT_LABELS.na];
