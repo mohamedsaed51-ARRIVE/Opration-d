@@ -205,6 +205,14 @@ function doGet(e) {
     }
 
     // STATUS MAPPING: manual status -> category overrides chosen in the Settings tab.
+    else if (action === "getBranchConfig") {
+      result = getBranchConfigPayload();
+    }
+
+    else if (action === "saveBranchConfig") {
+      result = saveBranchConfigPayload(params);
+    }
+
     else if (action === "getStatusMapping") {
       result = getStatusMappingPayload();
     }
@@ -548,6 +556,48 @@ function saveStatusMappingPayload(params) {
     return { success: true, mapping: clean };
   } catch (e) {
     console.log("[STATUS MAPPING SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// ============================================================
+// 4E. BRANCH CONFIG (region + market SLA), chosen in the Settings tab
+// ============================================================
+// { "<branch>": { region: "cairo"|"delta"|"upper"|"", slaMarket: number|null } }
+// region decides which shipment-age group (القاهرة والإسكندرية / الدلتا والقنال / الصعيد) a branch is
+// aged under; a branch with no region keeps the built-in AGE_REPORT_GROUPS assignment.
+// The company SLA per branch stays in SLA_SETTINGS_JSON (branchSlaTargets).
+var BRANCH_CONFIG_PROPERTY_KEY = "BRANCH_CONFIG_JSON";
+var BRANCH_REGION_KEYS = ["cairo", "delta", "upper"];
+function getPersistedBranchConfig_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(BRANCH_CONFIG_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[BRANCH CONFIG READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getBranchConfigPayload() { return { success: true, config: getPersistedBranchConfig_() }; }
+function saveBranchConfigPayload(params) {
+  try {
+    var parsed = (params && params.config) ? JSON.parse(params.config) : {};
+    var clean = {};
+    for (var b in parsed) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, b)) continue;
+      var name = summaryNormText(b), e = parsed[b] || {};
+      if (!name) continue;
+      var region = BRANCH_REGION_KEYS.indexOf(e.region) >= 0 ? e.region : "";
+      var m = Number(e.slaMarket);
+      var slaMarket = (e.slaMarket !== null && e.slaMarket !== undefined && e.slaMarket !== "" && isFinite(m) && m > 0) ? m : null;
+      if (region || slaMarket !== null) clean[name] = { region: region, slaMarket: slaMarket };
+    }
+    PropertiesService.getScriptProperties().setProperty(BRANCH_CONFIG_PROPERTY_KEY, JSON.stringify(clean));
+    return { success: true, config: clean };
+  } catch (e) {
+    console.log("[BRANCH CONFIG SAVE FAILED] " + String(e && e.message ? e.message : e));
     return { success: false, error: String(e && e.message ? e.message : e) };
   }
 }
@@ -2589,8 +2639,21 @@ function ageResolveGroups_(overrides) {
   for (var i = 0; i < AGE_REPORT_GROUPS.length; i++) {
     var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {};
     function pick(v, d) { var n = Number(v); return (v !== undefined && v !== null && v !== "" && isFinite(n) && n > 0) ? n : d; }
-    out.push({ key: g.key, name: g.name, branches: g.branches,
+    out.push({ key: g.key, name: g.name, branches: g.branches.slice(),
       market: pick(o.market, g.marketDays), delivery: pick(o.delivery, g.companyDeliveryDays), returns: pick(o.returns, g.companyReturnDays) });
+  }
+  // Region chosen per branch in Settings wins over the built-in lists.
+  var cfg = getPersistedBranchConfig_();
+  for (var bn in cfg) {
+    if (!Object.prototype.hasOwnProperty.call(cfg, bn) || !cfg[bn] || !cfg[bn].region) continue;
+    var norm = ageNormBranch_(bn), target = null, gi2, bj;
+    for (gi2 = 0; gi2 < out.length; gi2++) {
+      var kept = [];
+      for (bj = 0; bj < out[gi2].branches.length; bj++) if (ageNormBranch_(out[gi2].branches[bj]) !== norm) kept.push(out[gi2].branches[bj]);
+      out[gi2].branches = kept;
+      if (out[gi2].key === cfg[bn].region) target = out[gi2];
+    }
+    if (target) target.branches.push(summaryNormText(bn));
   }
   return out;
 }

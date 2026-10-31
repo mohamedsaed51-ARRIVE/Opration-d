@@ -1228,17 +1228,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <div id="columnMappingBox"></div>
       </div>
       <div class="card">
-        <div class="card-title">إعداد SLA</div>
-        <div class="settings-input-row">
-          <label style="font-size:12.5px; font-weight:700;">مدة SLA المستهدفة (بالأيام):</label>
-          <input type="number" id="slaTargetInput" min="0.5" step="0.5" value="2">
-          <button class="btn-secondary btn-sm" id="applySlaBtn">تطبيق</button>
-        </div>
-        <div class="helptext">
-          Start Date = تاريخ استلام البيك أب &nbsp;|&nbsp; End Date = تاريخ آخر حالة (تُستخدم كأقرب تقريب لتاريخ التسليم الفعلي لعدم وجود عمود منفصل لتاريخ التسليم في الملف).<br>
-          شحنة تُعتبر <b>Within SLA</b> إذا كانت مدة التسليم الفعلية ≤ SLA Target، وإلا فهي <b>SLA Breached</b>. يُحسب فقط على الشحنات المُسلَّمة.
-        </div>
-        <div class="card-title" style="margin-top:18px;">تصنيف محاولة التسليم (أولى / ثانية / باقي المحاولات)</div>
+        <div class="card-title">تصنيف محاولة التسليم (أولى / ثانية / باقي المحاولات)</div>
         <div class="settings-input-row">
           <label style="font-size:12.5px; font-weight:700;">أقصى فرق أيام لـ"محاولة أولى":</label>
           <input type="number" id="attemptT1Input" min="0" step="1" value="1">
@@ -1259,10 +1249,10 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
 
     <div class="card" style="margin-top:16px;">
       <div class="table-toolbar">
-        <div class="card-title" style="margin-bottom:0;">SLA مخصص لكل فرع</div>
-        <button class="btn-primary btn-sm" id="applyBranchSlaBtn">تطبيق على كل الفروع</button>
+        <div class="card-title" style="margin-bottom:0;">جدول الفروع (الإقليم وSLA)</div>
+        <button class="btn-primary btn-sm" id="applyBranchSlaBtn">حفظ إعدادات الفروع</button>
       </div>
-      <div class="card-sub">اضبط SLA Target مختلف لأي فرع. الفرع اللي تسيبه بنفس القيمة الافتراضية بياخد SLA العام تلقائياً. أي تغيير هنا بيتحدث فوراً في كل الجداول والرسومات والملخص التنفيذي.</div>
+      <div class="card-sub">حدد لكل فرع الإقليم الجغرافي (يُستخدم في تقرير عمر الشحنة)، وSLA طبقاً للسوق وSLA طبقاً للشركة بالأيام. SLA الشركة هو المعتمد في حساب نسبة الالتزام بالداشبورد، والفرع الذي يُترك فارغاً يأخذ 2 يوم. حدود الأيام لكل إقليم تُضبط من تاب «عمر الشحنة» (معايير المجموعات).</div>
       <div id="slaSaveStatus" class="helptext" style="margin-top:6px; margin-bottom:10px; display:none;"></div>
       <div class="table-scroll"><table class="data-table" id="branchSlaTable"></table></div>
     </div>
@@ -2079,6 +2069,28 @@ async function savePersistedSlaSettings(){
     console.warn('[SLA SETTINGS SAVE FAILED] — change is still applied in this session but will NOT survive a page reload', e);
     return false;
   }
+}
+
+// Per-branch region + market SLA (Settings branch table). Stored server-side (Code.gs BRANCH_CONFIG_JSON).
+let BRANCH_CONFIG = {};
+const REGION_OPTIONS = [['','غير محدد'],['cairo','القاهرة والإسكندرية'],['delta','الدلتا والقنال'],['upper','الصعيد']];
+async function loadPersistedBranchConfig(){
+  try{
+    if(!effectiveWebAppUrl()) return;
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'getBranchConfig' }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(payload && payload.success === true && payload.config && typeof payload.config === 'object') BRANCH_CONFIG = payload.config;
+  }catch(e){ console.warn('[BRANCH CONFIG LOAD FAILED]', e); }
+}
+async function savePersistedBranchConfig(){
+  try{
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'saveBranchConfig', config: JSON.stringify(BRANCH_CONFIG) }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true) throw new Error((payload&&payload.error)||'فشل حفظ إعدادات الفروع');
+    return true;
+  }catch(e){ console.warn('[BRANCH CONFIG SAVE FAILED]', e); return false; }
 }
 
 // Manual status -> category choices (Settings tab). Stored server-side (Code.gs STATUS_MAPPING_JSON).
@@ -6954,7 +6966,6 @@ function renderSettingsTab(){
 
   renderStatusMappingBox();
 
-  document.getElementById('slaTargetInput').value = SLA_TARGET_DAYS;
   document.getElementById('attemptT1Input').value = ATTEMPT_T1_DAYS;
   document.getElementById('attemptT2Input').value = ATTEMPT_T2_DAYS;
 
@@ -7006,16 +7017,19 @@ function renderBranchSlaTable(){
   for(const be of branchArr) branchCounts[be.name] = be.shipments;
   const branches = [...STATE.dims.branches].sort((a,b)=> (branchCounts[b]||0)-(branchCounts[a]||0));
 
-  let thead = '<thead><tr><th>الفرع</th><th>عدد الشحنات</th><th>SLA Target الحالي (يوم)</th><th>الحالة</th></tr></thead>';
+  const inpStyle = 'width:70px; padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:var(--mono); font-size:12px;';
+  const esc = t=>String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  let thead = '<thead><tr><th>الفرع</th><th>عدد الشحنات</th><th>الإقليم</th><th>SLA طبقاً للسوق (يوم)</th><th>SLA طبقاً للشركة (يوم)</th></tr></thead>';
   let tbody = '<tbody>' + branches.map(b=>{
-    const isOverride = BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null;
-    const val = isOverride ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS;
-    const id = 'branchsla-'+btoa(unescape(encodeURIComponent(b))).replace(/[^a-zA-Z0-9]/g,'');
-    return `<tr>
-      <td>${b}</td>
+    const cfg = BRANCH_CONFIG[b] || {};
+    const companyVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS;
+    const marketVal = (cfg.slaMarket!==undefined && cfg.slaMarket!==null) ? cfg.slaMarket : '';
+    return `<tr data-branch-row="${esc(b)}">
+      <td>${esc(b)}</td>
       <td>${fmtInt(branchCounts[b]||0)}</td>
-      <td><input type="number" min="0.5" step="0.5" value="${val}" data-branch="${b.replace(/"/g,'&quot;')}" id="${id}" style="width:70px; padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:var(--mono); font-size:12px;"></td>
-      <td>${isOverride ? '<span class="pill warn">مخصّص</span>' : '<span class="pill neu">افتراضي</span>'}</td>
+      <td><select data-f="region" style="padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:inherit; font-size:12px;">${REGION_OPTIONS.map(([v,l])=>`<option value="${v}"${v===(cfg.region||'')?' selected':''}>${l}</option>`).join('')}</select></td>
+      <td><input type="number" min="0.5" step="0.5" value="${marketVal}" data-f="market" style="${inpStyle}"></td>
+      <td><input type="number" min="0.5" step="0.5" value="${companyVal}" data-f="company" style="${inpStyle}"></td>
     </tr>`;
   }).join('') + '</tbody>';
   table.innerHTML = thead + tbody;
@@ -8060,6 +8074,7 @@ async function init(){
   // just renders triggered later by a filter change — already uses the
   // correct branch-specific SLA configuration instead of the hardcoded 2/{}.
   try{ await loadPersistedStatusMapping(); }catch(e){}
+  try{ await loadPersistedBranchConfig(); }catch(e){}
   try{ await loadPersistedSlaSettings(); }
   catch(slaErr){ console.error('[INIT] loadPersistedSlaSettings failed — continuing with default SLA settings', slaErr); }
 
@@ -8241,40 +8256,6 @@ function refreshAfterSlaChange(){
 }
 
 function initSettingsHandlers(){
-  document.getElementById('applySlaBtn').addEventListener('click', async ()=>{
-    const oldValue = SLA_TARGET_DAYS; // kept so a failed save can be rolled back exactly
-    try{
-      const v = parseFloat(document.getElementById('slaTargetInput').value);
-      if(isNaN(v) || v<=0){ showSlaSaveStatus('قيمة SLA غير صالحة — أدخل رقماً أكبر من صفر.', 'error'); return; }
-
-      SLA_TARGET_DAYS = v; // set in memory only so savePersistedSlaSettings() below sends the NEW value
-
-      // Persistence gate: nothing downstream (cache invalidation, Management
-      // Analysis, Dashboard, PDF) may act on this new value until the backend
-      // has actually confirmed it saved. Reordered on request — the previous
-      // version invalidated caches and re-rendered BEFORE this awaited, which
-      // meant a slow/failed save could still leave every view recomputing
-      // against a setting that was never actually persisted.
-      const persisted = await savePersistedSlaSettings();
-
-      if(persisted){
-        invalidateSlaDependentCaches(); // only now — after the backend confirmed the new value is saved
-        renderBranchSlaTable(); // the "افتراضي" column value/labels depend on SLA_TARGET_DAYS — keep it in sync immediately
-        refreshAfterSlaChange();
-        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ الإعداد بنجاح ✓', 'ok');
-      }else{
-        SLA_TARGET_DAYS = oldValue; // roll back — this value was NEVER confirmed saved, so no view may use it
-        showSlaSaveStatus('فشل حفظ الإعداد على الخادم — تم إلغاء التغيير والإبقاء على القيمة السابقة (' + oldValue + ' يوم). لم يتم إعادة حساب أي بيانات. تحقق من الاتصال وحاول مرة أخرى.', 'error');
-      }
-    }catch(e){
-      // Defensive net (Part 8): an unexpected failure anywhere in this flow
-      // must never blank the whole app, and must never leave an unconfirmed
-      // value in memory for something else to pick up and recompute from.
-      SLA_TARGET_DAYS = oldValue;
-      console.error('[SLA SETTINGS] applySlaBtn handler failed unexpectedly — rolled back to previous value', e);
-      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ الإعداد. تم الإبقاء على القيمة السابقة (' + oldValue + ' يوم) ولم يتم إعادة حساب أي بيانات. حاول مرة أخرى.', 'error');
-    }
-  });
   document.getElementById('applyAttemptBtn').addEventListener('click', ()=>{
     try{
       const t1 = parseInt(document.getElementById('attemptT1Input').value, 10);
@@ -8286,45 +8267,39 @@ function initSettingsHandlers(){
     }catch(e){ console.error('[ATTEMPT SETTINGS] applyAttemptBtn handler failed unexpectedly', e); }
   });
   document.getElementById('applyBranchSlaBtn').addEventListener('click', async ()=>{
-    const oldBranchTargets = Object.assign({}, BRANCH_SLA_TARGETS); // shallow copy is enough — values are plain numbers
+    const oldTargets = Object.assign({}, BRANCH_SLA_TARGETS), oldConfig = JSON.parse(JSON.stringify(BRANCH_CONFIG));
+    const rollback = ()=>{ BRANCH_SLA_TARGETS = oldTargets; BRANCH_CONFIG = oldConfig; try{ renderBranchSlaTable(); }catch(e2){} };
     try{
-      const inputs = document.querySelectorAll('#branchSlaTable input[data-branch]');
-      inputs.forEach(inp=>{
-        const branch = inp.getAttribute('data-branch');
-        const v = parseFloat(inp.value);
-        if(!isNaN(v) && v>0){
-          if(v === SLA_TARGET_DAYS) delete BRANCH_SLA_TARGETS[branch]; // matches default -> no need to store an override
-          else BRANCH_SLA_TARGETS[branch] = v;
+      const nextConfig = {};
+      document.querySelectorAll('#branchSlaTable tr[data-branch-row]').forEach(tr=>{
+        const branch = tr.getAttribute('data-branch-row');
+        const region = tr.querySelector('[data-f="region"]').value;
+        const m = parseFloat(tr.querySelector('[data-f="market"]').value);
+        const c = parseFloat(tr.querySelector('[data-f="company"]').value);
+        if(!isNaN(c) && c>0){
+          if(c === SLA_TARGET_DAYS) delete BRANCH_SLA_TARGETS[branch]; else BRANCH_SLA_TARGETS[branch] = c;
         }
+        const slaMarket = (!isNaN(m) && m>0) ? m : null;
+        if(region || slaMarket!==null) nextConfig[branch] = { region, slaMarket };
       });
-
-      // Same persistence gate as applySlaBtn: nothing downstream may act on
-      // these new branch overrides until the backend has actually confirmed
-      // they saved.
-      const persisted = await savePersistedSlaSettings();
-
-      if(persisted){
-        invalidateSlaDependentCaches(); // only now — after the backend confirmed the new overrides are saved
-        // The table itself was never re-rendered after Apply, so a saved value
-        // (and its "مخصّص"/"افتراضي" status pill) never visibly updated even
-        // though it WAS saved in memory and sent on the next request — this
-        // could easily look like "nothing changed". Refresh it immediately.
+      // keep saved entries for branches that are not in this month's list
+      Object.keys(BRANCH_CONFIG).forEach(b=>{ if(!STATE.dims.branches.includes(b) && !nextConfig[b]) nextConfig[b] = BRANCH_CONFIG[b]; });
+      BRANCH_CONFIG = nextConfig;
+      const okConfig = await savePersistedBranchConfig();
+      const okSla = okConfig ? await savePersistedSlaSettings() : false;
+      if(okConfig && okSla){
+        invalidateSlaDependentCaches();
         renderBranchSlaTable();
         refreshAfterSlaChange();
-        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓', 'ok');
+        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓ — الإقليم يسري فوراً على تقرير عمر الشحنة؛ SLA الشركة يحتاج «تحديث الداش بورد» لإعادة بناء الملخصات.', 'ok');
       }else{
-        BRANCH_SLA_TARGETS = oldBranchTargets; // roll back — these overrides were NEVER confirmed saved, so no view may use them
-        renderBranchSlaTable(); // reflect the rollback in the table's inputs/pills immediately
-        showSlaSaveStatus('فشل حفظ إعدادات الفروع على الخادم — تم إلغاء التغييرات والإبقاء على الإعدادات السابقة. لم يتم إعادة حساب أي بيانات. تحقق من الاتصال وحاول مرة أخرى.', 'error');
+        rollback();
+        showSlaSaveStatus('فشل حفظ إعدادات الفروع على الخادم — تم إلغاء التغييرات والإبقاء على الإعدادات السابقة. تحقق من الاتصال وحاول مرة أخرى.', 'error');
       }
     }catch(e){
-      // Defensive net (Part 8): an unexpected failure anywhere in this flow
-      // must never blank the whole app, and must never leave unconfirmed
-      // overrides in memory for something else to pick up and recompute from.
-      BRANCH_SLA_TARGETS = oldBranchTargets;
-      try{ renderBranchSlaTable(); }catch(e2){ /* table refresh is best-effort during an already-unexpected failure */ }
-      console.error('[SLA SETTINGS] applyBranchSlaBtn handler failed unexpectedly — rolled back to previous overrides', e);
-      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ إعدادات الفروع. تم الإبقاء على الإعدادات السابقة ولم يتم إعادة حساب أي بيانات. حاول مرة أخرى.', 'error');
+      rollback();
+      console.error('[BRANCH SETTINGS] apply handler failed unexpectedly — rolled back', e);
+      showSlaSaveStatus('حدث خطأ غير متوقع أثناء حفظ إعدادات الفروع. تم الإبقاء على الإعدادات السابقة.', 'error');
     }
   });
 }
