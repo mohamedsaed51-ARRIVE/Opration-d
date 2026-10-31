@@ -8292,17 +8292,17 @@ async function rebuildSummariesThenRefresh(){
   try{
     for(let i=0; i<months.length; i++){
       const m = months[i];
-      say(`جاري تحديث ملخص ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}... لا تغلق الصفحة.`);
+      say(`(1/2) جاري تحديث ملخص الشحنات لشهر ${monthDisplayName(m)}${months.length>1?` — شهر ${i+1} من ${months.length}`:''}... لا تغلق الصفحة.`);
       try{
         const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'buildSummary', sheet:m }), {cache:'no-store'}, 330000);
         if(!res.ok) throw new Error('HTTP '+res.status);
         const out = JSON.parse(await res.text());
         if(out && out.success === false) throw new Error(out.error || 'فشل بناء الملخص');
-        // The age summary is built inside the same server run as the dashboard summary and is silently skipped when that run is
-        // close to the time limit — leaving the OLD age summary in place. Build it in its own request whenever it was not confirmed built.
-        const ageOk = out && out.ageSnapshot && out.ageSnapshot.success === true && !out.ageSnapshot.skipped || (out && out.ageSnapshot && out.ageSnapshot.skipped === 'empty-month');
-        if(!ageOk){
-          say(`جاري تحديث ملخص عمر الشحنة لشهر ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}...`);
+        // Step 2 — the shipment-age summary is ALWAYS rebuilt in its own request (its own execution time), right after the
+        // shipments summary. Inside the first request it is silently skipped near the time limit and the old age summary stays.
+        const emptyMonth = out && out.ageSnapshot && out.ageSnapshot.skipped === 'empty-month';
+        if(!emptyMonth){
+          say(`(2/2) جاري تحديث ملخص عمر الشحنة لشهر ${monthDisplayName(m)}${months.length>1?` — شهر ${i+1} من ${months.length}`:''}... لا تغلق الصفحة.`);
           try{
             const r2 = await fetchWithTimeout(buildAppsScriptUrl({ action:'buildAgeSnapshot', sheet:m }), {cache:'no-store'}, 330000);
             if(!r2.ok) throw new Error('HTTP '+r2.status);
@@ -8323,7 +8323,8 @@ async function rebuildSummariesThenRefresh(){
   say('جاري إعادة تحميل البيانات...');
   AGE.data = null; AGE.failKey = null; // make the shipment-age tab recompute from the fresh summary
   await switchToMonth(selectedMonth, { force:true });
-  say(problems.length ? 'اكتمل التحديث مع ملاحظات.' : ('تم تحديث الداش بورد — '+new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'})));
+  try{ if(document.body.classList.contains('on-shipage')) runAgeReport(true); }catch(e){}
+  say(problems.length ? 'اكتمل التحديث مع ملاحظات.' : ('تم تحديث ملخص الشحنات وملخص عمر الشحنة — '+new Date().toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'})));
   if(problems.length) alert('تم التحديث مع ملاحظات:\n- '+problems.join('\n- ')+'\n\nلو ظهر خطأ بخصوص نسخة Code.gs، تأكد من نشر آخر نسخة (New version).');
 }
 // ARRIVE design-system UI wiring (presentation only): chart defaults, shared table search/pagination, print header, filter chips.
