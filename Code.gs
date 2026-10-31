@@ -600,7 +600,9 @@ function saveBranchConfigPayload(params) {
       var region = BRANCH_REGION_KEYS.indexOf(e.region) >= 0 ? e.region : "";
       var m = Number(e.slaMarket);
       var slaMarket = (e.slaMarket !== null && e.slaMarket !== undefined && e.slaMarket !== "" && isFinite(m) && m > 0) ? m : null;
-      if (region || slaMarket !== null) clean[name] = { region: region, slaMarket: slaMarket };
+      var c = Number(e.slaCompany);
+      var slaCompany = (e.slaCompany !== null && e.slaCompany !== undefined && e.slaCompany !== "" && isFinite(c) && c > 0) ? c : null;
+      if (region || slaMarket !== null || slaCompany !== null) clean[name] = { region: region, slaMarket: slaMarket, slaCompany: slaCompany };
     }
     PropertiesService.getScriptProperties().setProperty(BRANCH_CONFIG_PROPERTY_KEY, JSON.stringify(clean));
     return { success: true, config: clean };
@@ -2708,6 +2710,13 @@ function ageResolveGroups_(overrides) {
 function ageReportCompute_(records, groups, asOfNum) {
   var branchToGroup = {}, groupIdx = {}, gi, bi;
   var state = [];
+  // Per-branch SLA from the Settings branch table: market -> «معيار السوق», company -> «معيار الشركة للتسليم».
+  // Region-level (group) rows keep judging against the region standards; branch-level rows use the branch's own values when set.
+  var branchSla = {}, bcfg = getPersistedBranchConfig_();
+  for (var bcn in bcfg) {
+    if (!Object.prototype.hasOwnProperty.call(bcfg, bcn) || !bcfg[bcn]) continue;
+    branchSla[ageNormBranch_(bcn)] = { market: Number(bcfg[bcn].slaMarket) > 0 ? Number(bcfg[bcn].slaMarket) : null, company: Number(bcfg[bcn].slaCompany) > 0 ? Number(bcfg[bcn].slaCompany) : null };
+  }
   for (gi = 0; gi < groups.length; gi++) {
     groupIdx[groups[gi].key] = gi;
     for (bi = 0; bi < groups[gi].branches.length; bi++) branchToGroup[ageNormBranch_(groups[gi].branches[bi])] = gi;
@@ -2761,13 +2770,17 @@ function ageReportCompute_(records, groups, asOfNum) {
     // groups with no std (unassigned) fall back to the first group's standards ONLY for the over/within split display, never silently:
     // they are reported under "غير مصنّف" with age statistics only.
     var effStd = std || { market: -1, delivery: -1, returns: -1 };
+    var bsla = std ? branchSla[bNorm] : null;
+    var branchStd = std ? { market: (bsla && bsla.market) || std.market, delivery: (bsla && bsla.company) || std.delivery, returns: std.returns } : effStd;
     if (std && kind === "delivered" && age !== null) {
       // delivery-day histogram: age 0/1 -> bucket 1, age n -> bucket n, > company standard -> last bucket
       var bucketIdx = age <= 1 ? 0 : (age <= std.delivery ? age - 1 : std.delivery);
       gs.dist[bucketIdx]++;
     }
     ageAddToAcc_(gs.kinds[kind], kind, age, effStd);
-    ageAddToAcc_(gs.branches[branchLabel][kind], kind, age, effStd);
+    if (!gs.branchStd) gs.branchStd = {};
+    if (std) gs.branchStd[branchLabel] = branchStd;
+    ageAddToAcc_(gs.branches[branchLabel][kind], kind, age, branchStd);
     if (std) ageAddToAcc_(total[kind], kind, age, effStd);
 
     if (isOpen && age !== null) {
@@ -2775,7 +2788,7 @@ function ageReportCompute_(records, groups, asOfNum) {
       if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else { sumRetAge += age; retAgeN++; if (minRetAge === null || age < minRetAge) minRetAge = age; if (maxRetAge === null || age > maxRetAge) maxRetAge = age; }
     }
     if (isOpen) {
-      var limit = std ? (kind === "inProgress" ? std.delivery : std.returns) : null;
+      var limit = std ? (kind === "inProgress" ? branchStd.delivery : branchStd.returns) : null;
       var overdue = (limit !== null && age !== null) ? age > limit : false;
       var bo = branchOpenAgg[branchLabel] || (branchOpenAgg[branchLabel] = { branch: branchLabel, group: std ? std.name : "غير مصنّف", pending: 0, pendingOver: 0, ret: 0, retOver: 0 });
       if (kind === "inProgress") { bo.pending++; if (overdue) bo.pendingOver++; } else { bo.ret++; if (overdue) bo.retOver++; }
@@ -2792,7 +2805,8 @@ function ageReportCompute_(records, groups, asOfNum) {
     var branches = [];
     for (var b = 0; b < gs.branchOrder.length; b++) {
       var name = gs.branchOrder[b], bk = gs.branches[name];
-      branches.push({ name: name, total: ageSumKinds_(bk), kinds: ageFinalizeKindAccs_(bk) });
+      var bStd = gs.branchStd && gs.branchStd[name];
+      branches.push({ name: name, total: ageSumKinds_(bk), kinds: ageFinalizeKindAccs_(bk), market: bStd ? bStd.market : null, delivery: bStd ? bStd.delivery : null, returns: bStd ? bStd.returns : null });
     }
     branches.sort(function (x, y) { return y.total - x.total; });
     var within = gs.kinds.delivered.withinCompany + gs.kinds.returnClosed.withinCompany + gs.kinds.returnOpen.withinCompany + gs.kinds.inProgress.withinCompany;
@@ -2933,7 +2947,7 @@ function getAgeReport(params) {
 
   var cache = CacheService.getScriptCache();
   var forceRefresh = !!(params && (params.refresh === "1" || params.refresh === "true"));
-  var cacheKey = "agerep_v4_g" + getSnapshotGenerationStamp_() + "_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns]; })));
+  var cacheKey = "agerep_v4_g" + getSnapshotGenerationStamp_() + "_" + summaryHashKey((sheetsMode ? months.join(",") : "") + "|" + dateFrom + "|" + dateTo + "|" + asOf + "|" + JSON.stringify(groups.map(function (g) { return [g.market, g.delivery, g.returns, g.branches]; })) + "|" + JSON.stringify(getPersistedBranchConfig_()));
   if (!forceRefresh) {
     var cached = cacheGetChunked(cache, cacheKey);
     if (cached) { var co = JSON.parse(cached); co.cached = true; return co; }

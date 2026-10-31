@@ -1262,7 +1262,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <div class="card-title" style="margin-bottom:0;">جدول الفروع (الإقليم وSLA)</div>
         <button class="btn-primary btn-sm" id="applyBranchSlaBtn">حفظ إعدادات الفروع</button>
       </div>
-      <div class="card-sub">حدد لكل فرع الإقليم الجغرافي (يُستخدم في تقرير عمر الشحنة)، وSLA طبقاً للسوق وSLA طبقاً للشركة بالأيام. SLA الشركة هو المعتمد في حساب نسبة الالتزام بالداشبورد، والفرع الذي يُترك فارغاً يأخذ 2 يوم. حدود الأيام لكل إقليم تُضبط من تاب «عمر الشحنة» (معايير المجموعات).</div>
+      <div class="card-sub">حدد لكل فرع الإقليم الجغرافي (يُستخدم في تقرير عمر الشحنة)، وSLA طبقاً للسوق وSLA طبقاً للشركة بالأيام. SLA السوق هو المعتمد وحده في حساب نسبة الالتزام بالداشبورد الأساسية (الفرع الفارغ يأخذ 2 يوم)، أما تقرير عمر الشحنة فيعرض عمر السوق وعمر الشركة معاً. حدود الأيام لكل إقليم تُضبط من تاب «عمر الشحنة» (معايير المجموعات).</div>
       <div id="slaSaveStatus" class="helptext" style="margin-top:6px; margin-bottom:10px; display:none;"></div>
       <div class="table-scroll"><table class="data-table" id="branchSlaTable"></table></div>
     </div>
@@ -7032,8 +7032,8 @@ function renderBranchSlaTable(){
   let thead = '<thead><tr><th>الفرع</th><th>عدد الشحنات</th><th>الإقليم</th><th>SLA طبقاً للسوق (يوم)</th><th>SLA طبقاً للشركة (يوم)</th></tr></thead>';
   let tbody = '<tbody>' + branches.map(b=>{
     const cfg = BRANCH_CONFIG[b] || {};
-    const companyVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS;
-    const marketVal = (cfg.slaMarket!==undefined && cfg.slaMarket!==null) ? cfg.slaMarket : '';
+    const marketVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS;
+    const companyVal = (cfg.slaCompany!==undefined && cfg.slaCompany!==null) ? cfg.slaCompany : '';
     return `<tr data-branch-row="${esc(b)}">
       <td>${esc(b)}</td>
       <td>${fmtInt(branchCounts[b]||0)}</td>
@@ -8335,11 +8335,12 @@ function initSettingsHandlers(){
         const region = tr.querySelector('[data-f="region"]').value;
         const m = parseFloat(tr.querySelector('[data-f="market"]').value);
         const c = parseFloat(tr.querySelector('[data-f="company"]').value);
-        if(!isNaN(c) && c>0){
-          if(c === SLA_TARGET_DAYS) delete BRANCH_SLA_TARGETS[branch]; else BRANCH_SLA_TARGETS[branch] = c;
+        // SLA السوق هو الذي تعتمد عليه نسبة الالتزام في الداشبورد الأساسية
+        if(!isNaN(m) && m>0){
+          if(m === SLA_TARGET_DAYS) delete BRANCH_SLA_TARGETS[branch]; else BRANCH_SLA_TARGETS[branch] = m;
         }
-        const slaMarket = (!isNaN(m) && m>0) ? m : null;
-        if(region || slaMarket!==null) nextConfig[branch] = { region, slaMarket };
+        const slaCompany = (!isNaN(c) && c>0) ? c : null;
+        if(region || slaCompany!==null) nextConfig[branch] = { region, slaMarket: (!isNaN(m) && m>0) ? m : null, slaCompany };
       });
       // keep saved entries for branches that are not in this month's list
       Object.keys(BRANCH_CONFIG).forEach(b=>{ if(!STATE.dims.branches.includes(b) && !nextConfig[b]) nextConfig[b] = BRANCH_CONFIG[b]; });
@@ -8350,7 +8351,7 @@ function initSettingsHandlers(){
         invalidateSlaDependentCaches();
         renderBranchSlaTable();
         refreshAfterSlaChange();
-        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓ — الإقليم يسري فوراً على تقرير عمر الشحنة؛ SLA الشركة يحتاج «تحديث الداش بورد» لإعادة بناء الملخصات.', 'ok');
+        if(selectedMonth !== ALL_MONTHS_SENTINEL) showSlaSaveStatus('تم حفظ إعدادات الفروع بنجاح ✓ — الإقليم يسري فوراً على تقرير عمر الشحنة؛ SLA السوق يحتاج «تحديث الداش بورد» لإعادة بناء الملخصات.', 'ok');
       }else{
         rollback();
         showSlaSaveStatus('فشل حفظ إعدادات الفروع على الخادم — تم إلغاء التغييرات والإبقاء على الإعدادات السابقة. تحقق من الاتصال وحاول مرة أخرى.', 'error');
