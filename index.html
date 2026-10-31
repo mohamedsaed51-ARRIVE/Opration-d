@@ -6320,7 +6320,7 @@ function renderAllMonthsCompletenessWarning(summary){
     dsSetAlertText(el, message);
   } else if(hasStaleSla){
     el.className = 'ds-alert';
-    dsSetAlertText(el, `الإجمالي معروض بالكامل، لكن أرقام SLA لهذه الشهور مبنية بإعدادات SLA سابقة وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. أعد بناءها بإعدادات SLA الحالية من الإعدادات ← «تحديث الداش بورد» (اختر «كل الشهور» أولاً)، أو شغّل rebuildAllSummaries من محرر Apps Script وكرّرها حتى تظهر allMonthsComplete: true، ثم أعد تحميل الصفحة. تأكد أيضاً أنك نشرت آخر نسخة من Code.gs.`);
+    dsSetAlertText(el, `الإجمالي معروض بالكامل، لكن هذه الشهور مبنية بإعدادات سابقة (SLA أو تصنيف الحالات) وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. أعد بناءها بإعدادات SLA الحالية من الإعدادات ← «تحديث الداش بورد» (اختر «كل الشهور» أولاً)، أو شغّل rebuildAllSummaries من محرر Apps Script وكرّرها حتى تظهر allMonthsComplete: true، ثم أعد تحميل الصفحة. تأكد أيضاً أنك نشرت آخر نسخة من Code.gs.`);
   } else {
     // Purely informational — no problem, no incomplete data, nothing to retry.
     el.className = 'ds-alert info';
@@ -8299,8 +8299,19 @@ async function rebuildSummariesThenRefresh(){
         if(!res.ok) throw new Error('HTTP '+res.status);
         const out = JSON.parse(await res.text());
         if(out && out.success === false) throw new Error(out.error || 'فشل بناء الملخص');
-        if(out && out.ageSnapshot && out.ageSnapshot.success === false && out.ageSnapshot.skipped !== 'time-budget'){
-          problems.push(`${monthDisplayName(m)} (ملخص عمر الشحنة): ${out.ageSnapshot.error||'فشل'}`);
+        // The age summary is built inside the same server run as the dashboard summary and is silently skipped when that run is
+        // close to the time limit — leaving the OLD age summary in place. Build it in its own request whenever it was not confirmed built.
+        const ageOk = out && out.ageSnapshot && out.ageSnapshot.success === true && !out.ageSnapshot.skipped || (out && out.ageSnapshot && out.ageSnapshot.skipped === 'empty-month');
+        if(!ageOk){
+          say(`جاري تحديث ملخص عمر الشحنة لشهر ${monthDisplayName(m)}${months.length>1?` (${i+1}/${months.length})`:''}...`);
+          try{
+            const r2 = await fetchWithTimeout(buildAppsScriptUrl({ action:'buildAgeSnapshot', sheet:m }), {cache:'no-store'}, 330000);
+            if(!r2.ok) throw new Error('HTTP '+r2.status);
+            const o2 = JSON.parse(await r2.text());
+            if(!o2 || o2.success !== true) throw new Error((o2 && o2.error) || 'فشل بناء ملخص عمر الشحنة');
+          }catch(e2){
+            problems.push(`${monthDisplayName(m)} (ملخص عمر الشحنة): ${e2 && e2.message ? e2.message : e2}`);
+          }
         }
       }catch(e){
         problems.push(`${monthDisplayName(m)}: ${e && e.message ? e.message : e}`);
