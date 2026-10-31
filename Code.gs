@@ -588,7 +588,14 @@ function getPersistedBranchConfig_() {
     return {};
   }
 }
-function getBranchConfigPayload() { return { success: true, config: getPersistedBranchConfig_() }; }
+// builtinRegions: region of each branch from the built-in lists (key = ageNormBranch_ name) — used to pre-select the region in Settings.
+function getBranchConfigPayload() {
+  var builtin = {};
+  for (var i = 0; i < AGE_REPORT_GROUPS.length; i++) {
+    for (var j = 0; j < AGE_REPORT_GROUPS[i].branches.length; j++) builtin[ageNormBranch_(AGE_REPORT_GROUPS[i].branches[j])] = AGE_REPORT_GROUPS[i].key;
+  }
+  return { success: true, config: getPersistedBranchConfig_(), builtinRegions: builtin };
+}
 function saveBranchConfigPayload(params) {
   try {
     var parsed = (params && params.config) ? JSON.parse(params.config) : {};
