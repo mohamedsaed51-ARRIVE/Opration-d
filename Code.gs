@@ -629,7 +629,12 @@ function getPersistedAgeStandards_() {
     return {};
   }
 }
-function getAgeStandardsPayload() { return { success: true, standards: getPersistedAgeStandards_() }; }
+// Returns the EFFECTIVE standards (saved values merged over the built-in defaults) so the client always shows what the report really uses.
+function getAgeStandardsPayload() {
+  var groups = ageResolveGroups_({}), out = {};
+  for (var i = 0; i < groups.length; i++) out[groups[i].key] = { market: groups[i].market, delivery: groups[i].delivery, returns: groups[i].returns };
+  return { success: true, standards: out, saved: getPersistedAgeStandards_() };
+}
 function saveAgeStandardsPayload(params) {
   try {
     var parsed = (params && params.standards) ? JSON.parse(params.standards) : {};
