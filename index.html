@@ -2081,6 +2081,31 @@ async function savePersistedSlaSettings(){
   }
 }
 
+// Manual status -> category choices (Settings tab). Stored server-side (Code.gs STATUS_MAPPING_JSON).
+let STATUS_MANUAL_MAP = {};
+const STATUS_KIND_OPTIONS = [
+  ['', 'تلقائي (حسب القواعد)'], ['delivered','التسليمات'], ['returnClosed','المرتجعات المغلقة'], ['returnOpen','المرتجعات المفتوحة'],
+  ['returnHold','المرتجعات المعلقة'], ['rejected','أوردرات الرفض'], ['inProgress','قيد التشغيل'], ['unknown','غير مصنف']
+];
+async function loadPersistedStatusMapping(){
+  try{
+    if(!effectiveWebAppUrl()) return;
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'getStatusMapping' }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(payload && payload.success === true && payload.mapping && typeof payload.mapping === 'object') STATUS_MANUAL_MAP = payload.mapping;
+  }catch(e){ console.warn('[STATUS MAPPING LOAD FAILED]', e); }
+}
+async function savePersistedStatusMapping(){
+  try{
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'saveStatusMapping', mapping: JSON.stringify(STATUS_MANUAL_MAP) }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true) throw new Error((payload&&payload.error)||'فشل حفظ تصنيف الحالات');
+    return true;
+  }catch(e){ console.warn('[STATUS MAPPING SAVE FAILED]', e); return false; }
+}
+
 // delivery-attempt classification: derived approximation based on calendar-day gap
 // between pickup date and last-status date (no real "attempt count" field exists in the source file)
 // each additional calendar day is treated as one more delivery attempt cycle
@@ -6927,27 +6952,50 @@ function renderSettingsTab(){
     <div class="map-row"><span class="field">${FIELD_LABELS[field]||field}</span><span class="col">${header}</span></div>
   `).join('');
 
-  const sbox = document.getElementById('statusMappingBox');
-  const rules = [
-    ['التسليمات','pos','عمود «حالة الشحنة»','تسليم ناجح'],
-    ['المرتجعات المغلقة','warn','عمود «حالة الشحنة»','«مرتجعات» أو أي مرتجع فيه كلمة «مغلق»'],
-    ['المرتجعات المفتوحة','warn','عمود «حالة الشحنة»','مرتجع فيه كلمة «مفتوح»'],
-    ['المرتجعات المعلقة','warn','عمود «حالة الشحنة»','مرتجع فيه كلمة «معلق»'],
-    ['أوردرات الرفض','neg','عمود «الحالة النهائية»','أي قيمة فيها كلمة «رفض» (تُحسب مرة واحدة وتسبق حالة الشحنة)'],
-    ['قيد التشغيل','neu','عمود «حالة الشحنة»','قيد التشغيل'],
-    ['غير مصنف','warn','—','أي حالة لا تطابق ما سبق — يظهر كارت «غير مصنف» فقط إن وُجدت'],
-  ];
-  sbox.innerHTML = rules.map(([name, cls, col, rule])=>`
-    <div class="status-map-row">
-      <div class="bucket-name"><span class="dot ${cls}"></span>${name}</div>
-      <span class="status-chip">${col}</span><span class="status-chip">${rule}</span>
-    </div>`).join('') + `<div class="helptext">القواعد معرّفة في Code.gs (دالة <code>summaryClassifyKind</code>) وتُطبَّق عند بناء الملخصات؛ لتعديل كلمة أو إضافة حالة عدّل الثوابت <code>SUMMARY_RETURN_*</code> و<code>SUMMARY_FINAL_REJECT_KEYWORDS</code> ثم اضغط «تحديث الداش بورد». لمعرفة أسماء الحالات المكتوبة فعليًا في الشيتات شغّل «List Status Names» من قائمة ARRIVE Dashboard في Google Sheets.</div>`;
+  renderStatusMappingBox();
 
   document.getElementById('slaTargetInput').value = SLA_TARGET_DAYS;
   document.getElementById('attemptT1Input').value = ATTEMPT_T1_DAYS;
   document.getElementById('attemptT2Input').value = ATTEMPT_T2_DAYS;
 
   renderBranchSlaTable();
+}
+
+function renderStatusMappingBox(){
+  const sbox = document.getElementById('statusMappingBox');
+  if(!sbox) return;
+  const sum = STATE.serverOverviewSummary || {};
+  const counts = {};
+  const PREFIX = 'رفض (الحالة النهائية)';
+  // statuses come from the sheet itself (facets / statusSummary of the selected month), plus any already-mapped ones
+  const names = new Set([...(((sum.facets||{}).statuses)||[]), ...Object.keys(sum.statusSummary||{}), ...Object.keys(STATUS_MANUAL_MAP)]);
+  Object.entries(sum.statusSummary||{}).forEach(([k,v])=>{ counts[k]=v; });
+  const list = [...names].filter(n=>n && String(n).indexOf(PREFIX)!==0).sort((a,b)=>(counts[b]||0)-(counts[a]||0));
+  if(!list.length){
+    sbox.innerHTML = '<div class="helptext">لا توجد حالات لعرضها — اختر شهراً به بيانات لتظهر الحالات المكتوبة في الشيت.</div>';
+    return;
+  }
+  const esc = t=>String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  sbox.innerHTML = `<div class="table-scroll"><table class="data-table" id="statusMapTable"><thead><tr><th>الحالة (كما في الشيت)</th><th>عدد الشحنات</th><th>التصنيف</th></tr></thead><tbody>`
+    + list.map(n=>{
+      const cur = STATUS_MANUAL_MAP[n] || '';
+      return `<tr><td>${esc(n)}</td><td>${counts[n]!=null?fmtInt(counts[n]):'-'}</td><td><select data-status="${esc(n)}" style="padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:inherit; font-size:12px;">`
+        + STATUS_KIND_OPTIONS.map(([v,l])=>`<option value="${v}"${v===cur?' selected':''}>${l}</option>`).join('') + `</select></td></tr>`;
+    }).join('') + `</tbody></table></div>
+    <div class="settings-input-row" style="margin-top:10px;"><button class="btn-primary btn-sm" id="applyStatusMapBtn" type="button">حفظ تصنيف الحالات</button><span id="statusMapStatus" class="helptext" style="margin:0;" aria-live="polite"></span></div>
+    <div class="helptext">«تلقائي» يعني تطبيق القواعد المعتادة. أوردرات الرفض تُحدَّد من عمود «الحالة النهائية» وتسبق أي اختيار هنا. بعد الحفظ اضغط «تحديث الداش بورد» من أعلى هذه الصفحة لإعادة بناء الملخصات وتقرير عمر الشحنة بالتصنيف الجديد.</div>`;
+  const btn = document.getElementById('applyStatusMapBtn');
+  btn.addEventListener('click', async ()=>{
+    const old = STATUS_MANUAL_MAP, next = {};
+    sbox.querySelectorAll('select[data-status]').forEach(sel=>{ if(sel.value) next[sel.dataset.status] = sel.value; });
+    const st = document.getElementById('statusMapStatus');
+    btn.disabled = true; st.textContent = 'جاري الحفظ...';
+    STATUS_MANUAL_MAP = next;
+    const ok = await savePersistedStatusMapping();
+    btn.disabled = false;
+    if(ok){ st.style.color='var(--positive)'; st.textContent = 'تم الحفظ ✓ — اضغط «تحديث الداش بورد» لتطبيقه على الأرقام.'; }
+    else { STATUS_MANUAL_MAP = old; st.style.color='var(--negative)'; st.textContent = 'تعذر الحفظ — لم يتغير شيء.'; }
+  });
 }
 
 function renderBranchSlaTable(){
@@ -8011,6 +8059,7 @@ async function init(){
   // overrides) BEFORE the first month loads, so the very first render — not
   // just renders triggered later by a filter change — already uses the
   // correct branch-specific SLA configuration instead of the hardcoded 2/{}.
+  try{ await loadPersistedStatusMapping(); }catch(e){}
   try{ await loadPersistedSlaSettings(); }
   catch(slaErr){ console.error('[INIT] loadPersistedSlaSettings failed — continuing with default SLA settings', slaErr); }
 

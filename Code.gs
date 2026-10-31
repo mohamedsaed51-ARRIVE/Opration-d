@@ -204,6 +204,15 @@ function doGet(e) {
       result = saveSlaSettingsPayload(params);
     }
 
+    // STATUS MAPPING: manual status -> category overrides chosen in the Settings tab.
+    else if (action === "getStatusMapping") {
+      result = getStatusMappingPayload();
+    }
+
+    else if (action === "saveStatusMapping") {
+      result = saveStatusMappingPayload(params);
+    }
+
     // --------------------------------------------------------
     // DASHBOARD SUMMARY (server-side aggregation — compact JSON,
     // no raw rows). This is what the Dashboard now uses for the normal
@@ -487,6 +496,62 @@ function saveSlaSettingsPayload(params) {
   }
 }
 
+// ============================================================
+// 4D. MANUAL STATUS MAPPING (status text -> category)
+// ============================================================
+// Chosen per status in the Settings tab (the status list comes from the sheets
+// themselves). Stored as ONE JSON blob in Script Properties:
+//   { "<status as written in the sheet>": "<kind>" }
+// kind ∈ SUMMARY_MANUAL_KINDS. A status with no entry keeps the automatic rules
+// in summaryClassifyKind. Changes only affect summaries/age snapshots built AFTER
+// saving — run «تحديث الداش بورد» to rebuild the saved ones.
+var STATUS_MAPPING_PROPERTY_KEY = "STATUS_MAPPING_JSON";
+var SUMMARY_MANUAL_KINDS = ["delivered", "returnClosed", "returnOpen", "returnHold", "rejected", "inProgress", "unknown"];
+var SUMMARY_STATUS_OVERRIDES = null; // normalized status -> kind, loaded lazily per execution
+
+function getPersistedStatusMapping_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(STATUS_MAPPING_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[STATUS MAPPING READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getStatusOverrides_() {
+  if (SUMMARY_STATUS_OVERRIDES) return SUMMARY_STATUS_OVERRIDES;
+  var raw = getPersistedStatusMapping_(), out = {};
+  for (var k in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+    if (SUMMARY_MANUAL_KINDS.indexOf(raw[k]) < 0) continue;
+    out[summaryNormalizeArabicForMatch_(summaryNormText(k))] = raw[k];
+  }
+  SUMMARY_STATUS_OVERRIDES = out;
+  return out;
+}
+function getStatusMappingPayload() {
+  return { success: true, mapping: getPersistedStatusMapping_() };
+}
+function saveStatusMappingPayload(params) {
+  try {
+    var parsed = (params && params.mapping) ? JSON.parse(params.mapping) : {};
+    var clean = {};
+    for (var k in parsed) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, k)) continue;
+      var name = summaryNormText(k);
+      if (name && SUMMARY_MANUAL_KINDS.indexOf(parsed[k]) >= 0) clean[name] = parsed[k];
+    }
+    PropertiesService.getScriptProperties().setProperty(STATUS_MAPPING_PROPERTY_KEY, JSON.stringify(clean));
+    SUMMARY_STATUS_OVERRIDES = null;
+    return { success: true, mapping: clean };
+  } catch (e) {
+    console.log("[STATUS MAPPING SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
 function summaryNormText(s) {
   if (s === null || s === undefined) return "";
   return String(s).replace(/\s+/g, " ").trim();
@@ -590,6 +655,8 @@ function summaryClassifyKind(status) {
   var n = summaryNormalizeArabicForMatch_(summaryNormText(status));
   if (!n) return "unknown";
   if (n.indexOf(summaryNormalizeArabicForMatch_(SUMMARY_REJECT_LABEL_PREFIX)) === 0) return "rejected";
+  var manualOverrides = getStatusOverrides_();
+  if (manualOverrides.hasOwnProperty(n)) return manualOverrides[n]; // manual choice from the Settings tab wins over the automatic rules
   if (SUMMARY_STATUS_LOOKUP.hasOwnProperty(n)) {
     var b = SUMMARY_STATUS_LOOKUP[n];
     return b === "pending" ? "inProgress" : b; // delivered | inProgress | rejected(fallback)
