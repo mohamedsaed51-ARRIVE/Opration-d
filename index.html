@@ -2079,6 +2079,9 @@ async function savePersistedSlaSettings(){
 
 // Per-branch region + market SLA (Settings branch table). Stored server-side (Code.gs BRANCH_CONFIG_JSON).
 let BRANCH_CONFIG = {};
+let BUILTIN_BRANCH_REGIONS = {};
+function normBranchKey(n){ return String(n||'').trim().replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').replace(/\s+/g,' ').replace(/^فرع\s+/,'').replace(/\s+/g,''); }
+function branchEffectiveRegion(b){ const c = BRANCH_CONFIG[b]; return (c && c.region) || BUILTIN_BRANCH_REGIONS[normBranchKey(b)] || ''; }
 const REGION_OPTIONS = [['','غير محدد'],['cairo','القاهرة والإسكندرية'],['delta','الدلتا والقنال'],['upper','الصعيد']];
 async function loadPersistedBranchConfig(){
   try{
@@ -2087,6 +2090,7 @@ async function loadPersistedBranchConfig(){
     if(!res.ok) throw new Error('HTTP '+res.status);
     const payload = JSON.parse(await res.text());
     if(payload && payload.success === true && payload.config && typeof payload.config === 'object') BRANCH_CONFIG = payload.config;
+    if(payload && payload.builtinRegions && typeof payload.builtinRegions === 'object') BUILTIN_BRANCH_REGIONS = payload.builtinRegions;
   }catch(e){ console.warn('[BRANCH CONFIG LOAD FAILED]', e); }
 }
 async function savePersistedBranchConfig(){
@@ -7024,17 +7028,26 @@ function renderBranchSlaTable(){
   let thead = '<thead><tr><th>الفرع</th><th>عدد الشحنات</th><th>الإقليم</th><th>SLA طبقاً للسوق (يوم)</th><th>SLA طبقاً للشركة (يوم)</th></tr></thead>';
   let tbody = '<tbody>' + branches.map(b=>{
     const cfg = BRANCH_CONFIG[b] || {};
-    const marketVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS;
-    const companyVal = (cfg.slaCompany!==undefined && cfg.slaCompany!==null) ? cfg.slaCompany : '';
+    const region = branchEffectiveRegion(b), rs = region ? AGE.std[region] : null;
+    // a branch tied to a region takes that region's market/company days unless it has its own saved value
+    const marketVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : (rs ? rs.market : SLA_TARGET_DAYS);
+    const companyVal = (cfg.slaCompany!==undefined && cfg.slaCompany!==null) ? cfg.slaCompany : (rs ? rs.delivery : '');
     return `<tr data-branch-row="${esc(b)}">
       <td>${esc(b)}</td>
       <td>${fmtInt(branchCounts[b]||0)}</td>
-      <td><select data-f="region" style="padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:inherit; font-size:12px;">${REGION_OPTIONS.map(([v,l])=>`<option value="${v}"${v===(cfg.region||'')?' selected':''}>${l}</option>`).join('')}</select></td>
+      <td><select data-f="region" style="padding:5px 7px; border:1px solid var(--border-strong); border-radius:5px; font-family:inherit; font-size:12px;">${REGION_OPTIONS.map(([v,l])=>`<option value="${v}"${v===region?' selected':''}>${l}</option>`).join('')}</select></td>
       <td><input type="number" min="0.5" step="0.5" value="${marketVal}" data-f="market" style="${inpStyle}"></td>
       <td><input type="number" min="0.5" step="0.5" value="${companyVal}" data-f="company" style="${inpStyle}"></td>
     </tr>`;
   }).join('') + '</tbody>';
   table.innerHTML = thead + tbody;
+  // changing a branch's region fills its market / company days from that region's standards
+  table.querySelectorAll('select[data-f="region"]').forEach(sel=>sel.addEventListener('change', ()=>{
+    const st = AGE.std[sel.value]; if(!st) return;
+    const tr = sel.closest('tr');
+    tr.querySelector('[data-f="market"]').value = st.market;
+    tr.querySelector('[data-f="company"]').value = st.delivery;
+  }));
 }
 
 /* =========================================================
