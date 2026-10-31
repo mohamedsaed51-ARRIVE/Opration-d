@@ -788,7 +788,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
 <div class="shell">
 
   <nav class="sidebar" aria-label="التنقل الرئيسي">
-    <div class="sidebar-logo">
+    <div class="sidebar-logo" id="sidebarLogo" role="link" tabindex="0" title="المؤشرات الرئيسية" style="cursor:pointer;">
       <img data-ds-logo alt="ARRIVE">
       <span>لوحة المتابعة التشغيلية</span>
     </div>
@@ -8058,6 +8058,12 @@ async function exportAgeXlsx(){
    ========================================================= */
 function initTabs(){
   document.body.classList.add('on-overview'); // التاب الافتراضي
+  const logo = document.getElementById('sidebarLogo');
+  if(logo){
+    const goHome = ()=>{ const b = document.querySelector('.tab-btn[data-tab="overview"]'); if(b) b.click(); window.scrollTo({top:0}); };
+    logo.addEventListener('click', goHome);
+    logo.addEventListener('keydown', e=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); goHome(); } });
+  }
   document.querySelectorAll('.tab-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
