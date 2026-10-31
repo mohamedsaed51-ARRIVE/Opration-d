@@ -2778,7 +2778,12 @@ let filtersInitialized = false;
    ========================================================= */
 function normText(s){ return (s===null||s===undefined) ? '' : String(s).replace(/\s+/g,' ').trim(); }
 function fmtInt(n){ return (n===null||n===undefined||isNaN(n)) ? '-' : Math.round(n).toLocaleString('en-US'); }
-function fmtPct(n, d=1){ return (n===null||n===undefined||isNaN(n)) ? '-' : n.toFixed(d)+'%'; }
+function fmtPct(n, d=1){
+  if(n===null||n===undefined||isNaN(n)) return '-';
+  // a real but tiny share (e.g. 155 of 981,545 = 0.016%) must not be shown as «0.0%» — show enough decimals to see it
+  if(n>0 && n<0.1 && d<=1) return (n<0.01 ? '<0.01' : n.toFixed(2))+'%';
+  return n.toFixed(d)+'%';
+}
 function fmtDays(n){ return (n===null||n===undefined||isNaN(n)) ? '-' : n.toFixed(2); }
 function pctClass(v, goodHigh=true, thresholds=[60,80]){
   if(v===null||isNaN(v)) return 'neu';
