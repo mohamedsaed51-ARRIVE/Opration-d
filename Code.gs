@@ -2751,6 +2751,8 @@ function ageReportCompute_(records, groups, asOfNum) {
   var total = ageNewKindAccs_();
   var statusBreakdown = {};
   var dq = { invalidPickup: 0, closedWithoutEndDate: 0, negativeAge: 0, missingBranch: 0 };
+  var dqByMonth = { invalidPickup: {}, closedWithoutEndDate: {}, negativeAge: {}, other: {} }; // month -> count, so the report can say WHICH months the issues are in
+  function bumpMonth_(bucket, m) { var k = m || "?"; dqByMonth[bucket][k] = (dqByMonth[bucket][k] || 0) + 1; }
   var openList = [];
   var minRetAge = null, maxRetAge = null;
   var sumOpenAge = 0, openAgeN = 0, sumPendAge = 0, pendAgeN = 0, sumRetAge = 0, retAgeN = 0;
@@ -2781,13 +2783,14 @@ function ageReportCompute_(records, groups, asOfNum) {
     // age
     var age = null;
     var isOpen = kind === "inProgress" || kind === "returnOpen";
-    if (!rec.pickup) { dq.invalidPickup++; }
+    if (kind === "other") bumpMonth_("other", rec.month);
+    if (!rec.pickup) { dq.invalidPickup++; bumpMonth_("invalidPickup", rec.month); }
     else if (kind !== "other") {
       var pNum = ageDayNum_(rec.pickup);
       if (isOpen) age = asOfNum - pNum;
       else if (rec.lastStatus) age = ageDayNum_(rec.lastStatus) - pNum;
-      else dq.closedWithoutEndDate++;
-      if (age !== null && age < 0) { dq.negativeAge++; age = null; }
+      else { dq.closedWithoutEndDate++; bumpMonth_("closedWithoutEndDate", rec.month); }
+      if (age !== null && age < 0) { dq.negativeAge++; bumpMonth_("negativeAge", rec.month); age = null; }
     }
 
     // groups with no std (unassigned) fall back to the first group's standards ONLY for the over/within split display, never silently:
@@ -2918,7 +2921,7 @@ function ageReportCompute_(records, groups, asOfNum) {
     kpis: kpis, groups: outGroups, unassigned: outUnassigned,
     open: { byGroup: openByGroup, topBranches: topBranches, list: openList, listTruncated: openListTruncated },
     statusBreakdown: statusBreakdown,
-    dq: { invalidPickup: dq.invalidPickup, closedWithoutEndDate: dq.closedWithoutEndDate, negativeAge: dq.negativeAge, missingBranch: dq.missingBranch, unmappedBranches: unmappedBranches }
+    dq: { invalidPickup: dq.invalidPickup, closedWithoutEndDate: dq.closedWithoutEndDate, negativeAge: dq.negativeAge, missingBranch: dq.missingBranch, unmappedBranches: unmappedBranches, byMonth: dqByMonth }
   };
 }
 
@@ -3019,7 +3022,7 @@ function getAgeReport(params) {
       var pickup = summaryParseDate(summaryGetField(row, idx, "pickup"));
       if (pickup) { var pn = ageDayNum_(pickup); if ((fromNum !== null && pn < fromNum) || (toNum !== null && pn > toNum)) { outOfRange++; continue; } }
       var rec = {
-        awb: awb, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
+        awb: awb, month: month, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
         branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryEffectiveStatus_(summaryGetField(row, idx, "status"), summaryGetField(row, idx, "finalStatus"))
       };
       if (awbMap.hasOwnProperty(awb)) {
@@ -3196,12 +3199,12 @@ function ageSnapshotToRecords_(snap, out) {
     if (age === "P") pickup = null;
     else if (age === "E") last = null;
     else last = lastFor(age);
-    for (var n = 0; n < c[3]; n++) out.push({ awb: "S", branch: c[0], status: c[1], pickup: pickup, lastStatus: last });
+    for (var n = 0; n < c[3]; n++) out.push({ awb: "S", branch: c[0], status: c[1], pickup: pickup, lastStatus: last, month: snap.month });
   }
   for (i = 0; i < snap.open.length; i++) {
     var o = snap.open[i], pd = null;
     if (o[3]) { var p = o[3].split("-"); pd = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); }
-    out.push({ awb: o[0], branch: o[1], status: o[2], pickup: pd, lastStatus: null });
+    out.push({ awb: o[0], branch: o[1], status: o[2], pickup: pd, lastStatus: null, month: snap.month });
   }
 }
 

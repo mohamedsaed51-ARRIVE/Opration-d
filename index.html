@@ -7267,6 +7267,12 @@ function agePeriodText(d){
   if(d.params.scope === 'sheets' && (d.params.boundFrom || d.params.boundTo)) txt += ` (من ${d.params.boundFrom||'…'} إلى ${d.params.boundTo||'…'})`;
   return txt;
 }
+// «يناير (1,200)، فبراير (300)» — which months an issue count comes from (from the server's per-month breakdown)
+function ageMonthsBreakdown(map){
+  const ar = m=>{ const i = AGE_MONTHS_EN.indexOf(m); return i>=0 ? AGE_MONTHS_AR[i] : (m==='?'?'شهر غير محدد':m); };
+  const ents = Object.entries(map||{}).filter(([,c])=>c>0).sort((a,b)=>{ const ia=AGE_MONTHS_EN.indexOf(a[0]), ib=AGE_MONTHS_EN.indexOf(b[0]); return (ia<0?99:ia)-(ib<0?99:ib); });
+  return ents.length ? ents.map(([m,c])=>`${ar(m)} (${fmtInt(c)})`).join('، ') : '';
+}
 function ageSourcesText(d){
   const src = d.sources || []; if(!src.length) return '';
   const ar = m=>AGE_MONTHS_AR[AGE_MONTHS_EN.indexOf(m)] || m;
@@ -7510,10 +7516,10 @@ function renderAgeReport(d){
   if(d.missingMonths && d.missingMonths.length) notes.push(alertBox('violation','شيتات غير موجودة', `لم يتم العثور على بيانات للشهور: ${ageEsc(d.missingMonths.join('، '))} — الأرقام لا تشمل الفترة الواقعة فيها.`));
   const unm = Object.entries(q.unmappedBranches||{});
   if(unm.length) notes.push(alertBox('violation','فروع غير مصنّفة جغرافيًا', `${unm.map(([n,c])=>`${ageEsc(n)} (${ageN(c)})`).join('، ')} — لم تُقارن بالمعايير. أضِفها لمجموعتها في <code>AGE_REPORT_GROUPS</code> داخل Code.gs.`));
-  if(k.other>0) notes.push(alertBox('','شحنات خارج التصنيفات الأربعة', `${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام). تظهر في صف «أخرى» ولا تدخل في نسب المعايير. راجع جدول الحالات أدناه.`));
-  if(q.invalidPickup) notes.push(alertBox('','تاريخ بيك أب غير صالح/فارغ', `${ageN(q.invalidPickup)} شحنة لا يمكن حساب عمرها (تُحسب ضمن العدد ولا تدخل في المتوسطات أو نسب الالتزام).`));
-  if(q.closedWithoutEndDate) notes.push(alertBox('','حالة مغلقة بدون تاريخ آخر حالة', `${ageN(q.closedWithoutEndDate)} شحنة مسلّمة/مرتجع مغلق بلا تاريخ آخر حالة — بلا عمر محسوب.`));
-  if(q.negativeAge) notes.push(alertBox('','أعمار سالبة', `${ageN(q.negativeAge)} شحنة تاريخ آخر حالتها (أو تاريخ القياس) أسبق من تاريخ البيك أب — استُبعدت من الأعمار ويلزم مراجعة البيانات.`));
+  if(k.other>0) notes.push(alertBox('','شحنات خارج التصنيفات الأربعة', `${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام). تظهر في صف «أخرى» ولا تدخل في نسب المعايير. راجع جدول الحالات أدناه.${ageMonthsBreakdown((q.byMonth||{}).other)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.other))}`:''}`));
+  if(q.invalidPickup) notes.push(alertBox('','تاريخ بيك أب غير صالح/فارغ', `${ageN(q.invalidPickup)} شحنة لا يمكن حساب عمرها (تُحسب ضمن العدد ولا تدخل في المتوسطات أو نسب الالتزام).${ageMonthsBreakdown((q.byMonth||{}).invalidPickup)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.invalidPickup))}`:''}`));
+  if(q.closedWithoutEndDate) notes.push(alertBox('','حالة مغلقة بدون تاريخ آخر حالة', `${ageN(q.closedWithoutEndDate)} شحنة مسلّمة/مرتجع مغلق بلا تاريخ آخر حالة — بلا عمر محسوب.${ageMonthsBreakdown((q.byMonth||{}).closedWithoutEndDate)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.closedWithoutEndDate))}`:''}`));
+  if(q.negativeAge) notes.push(alertBox('','أعمار سالبة', `${ageN(q.negativeAge)} شحنة تاريخ آخر حالتها (أو تاريخ القياس) أسبق من تاريخ البيك أب — استُبعدت من الأعمار ويلزم مراجعة البيانات.${ageMonthsBreakdown((q.byMonth||{}).negativeAge)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.negativeAge))}`:''}`));
   if(!notes.length) notes.push(alertBox('success','لا ملاحظات جودة بيانات حرجة','كل الشحنات صُنِّفت وحُسبت أعمارها.'));
   const statusRows = Object.entries(d.statusBreakdown||{}).sort((a,b)=>b[1].count-a[1].count)
     .map(([s,v])=>`<tr><td>${ageEsc(s)}</td><td>${ageN(v.count)}</td><td>${AGE_KIND_LABEL[v.kind]||v.kind}</td></tr>`).join('');
@@ -7934,7 +7940,7 @@ async function exportAgeDocx(){
     const unm = Object.entries(q.unmappedBranches||{});
     if(unm.length) notes.push(`فروع غير مصنّفة جغرافيًا (لم تُقارن بالمعايير): ${unm.map(([n,c])=>`${n} (${ageN(c)})`).join('، ')}.`);
     if(k.other>0) notes.push(`${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام) — لا تدخل في نسب المعايير.`);
-    if(q.invalidPickup) notes.push(`${ageN(q.invalidPickup)} شحنة بتاريخ بيك أب غير صالح/فارغ — لا يمكن حساب عمرها.`);
+    if(q.invalidPickup) notes.push(`${ageN(q.invalidPickup)} شحنة بتاريخ بيك أب غير صالح/فارغ — لا يمكن حساب عمرها.${ageMonthsBreakdown((q.byMonth||{}).invalidPickup)?` الشهور: ${ageMonthsBreakdown(q.byMonth.invalidPickup)}.`:''}`);
     if(q.closedWithoutEndDate) notes.push(`${ageN(q.closedWithoutEndDate)} شحنة مغلقة بدون تاريخ آخر حالة — بلا عمر محسوب.`);
     if(q.negativeAge) notes.push(`${ageN(q.negativeAge)} شحنة بعمر سالب (تاريخ آخر حالة أسبق من البيك أب) — استُبعدت من الأعمار.`);
     if(q.duplicatesRemoved) notes.push(`تم حذف ${ageN(q.duplicatesRemoved)} سجلًا مكررًا (نفس رقم البوليصة) مع الإبقاء على الأحدث.`);
@@ -8087,8 +8093,8 @@ async function exportAgeXlsx(){
   r0 = table(ws, ['البند','العدد'], [
     {vals:['صفوف مقروءة من الشيتات',q.rowsRead]},{vals:['شحنات فريدة داخل الفترة',q.uniqueShipments]},{vals:['سجلات مكررة محذوفة',q.duplicatesRemoved]},
     {vals:['صفوف خارج فترة البيك أب',q.outsidePeriod]},{vals:['صفوف بدون رقم بوليصة',q.blankAwb]},{vals:['شحنات بدون فرع',q.missingBranch]},
-    {vals:['تاريخ بيك أب غير صالح',q.invalidPickup]},{vals:['حالة مغلقة بدون تاريخ آخر حالة',q.closedWithoutEndDate]},{vals:['أعمار سالبة',q.negativeAge]},
-    {vals:['شحنات خارج التصنيفات (أخرى)',k.other]},
+    {vals:['تاريخ بيك أب غير صالح',q.invalidPickup]},{vals:['  الشهور (بيك أب غير صالح)',ageMonthsBreakdown((q.byMonth||{}).invalidPickup)||'—']},{vals:['حالة مغلقة بدون تاريخ آخر حالة',q.closedWithoutEndDate]},{vals:['أعمار سالبة',q.negativeAge]},
+    {vals:['شحنات خارج التصنيفات (أخرى)',k.other]},{vals:['  الشهور (أخرى)',ageMonthsBreakdown((q.byMonth||{}).other)||'—']},
   ], [null,INT], 4) + 1;
   const unm = Object.entries(q.unmappedBranches||{});
   if(unm.length) r0 = table(ws, ['فرع غير مصنّف جغرافيًا','عدد الشحنات'], unm.map(([n,c])=>({vals:[n,c]})), [null,INT], r0) + 1;
