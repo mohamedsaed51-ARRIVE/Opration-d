@@ -547,6 +547,14 @@ function getStatusOverrides_() {
   SUMMARY_STATUS_OVERRIDES = out;
   return out;
 }
+// Signature of the saved manual status mapping — stored in each summary's buildConfig so a summary built BEFORE the mapping
+// changed is recognised as stale (and rebuilt / flagged) instead of silently showing the old classification.
+function statusMappingSig_() {
+  var o = getStatusOverrides_(), keys = Object.keys(o).sort(), parts = [];
+  for (var i = 0; i < keys.length; i++) parts.push(keys[i] + "=" + o[keys[i]]);
+  return parts.join("|");
+}
+function summaryConfigStatusOk_(bc) { return String((bc && bc.statusMappingSig) || "") === statusMappingSig_(); }
 function getStatusMappingPayload() {
   return { success: true, mapping: getPersistedStatusMapping_() };
 }
@@ -1302,7 +1310,8 @@ function getMonthDashboardSummaryFromCube_(sheetName, filters, dateFrom, dateTo,
       Number(bc.attemptT1) !== Number(attemptT1) ||
       Number(bc.attemptT2) !== Number(attemptT2) ||
       Number(bc.slaTargetDefault) !== Number(slaTargetDefault) ||
-      !summaryBranchTargetsEqual_(bc.branchSlaTargets, branchSlaTargets)) {
+      !summaryBranchTargetsEqual_(bc.branchSlaTargets, branchSlaTargets) ||
+      !summaryConfigStatusOk_(bc)) {
     console.log("[FILTER CUBE INCOMPATIBLE] " + JSON.stringify({ sheet: sheetName, cubeConfig: bc, requested: { attemptT1: attemptT1, attemptT2: attemptT2, slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets } }));
     return null; // triggers the existing live-aggregation fallback — never a silently-wrong result
   }
@@ -1419,7 +1428,8 @@ function getMonthDashboardSummary(sheetName, params) {
         Number(snapBc.attemptT1) === Number(attemptT1) &&
         Number(snapBc.attemptT2) === Number(attemptT2) &&
         Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
-        summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
+        summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets) &&
+        summaryConfigStatusOk_(snapBc);
       // A snapshot with no buildConfig at all predates this check (an old
       // v2 snapshot saved before this fix) — treated as compatible only
       // when the request uses the plain defaults, matching prior behavior;
@@ -1990,7 +2000,7 @@ function getMonthDashboardSummary(sheetName, params) {
       return [r.p, r.a, r.br, r.c, r.s, r.at, r.d, r.n, r.ws, r.sb, r.sd, r.dwd, r.mx, r.cod, r.sc];
     }), buildConfig: {
       attemptT1: attemptT1, attemptT2: attemptT2,
-      slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets
+      slaTargetDefault: slaTargetDefault, branchSlaTargets: branchSlaTargets, statusMappingSig: statusMappingSig_()
     } };
   }
   var tResponsePrepEnd = new Date().getTime();
@@ -2358,7 +2368,8 @@ function getAllMonthsDashboardSummary(params) {
           Number(snapBc.attemptT1) === Number(attemptT1) &&
           Number(snapBc.attemptT2) === Number(attemptT2) &&
           Number(snapBc.slaTargetDefault) === Number(slaTargetDefault) &&
-          summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets);
+          summaryBranchTargetsEqual_(snapBc.branchSlaTargets, branchSlaTargets) &&
+          summaryConfigStatusOk_(snapBc);
         // A snapshot with no buildConfig at all predates this check — only
         // treated as compatible when the request itself uses the plain
         // defaults (matches the same leniency getMonthDashboardSummary
@@ -4018,7 +4029,8 @@ function buildMissingMonthSnapshots() {
         var compatibleWithDefaults = !!bc &&
           Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
           Number(bc.slaTargetDefault) === Number(persisted.slaTargetDefault) &&
-          summaryBranchTargetsEqual_(bc.branchSlaTargets, persisted.branchSlaTargets);
+          summaryBranchTargetsEqual_(bc.branchSlaTargets, persisted.branchSlaTargets) &&
+          summaryConfigStatusOk_(bc);
         if (compatibleWithDefaults) { needsBuild = false; skipReason = "already-compatible-snapshot"; }
       }
     }
@@ -4119,7 +4131,8 @@ function snapshotIsCurrentlyCompatible_(month, persistedSla) {
   return !!bc &&
     Number(bc.attemptT1) === 1 && Number(bc.attemptT2) === 2 &&
     Number(bc.slaTargetDefault) === Number(persistedSla.slaTargetDefault) &&
-    summaryBranchTargetsEqual_(bc.branchSlaTargets, persistedSla.branchSlaTargets);
+    summaryBranchTargetsEqual_(bc.branchSlaTargets, persistedSla.branchSlaTargets) &&
+    summaryConfigStatusOk_(bc);
 }
 
 // THE function to run repeatedly (manually, from the Apps Script editor)
