@@ -492,8 +492,9 @@ table.data-table tfoot td{background:var(--arrive-light-blue); font-weight:var(-
 .ms-option .cnt{margin-inline-start:auto; color:var(--text-secondary); font-size:var(--fs-micro); font-family:var(--font-numeric);}
 .ms-empty{padding:14px; text-align:center; color:var(--text-secondary); font-size:var(--fs-caption);}
 .date-range{display:flex; gap:6px; align-items:center;}
-.date-range input{height:var(--control-h-md); font-size:var(--fs-small);}
-.filter-clear{margin-inline-start:auto;}
+.date-range input{height:var(--control-h-md); font-size:var(--fs-small); flex:1 1 0; min-width:0;}
+.filter-group.filter-date{flex:2 1 340px; max-width:440px;} /* two date inputs + «إلى» need more room than one dropdown, otherwise the reset button overlaps them */
+.filter-clear{margin-inline-start:auto; flex:0 0 auto; white-space:nowrap;}
 .active-filters{display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:0 16px 14px;}
 .active-filters:empty{display:none;}
 .active-filters .lbl{font-size:var(--fs-caption); color:var(--text-secondary); font-weight:var(--fw-semibold);}
@@ -3759,7 +3760,7 @@ function initFilterUI(){
   }
   // date range
   const dateGrp = document.createElement('div');
-  dateGrp.className = 'filter-group';
+  dateGrp.className = 'filter-group filter-date';
   dateGrp.innerHTML = `<label>الفترة الزمنية (تاريخ الاستلام)</label>
     <div class="date-range">
       <input type="date" id="dateFrom"> <span style="align-self:center;color:var(--text-faint);">إلى</span> <input type="date" id="dateTo">
@@ -7622,7 +7623,7 @@ function ageChartOpts(title, sub, o){
     plugins: Object.assign({
       title:{ display:true, text:title, color:AGE_C.navy, font:font(14,'bold') },
       subtitle:{ display:true, text:sub, color:AGE_C.grey, font:font(10), padding:{ bottom:6 } },
-      legend:{ rtl:true, textDirection:'rtl', position:'top', onClick:()=>{}, labels:Object.assign({ boxWidth:11, boxHeight:11, font:font(10), color:'#334155' }, o.legendLabels||{}) },
+      legend:{ rtl:true, textDirection:'rtl', position:'bottom', onClick:()=>{}, labels:Object.assign({ boxWidth:11, boxHeight:11, font:font(10), color:'#334155' }, o.legendLabels||{}) },
       tooltip:{ enabled:false }
     }, o.plugins||{}),
     scales:{
