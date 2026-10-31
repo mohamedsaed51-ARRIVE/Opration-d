@@ -2081,20 +2081,28 @@ async function savePersistedSlaSettings(){
 let BRANCH_CONFIG = {};
 let BUILTIN_BRANCH_REGIONS = {};
 let BRANCH_CONFIG_LOADED = false, BRANCH_SEED_DONE = false;
-// One-time automatic fill: a branch tied to a region (built-in lists) that has no saved branch settings is saved with
-// that region's market / company days. Never overwrites anything already saved; skipped when settings could not be loaded.
+// One-time automatic fill: a branch tied to a region (built-in lists or saved) gets that region's market / company days wherever
+// its saved market / company value is empty. Never overwrites a saved market / company value; skipped when settings could not be loaded.
 async function autoSeedBranchDefaults(){
   if(BRANCH_SEED_DONE || !BRANCH_CONFIG_LOADED || !AGE_STD_FROM_SERVER) return;
   BRANCH_SEED_DONE = true;
   const oldTargets = Object.assign({}, BRANCH_SLA_TARGETS), oldConfig = JSON.parse(JSON.stringify(BRANCH_CONFIG));
   let changed = 0;
   (STATE.dims.branches||[]).forEach(b=>{
-    if(BRANCH_CONFIG[b]) return;
     const region = branchEffectiveRegion(b), rs = region ? AGE.std[region] : null;
     if(!rs) return;
-    BRANCH_CONFIG[b] = { region, slaMarket: rs.market, slaCompany: rs.delivery };
-    if(BRANCH_SLA_TARGETS[b]===undefined){ if(rs.market !== SLA_TARGET_DAYS) BRANCH_SLA_TARGETS[b] = rs.market; }
-    changed++;
+    const cfg = BRANCH_CONFIG[b] || { region, slaMarket:null, slaCompany:null };
+    let touched = !BRANCH_CONFIG[b];
+    if(!cfg.region){ cfg.region = region; touched = true; }
+    // an old per-branch target (from the earlier single-SLA setup) is NOT a market value — the market value comes from the region
+    // a market value >= the region's company days (e.g. 15 / 20) is a leftover of the earlier single-SLA setup, not a market value
+    if(cfg.slaMarket==null || cfg.slaMarket >= rs.delivery){ cfg.slaMarket = rs.market; touched = true; }
+    if(cfg.slaCompany==null){ cfg.slaCompany = rs.delivery; touched = true; }
+    // keep the dashboard's SLA target (market) in sync with the market column
+    if(cfg.slaMarket === SLA_TARGET_DAYS){ if(BRANCH_SLA_TARGETS[b]!==undefined){ delete BRANCH_SLA_TARGETS[b]; touched = true; } }
+    else if(BRANCH_SLA_TARGETS[b] !== cfg.slaMarket){ BRANCH_SLA_TARGETS[b] = cfg.slaMarket; touched = true; }
+    BRANCH_CONFIG[b] = cfg;
+    if(touched) changed++;
   });
   if(!changed) return;
   const ok = (await savePersistedBranchConfig()) && (await savePersistedSlaSettings());
@@ -7060,7 +7068,7 @@ function renderBranchSlaTable(){
     const cfg = BRANCH_CONFIG[b] || {};
     const region = branchEffectiveRegion(b), rs = region ? AGE.std[region] : null;
     // a branch tied to a region takes that region's market/company days unless it has its own saved value
-    const marketVal = (BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : (rs ? rs.market : SLA_TARGET_DAYS);
+    const marketVal = (cfg.slaMarket!=null) ? cfg.slaMarket : (rs ? rs.market : ((BRANCH_SLA_TARGETS[b]!==undefined && BRANCH_SLA_TARGETS[b]!==null) ? BRANCH_SLA_TARGETS[b] : SLA_TARGET_DAYS));
     const companyVal = (cfg.slaCompany!==undefined && cfg.slaCompany!==null) ? cfg.slaCompany : (rs ? rs.delivery : '');
     return `<tr data-branch-row="${esc(b)}">
       <td>${esc(b)}</td>
