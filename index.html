@@ -1520,18 +1520,14 @@ const ARRIVE_XLSX = (function(){
 
   const KPI_DEFS = [
     {label:'إجمالي الشحنات', kind:'count', get:r=>r.count, tot:s=>s.totalVolume},
-    {label:'تم التسليم', kind:'count', get:r=>r.delivered, tot:s=>s.delivered},
     {label:'نسبة التسليم', kind:'rate', tag:'delivery', get:r=>r.deliveryRate, tot:s=>s.deliveryRate},
-    {label:'المرتجعات', kind:'count', get:r=>r.returned, tot:s=>s.returned},
     {label:'نسبة المرتجعات', kind:'rate', tag:'return', get:r=>r.returnRate, tot:s=>s.returnRate},
-    {label:'الرفض', kind:'count', get:r=>r.rejected, tot:s=>s.rejected},
     {label:'نسبة الرفض', kind:'rate', tag:'reject', get:r=>r.rejectRate, tot:s=>s.rejectRate},
-    {label:'قيد التشغيل', kind:'count', get:r=>r.pending, tot:s=>s.pending},
     {label:'نسبة قيد التشغيل', kind:'rate', tag:'inprogress', get:r=>r.inProgressRate, tot:s=>(s.totalVolume>0 && s.pending!=null) ? s.pending/s.totalVolume*100 : null},
-    {label:'SLA %', kind:'rate', tag:'sla', get:r=>r.slaPct, tot:s=>s.slaPct},
+    {label:'SLA % (للتسليمات)', kind:'rate', tag:'sla', get:r=>r.slaPct, tot:s=>s.slaPct},
   ];
 
-  // One table per entity: title band (name) · header (المؤشر + months + period total) · 10 KPI rows · 2 spacer rows.
+  // One table per entity: title band (name) · header (المؤشر + months + period total) · KPI rows · 2 spacer rows.
   function entitySheet(wb, sheetName, entityLabel, entries, months, c, note){
     const ws = newSheet(wb, sheetName, c.blue, c);
     const cols = months.length + 2;
@@ -5679,15 +5675,11 @@ async function mgmtGenerateExecutivePdfReport(){
 function mgmtBuildRotatedComparisonSheet(entries, months, entityLabel){
   const kpiDefs = [
     {label:'إجمالي الشحنات', kind:'count', get:r=>r?r.count:null},
-    {label:'تم التسليم', kind:'count', get:r=>r?r.delivered:null},
     {label:'نسبة التسليم', kind:'rate', tag:'delivery', get:r=>r?r.deliveryRate:null},
-    {label:'المرتجعات', kind:'count', get:r=>r?r.returned:null},
     {label:'نسبة المرتجعات', kind:'rate', tag:'return', get:r=>r?r.returnRate:null},
-    {label:'الرفض', kind:'count', get:r=>r?r.rejected:null},
     {label:'نسبة الرفض', kind:'rate', tag:'reject', get:r=>r?r.rejectRate:null},
-    {label:'قيد التشغيل', kind:'count', get:r=>r?r.pending:null},
     {label:'نسبة قيد التشغيل', kind:'rate', tag:'inprogress', get:r=>r?r.inProgressRate:null},
-    {label:'SLA %', kind:'rate', tag:'sla', get:r=>r?r.slaPct:null},
+    {label:'SLA % (للتسليمات)', kind:'rate', tag:'sla', get:r=>r?r.slaPct:null},
   ];
 
   const headerRow1 = [entityLabel];
