@@ -204,6 +204,31 @@ function doGet(e) {
       result = saveSlaSettingsPayload(params);
     }
 
+    // STATUS MAPPING: manual status -> category overrides chosen in the Settings tab.
+    else if (action === "getBranchConfig") {
+      result = getBranchConfigPayload();
+    }
+
+    else if (action === "saveBranchConfig") {
+      result = saveBranchConfigPayload(params);
+    }
+
+    else if (action === "getAgeStandards") {
+      result = getAgeStandardsPayload();
+    }
+
+    else if (action === "saveAgeStandards") {
+      result = saveAgeStandardsPayload(params);
+    }
+
+    else if (action === "getStatusMapping") {
+      result = getStatusMappingPayload();
+    }
+
+    else if (action === "saveStatusMapping") {
+      result = saveStatusMappingPayload(params);
+    }
+
     // --------------------------------------------------------
     // DASHBOARD SUMMARY (server-side aggregation — compact JSON,
     // no raw rows). This is what the Dashboard now uses for the normal
@@ -487,6 +512,142 @@ function saveSlaSettingsPayload(params) {
   }
 }
 
+// ============================================================
+// 4D. MANUAL STATUS MAPPING (status text -> category)
+// ============================================================
+// Chosen per status in the Settings tab (the status list comes from the sheets
+// themselves). Stored as ONE JSON blob in Script Properties:
+//   { "<status as written in the sheet>": "<kind>" }
+// kind ∈ SUMMARY_MANUAL_KINDS. A status with no entry keeps the automatic rules
+// in summaryClassifyKind. Changes only affect summaries/age snapshots built AFTER
+// saving — run «تحديث الداش بورد» to rebuild the saved ones.
+var STATUS_MAPPING_PROPERTY_KEY = "STATUS_MAPPING_JSON";
+var SUMMARY_MANUAL_KINDS = ["delivered", "returnClosed", "returnOpen", "returnHold", "rejected", "inProgress", "unknown"];
+var SUMMARY_STATUS_OVERRIDES = null; // normalized status -> kind, loaded lazily per execution
+
+function getPersistedStatusMapping_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(STATUS_MAPPING_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[STATUS MAPPING READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getStatusOverrides_() {
+  if (SUMMARY_STATUS_OVERRIDES) return SUMMARY_STATUS_OVERRIDES;
+  var raw = getPersistedStatusMapping_(), out = {};
+  for (var k in raw) {
+    if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+    if (SUMMARY_MANUAL_KINDS.indexOf(raw[k]) < 0) continue;
+    out[summaryNormalizeArabicForMatch_(summaryNormText(k))] = raw[k];
+  }
+  SUMMARY_STATUS_OVERRIDES = out;
+  return out;
+}
+function getStatusMappingPayload() {
+  return { success: true, mapping: getPersistedStatusMapping_() };
+}
+function saveStatusMappingPayload(params) {
+  try {
+    var parsed = (params && params.mapping) ? JSON.parse(params.mapping) : {};
+    var clean = {};
+    for (var k in parsed) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, k)) continue;
+      var name = summaryNormText(k);
+      if (name && SUMMARY_MANUAL_KINDS.indexOf(parsed[k]) >= 0) clean[name] = parsed[k];
+    }
+    PropertiesService.getScriptProperties().setProperty(STATUS_MAPPING_PROPERTY_KEY, JSON.stringify(clean));
+    SUMMARY_STATUS_OVERRIDES = null;
+    return { success: true, mapping: clean };
+  } catch (e) {
+    console.log("[STATUS MAPPING SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// ============================================================
+// 4E. BRANCH CONFIG (region + market SLA), chosen in the Settings tab
+// ============================================================
+// { "<branch>": { region: "cairo"|"delta"|"upper"|"", slaMarket: number|null } }
+// region decides which shipment-age group (القاهرة والإسكندرية / الدلتا والقنال / الصعيد) a branch is
+// aged under; a branch with no region keeps the built-in AGE_REPORT_GROUPS assignment.
+// The company SLA per branch stays in SLA_SETTINGS_JSON (branchSlaTargets).
+var BRANCH_CONFIG_PROPERTY_KEY = "BRANCH_CONFIG_JSON";
+var BRANCH_REGION_KEYS = ["cairo", "delta", "upper"];
+function getPersistedBranchConfig_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(BRANCH_CONFIG_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[BRANCH CONFIG READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getBranchConfigPayload() { return { success: true, config: getPersistedBranchConfig_() }; }
+function saveBranchConfigPayload(params) {
+  try {
+    var parsed = (params && params.config) ? JSON.parse(params.config) : {};
+    var clean = {};
+    for (var b in parsed) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, b)) continue;
+      var name = summaryNormText(b), e = parsed[b] || {};
+      if (!name) continue;
+      var region = BRANCH_REGION_KEYS.indexOf(e.region) >= 0 ? e.region : "";
+      var m = Number(e.slaMarket);
+      var slaMarket = (e.slaMarket !== null && e.slaMarket !== undefined && e.slaMarket !== "" && isFinite(m) && m > 0) ? m : null;
+      if (region || slaMarket !== null) clean[name] = { region: region, slaMarket: slaMarket };
+    }
+    PropertiesService.getScriptProperties().setProperty(BRANCH_CONFIG_PROPERTY_KEY, JSON.stringify(clean));
+    return { success: true, config: clean };
+  } catch (e) {
+    console.log("[BRANCH CONFIG SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// ============================================================
+// 4F. AGE STANDARDS PER REGION (days), entered in the Settings tab
+// ============================================================
+// { cairo:{market,delivery,returns}, delta:{...}, upper:{...} } — used as the base of
+// ageResolveGroups_ (a per-request override still wins; built-in AGE_REPORT_GROUPS values are the fallback).
+var AGE_STANDARDS_PROPERTY_KEY = "AGE_STANDARDS_JSON";
+function getPersistedAgeStandards_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(AGE_STANDARDS_PROPERTY_KEY);
+    if (!raw) return {};
+    var parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === "object") ? parsed : {};
+  } catch (e) {
+    console.log("[AGE STANDARDS READ FAILED] " + String(e && e.message ? e.message : e));
+    return {};
+  }
+}
+function getAgeStandardsPayload() { return { success: true, standards: getPersistedAgeStandards_() }; }
+function saveAgeStandardsPayload(params) {
+  try {
+    var parsed = (params && params.standards) ? JSON.parse(params.standards) : {};
+    var clean = {};
+    for (var i = 0; i < BRANCH_REGION_KEYS.length; i++) {
+      var k = BRANCH_REGION_KEYS[i], o = parsed[k] || {}, entry = {}, any = false;
+      ["market", "delivery", "returns"].forEach(function (f) {
+        var n = Number(o[f]);
+        if (o[f] !== null && o[f] !== undefined && o[f] !== "" && isFinite(n) && n > 0) { entry[f] = n; any = true; }
+      });
+      if (any) clean[k] = entry;
+    }
+    PropertiesService.getScriptProperties().setProperty(AGE_STANDARDS_PROPERTY_KEY, JSON.stringify(clean));
+    return { success: true, standards: clean };
+  } catch (e) {
+    console.log("[AGE STANDARDS SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
 function summaryNormText(s) {
   if (s === null || s === undefined) return "";
   return String(s).replace(/\s+/g, " ").trim();
@@ -590,6 +751,8 @@ function summaryClassifyKind(status) {
   var n = summaryNormalizeArabicForMatch_(summaryNormText(status));
   if (!n) return "unknown";
   if (n.indexOf(summaryNormalizeArabicForMatch_(SUMMARY_REJECT_LABEL_PREFIX)) === 0) return "rejected";
+  var manualOverrides = getStatusOverrides_();
+  if (manualOverrides.hasOwnProperty(n)) return manualOverrides[n]; // manual choice from the Settings tab wins over the automatic rules
   if (SUMMARY_STATUS_LOOKUP.hasOwnProperty(n)) {
     var b = SUMMARY_STATUS_LOOKUP[n];
     return b === "pending" ? "inProgress" : b; // delivered | inProgress | rejected(fallback)
@@ -2518,12 +2681,25 @@ function ageSumKinds_(k) { return k.delivered.count + k.returnClosed.count + k.r
 // Resolves the effective groups, applying optional overrides
 // {cairo:{market,delivery,returns}, ...}. Non-positive / non-numeric values are ignored.
 function ageResolveGroups_(overrides) {
-  var out = [];
+  var out = [], persistedStd = getPersistedAgeStandards_();
   for (var i = 0; i < AGE_REPORT_GROUPS.length; i++) {
-    var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {};
+    var g = AGE_REPORT_GROUPS[i], o = (overrides && overrides[g.key]) || {}, saved = persistedStd[g.key] || {};
     function pick(v, d) { var n = Number(v); return (v !== undefined && v !== null && v !== "" && isFinite(n) && n > 0) ? n : d; }
-    out.push({ key: g.key, name: g.name, branches: g.branches,
-      market: pick(o.market, g.marketDays), delivery: pick(o.delivery, g.companyDeliveryDays), returns: pick(o.returns, g.companyReturnDays) });
+    out.push({ key: g.key, name: g.name, branches: g.branches.slice(),
+      market: pick(o.market, pick(saved.market, g.marketDays)), delivery: pick(o.delivery, pick(saved.delivery, g.companyDeliveryDays)), returns: pick(o.returns, pick(saved.returns, g.companyReturnDays)) });
+  }
+  // Region chosen per branch in Settings wins over the built-in lists.
+  var cfg = getPersistedBranchConfig_();
+  for (var bn in cfg) {
+    if (!Object.prototype.hasOwnProperty.call(cfg, bn) || !cfg[bn] || !cfg[bn].region) continue;
+    var norm = ageNormBranch_(bn), target = null, gi2, bj;
+    for (gi2 = 0; gi2 < out.length; gi2++) {
+      var kept = [];
+      for (bj = 0; bj < out[gi2].branches.length; bj++) if (ageNormBranch_(out[gi2].branches[bj]) !== norm) kept.push(out[gi2].branches[bj]);
+      out[gi2].branches = kept;
+      if (out[gi2].key === cfg[bn].region) target = out[gi2];
+    }
+    if (target) target.branches.push(summaryNormText(bn));
   }
   return out;
 }
