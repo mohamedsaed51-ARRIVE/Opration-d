@@ -600,7 +600,9 @@ function saveBranchConfigPayload(params) {
       var region = BRANCH_REGION_KEYS.indexOf(e.region) >= 0 ? e.region : "";
       var m = Number(e.slaMarket);
       var slaMarket = (e.slaMarket !== null && e.slaMarket !== undefined && e.slaMarket !== "" && isFinite(m) && m > 0) ? m : null;
-      if (region || slaMarket !== null) clean[name] = { region: region, slaMarket: slaMarket };
+      var c = Number(e.slaCompany);
+      var slaCompany = (e.slaCompany !== null && e.slaCompany !== undefined && e.slaCompany !== "" && isFinite(c) && c > 0) ? c : null;
+      if (region || slaMarket !== null || slaCompany !== null) clean[name] = { region: region, slaMarket: slaMarket, slaCompany: slaCompany };
     }
     PropertiesService.getScriptProperties().setProperty(BRANCH_CONFIG_PROPERTY_KEY, JSON.stringify(clean));
     return { success: true, config: clean };
