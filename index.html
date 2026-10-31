@@ -6278,7 +6278,7 @@ function renderAllMonthsCompletenessWarning(summary){
     dsSetAlertText(el, message);
   } else if(hasStaleSla){
     el.className = 'ds-alert';
-    dsSetAlertText(el, `الإجمالي معروض بالكامل، لكن أرقام SLA لهذه الشهور مبنية بإعدادات SLA سابقة وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. شغّل buildMissingSummaries من محرر Apps Script لإعادة بنائها بإعدادات SLA الحالية، ثم أعد تحميل الصفحة.`);
+    dsSetAlertText(el, `الإجمالي معروض بالكامل، لكن أرقام SLA لهذه الشهور مبنية بإعدادات SLA سابقة وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. أعد بناءها بإعدادات SLA الحالية من الإعدادات ← «تحديث الداش بورد» (اختر «كل الشهور» أولاً)، أو شغّل rebuildAllSummaries من محرر Apps Script وكرّرها حتى تظهر allMonthsComplete: true، ثم أعد تحميل الصفحة. تأكد أيضاً أنك نشرت آخر نسخة من Code.gs.`);
   } else {
     // Purely informational — no problem, no incomplete data, nothing to retry.
     el.className = 'ds-alert info';
