@@ -3346,27 +3346,45 @@ function listStatusNames() {
 
 // ============================================================
 // MISSING SLA DATA — الشحنات المُسلَّمة بدون بيانات SLA صالحة
-// ▶ شغّلها من قائمة ARRIVE Dashboard ← "List Missing-SLA Shipments" (أو من محرر Apps Script).
-// تمر على شهور الملف المفتوح (Q1/Q2/Q3/Q4) وتكتب تبويب MISSING_SLA_DATA: كل شحنة مُسلَّمة (بعد حذف تكرار رقم البوليصة)
-// لا يمكن حساب SLA لها، مع الشهر والفرع والعميل والتواريخ والسبب — لتصحيحها في الشيت أو معرفة مصدر المشكلة.
+// ▶ شغّلها من قائمة ARRIVE Dashboard ← "List Missing-SLA Shipments" (أو من محرر Apps Script) — من أي ملف.
+// تمر على شهور كل الأرباع Q1..Q4 (تفتحها بالـ ID) وتكتب تبويب MISSING_SLA_DATA واحد مجمّع في الملف المفتوح:
+// كل شحنة مُسلَّمة (بعد حذف تكرار رقم البوليصة داخل الشهر) لا يمكن حساب SLA لها، مع الشهر والفرع والعميل والتواريخ والسبب.
 // السبب: «تاريخ الاستلام فارغ/غير صالح»، أو «لا يوجد تاريخ تسليم ولا تاريخ آخر حالة».
+// تتوقف قبل حد الوقت (≈4 دقائق) وتكمل من حيث وقفت عند تشغيلها مرة أخرى حتى تقول complete:true؛ بعدها أي تشغيل جديد يبدأ من الصفر.
 // ============================================================
 var MISSING_SLA_SHEET = "MISSING_SLA_DATA";
+var MISSING_SLA_PROGRESS_KEY = "MISSING_SLA_PROGRESS_JSON";
+var MISSING_SLA_TIME_BUDGET_MS = 240000;
 function listMissingSlaShipments() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet(), id = ss.getId(), quarter = null;
-  for (var q in SPREADSHEET_IDS) { if (SPREADSHEET_IDS[q] === id) quarter = q; }
-  if (!quarter) throw new Error("هذا الملف ليس أحد ملفات Q1/Q2/Q3/Q4.");
-  var months = MONTH_ORDER.filter(function (mo) { return MONTH_SOURCE[mo] === quarter; });
-  var table = [["الشهر", "رقم البوليصة", "الفرع", "العميل", "حالة الشحنة", "تاريخ الاستلام", "تاريخ آخر حالة", "تاريخ التسليم", "السبب"]];
-  var perMonth = {}, tz = Session.getScriptTimeZone() || "Africa/Cairo";
+  var started = new Date().getTime();
+  var props = PropertiesService.getScriptProperties();
+  var done = {};
+  try { done = JSON.parse(props.getProperty(MISSING_SLA_PROGRESS_KEY) || "{}") || {}; } catch (eP) { done = {}; }
+  if (MONTH_ORDER.every(function (mo) { return done.hasOwnProperty(mo); })) done = {}; // the previous run finished — start a fresh one
+
+  var out;
+  try { out = SpreadsheetApp.getActiveSpreadsheet(); } catch (eA) { out = null; }
+  if (!out) out = SpreadsheetApp.openById(SPREADSHEET_IDS.Q1);
+  var sh = out.getSheetByName(MISSING_SLA_SHEET) || out.insertSheet(MISSING_SLA_SHEET);
+  var header = ["الشهر", "رقم البوليصة", "الفرع", "العميل", "حالة الشحنة", "تاريخ الاستلام", "تاريخ آخر حالة", "تاريخ التسليم", "السبب"];
+  if (!Object.keys(done).length) { sh.clear(); sh.getRange(1, 1, 1, header.length).setValues([header]); sh.setFrozenRows(1); }
+
+  var tz = Session.getScriptTimeZone() || "Africa/Cairo";
   function fmt(d) { return d ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; }
-  for (var m = 0; m < months.length; m++) {
-    var sheet = ss.getSheetByName(months[m]);
-    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) continue;
+  var processed = [], notReached = [], errors = [];
+  for (var m = 0; m < MONTH_ORDER.length; m++) {
+    var month = MONTH_ORDER[m];
+    if (done.hasOwnProperty(month)) continue;
+    if (new Date().getTime() - started > MISSING_SLA_TIME_BUDGET_MS) { notReached.push(month); continue; }
+    var src;
+    try { src = SpreadsheetApp.openById(SPREADSHEET_IDS[MONTH_SOURCE[month]]); }
+    catch (eO) { errors.push({ month: month, error: String(eO && eO.message ? eO.message : eO) }); continue; }
+    var sheet = src.getSheetByName(month);
+    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) { done[month] = 0; continue; } // no data in this month yet
     var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
     var headers = values[0], colMap = summaryDetectColumnMap(headers), idx = {}, mapped = Object.keys(colMap);
     for (var f = 0; f < mapped.length; f++) idx[mapped[f]] = headers.indexOf(colMap[mapped[f]]);
-    if (idx.awb === undefined || idx.status === undefined) continue;
+    if (idx.awb === undefined || idx.status === undefined) { errors.push({ month: month, error: "أعمدة رقم البوليصة/الحالة غير موجودة" }); continue; }
     // de-duplicate by AWB exactly like the dashboard: keep the record with the latest «تاريخ آخر حالة»
     var byAwb = {};
     for (var r = 1; r < values.length; r++) {
@@ -3378,33 +3396,38 @@ function listMissingSlaShipments() {
       var prev = byAwb[awb];
       if (!prev || (last ? last.getTime() : -Infinity) >= (prev.last ? prev.last.getTime() : -Infinity)) byAwb[awb] = { row: row, last: last };
     }
-    var count = 0;
+    var rows = [];
     for (var key in byAwb) {
       if (!byAwb.hasOwnProperty(key)) continue;
       var rr = byAwb[key].row;
-      var finalStatus = summaryNormText(summaryGetField(rr, idx, "finalStatus"));
-      var status = summaryEffectiveStatus_(summaryGetField(rr, idx, "status"), finalStatus);
+      var status = summaryEffectiveStatus_(summaryGetField(rr, idx, "status"), summaryNormText(summaryGetField(rr, idx, "finalStatus")));
       if (summaryKindToBucket_(summaryClassifyKind(status)) !== "delivered") continue;
       var pickup = summaryParseDate(summaryGetField(rr, idx, "pickup"));
       var lastS = byAwb[key].last;
       var deliv = summaryParseDate(summaryGetField(rr, idx, "delivery"));
-      var endDate = deliv || lastS;
-      if (pickup && endDate) continue; // has usable SLA data
-      var reason = !pickup ? "تاريخ الاستلام فارغ/غير صالح" : "لا يوجد تاريخ تسليم ولا تاريخ آخر حالة";
-      table.push([months[m], key, summaryNormText(summaryGetField(rr, idx, "branch")), summaryNormText(summaryGetField(rr, idx, "client")), status, fmt(pickup), fmt(lastS), fmt(deliv), reason]);
-      count++;
+      if (pickup && (deliv || lastS)) continue; // has usable SLA data
+      rows.push([month, key, summaryNormText(summaryGetField(rr, idx, "branch")), summaryNormText(summaryGetField(rr, idx, "client")), status,
+        fmt(pickup), fmt(lastS), fmt(deliv), !pickup ? "تاريخ الاستلام فارغ/غير صالح" : "لا يوجد تاريخ تسليم ولا تاريخ آخر حالة"]);
     }
-    perMonth[months[m]] = count;
+    for (var w = 0; w < rows.length; w += 20000) {
+      var chunk = rows.slice(w, w + 20000);
+      sh.getRange(sh.getLastRow() + 1, 1, chunk.length, header.length).setValues(chunk);
+    }
+    done[month] = rows.length;
+    processed.push(month);
+    props.setProperty(MISSING_SLA_PROGRESS_KEY, JSON.stringify(done)); // saved after every month so a stopped run resumes here
   }
-  var out = ss.getSheetByName(MISSING_SLA_SHEET) || ss.insertSheet(MISSING_SLA_SHEET);
-  out.clear();
-  out.getRange(1, 1, table.length, 9).setValues(table);
-  out.setFrozenRows(1);
-  var res = { success: true, quarter: quarter, total: table.length - 1, perMonth: perMonth };
+  props.setProperty(MISSING_SLA_PROGRESS_KEY, JSON.stringify(done));
+  var complete = MONTH_ORDER.every(function (mo) { return done.hasOwnProperty(mo); });
+  var total = 0; for (var dk in done) { if (done.hasOwnProperty(dk)) total += done[dk]; }
+  var res = { success: errors.length === 0, complete: complete, total: total, perMonth: done, processedThisRun: processed, notReached: notReached, errors: errors };
   Logger.log(JSON.stringify(res));
-  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + MISSING_SLA_SHEET + " — " + (table.length - 1) + " شحنة. حسب الشهر: " + JSON.stringify(perMonth)); } catch (e) { /* run from the editor: no UI */ }
+  var msg = complete ? ("اكتمل. تبويب " + MISSING_SLA_SHEET + " — " + total + " شحنة. حسب الشهر: " + JSON.stringify(done))
+    : ("تم جزء من الشهور (" + processed.join("، ") + ")، المتبقي: " + (notReached.join("، ") || "—") + ". شغّل الدالة مرة أخرى للاستكمال.");
+  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { /* run from the editor: no UI */ }
   return res;
 }
+
 
 // ============================================================
 // COLUMN PROFILE — بصمة أعمدة الشيت (لمعرفة أي عمود يميّز مرتجع مفتوح/مغلق وغيره)
