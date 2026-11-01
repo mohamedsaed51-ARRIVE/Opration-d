@@ -4951,3 +4951,383 @@ function rebuildRemainingMonths() {
     }, null, 2));
   });
 }
+
+/**
+ * ARRIVE — Clear dashboard summary snapshots only.
+ * Keeps source shipment sheets and header rows intact.
+ */
+var ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY =
+  "ARRIVE_SUMMARY_3_MONTH_BATCH_PROGRESS_V1";
+
+var ARRIVE_SUMMARY_3_MONTH_BATCH_SIZE = 3;
+var ARRIVE_SUMMARY_3_MONTH_BATCH_TIME_BUDGET_MS = 270000;
+
+function clearAllDashboardSummariesForRebuild() {
+  var lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(5000)) {
+    return {
+      success: false,
+      error: "يوجد تنفيذ آخر يعمل حاليًا. حاول مرة أخرى."
+    };
+  }
+
+  var report = {
+    success: false,
+    action: "clear_dashboard_summaries",
+    quarters: [],
+    errors: []
+  };
+
+  try {
+    var props = PropertiesService.getScriptProperties();
+
+    // Clear both progress trackers so old progress cannot skip months.
+    props.deleteProperty(ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY);
+    props.deleteProperty("SNAPSHOT_BUILD_PROGRESS_JSON");
+
+    var quarters = ["Q1", "Q2", "Q3", "Q4"];
+
+    for (var i = 0; i < quarters.length; i++) {
+      var quarter = quarters[i];
+
+      try {
+        // Gets or creates DASHBOARD_SUMMARY with its header row.
+        var sh = getPersistentSummarySheet_(quarter);
+        var lastRow = sh.getLastRow();
+        var lastColumn = sh.getLastColumn();
+        var rowsCleared = 0;
+
+        // Preserve row 1 (headers) and clear only summary data.
+        if (lastRow > 1 && lastColumn > 0) {
+          rowsCleared = lastRow - 1;
+          sh.getRange(
+            2,
+            1,
+            rowsCleared,
+            lastColumn
+          ).clearContent();
+        }
+
+        report.quarters.push({
+          quarter: quarter,
+          summarySheet: PERSISTENT_SUMMARY_SHEET,
+          rowsCleared: rowsCleared,
+          success: true
+        });
+
+      } catch (err) {
+        report.errors.push({
+          quarter: quarter,
+          error: String(err && err.message ? err.message : err)
+        });
+      }
+    }
+
+    // Invalidate cached dashboard results after clearing.
+    bumpSnapshotGenerationStamp_();
+
+    if (report.errors.length === 0) {
+      props.setProperty(
+        ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY,
+        JSON.stringify({
+          batchIndex: 0,
+          completedMonths: {},
+          failedMonths: {},
+          completedBatches: [],
+          clearedAt: new Date().toISOString()
+        })
+      );
+
+      report.success = true;
+      report.message =
+        "تم مسح ملخصات الداشبورد. ابدأ الآن بإعادة البناء على دفعات.";
+    } else {
+      report.message =
+        "المسح لم يكتمل في كل الأرباع. راجع الأخطاء قبل بدء البناء.";
+    }
+
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+
+  } catch (err) {
+    report.errors.push({
+      error: String(err && err.message ? err.message : err)
+    });
+
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * ARRIVE — Rebuild dashboard summaries in fixed batches:
+ * January-March, April-June, July-September, October-December.
+ *
+ * Run repeatedly until allMonthsComplete = true.
+ * A successfully rebuilt month is not repeated if a later month fails.
+ */
+function rebuildNextThreeMonthSummaryBatch() {
+  var lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(5000)) {
+    return {
+      success: false,
+      error: "يوجد تنفيذ آخر يعمل حاليًا. حاول مرة أخرى."
+    };
+  }
+
+  var started = new Date().getTime();
+  var report = {
+    success: false,
+    batchNumber: null,
+    monthsInBatch: [],
+    monthsBuiltThisRun: [],
+    monthsAlreadyBuilt: [],
+    monthsFailed: [],
+    monthsNotStarted: [],
+    ageSnapshotWarnings: [],
+    allMonthsComplete: false
+  };
+
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var raw = props.getProperty(
+      ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY
+    );
+
+    if (!raw) {
+      report.error =
+        "لم يتم العثور على سجل المسح. شغّل clearAllDashboardSummariesForRebuild أولًا.";
+      Logger.log(JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    var progress = JSON.parse(raw);
+
+    if (!progress.clearedAt) {
+      report.error =
+        "سجل إعادة البناء غير صالح. شغّل دالة المسح أولًا.";
+      Logger.log(JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    progress.completedMonths = progress.completedMonths || {};
+    progress.failedMonths = progress.failedMonths || {};
+    progress.completedBatches = progress.completedBatches || [];
+
+    var batchIndex = Number(progress.batchIndex) || 0;
+    var batchCount = Math.ceil(
+      MONTH_ORDER.length / ARRIVE_SUMMARY_3_MONTH_BATCH_SIZE
+    );
+
+    if (batchIndex >= batchCount) {
+      report.success = true;
+      report.allMonthsComplete = true;
+      report.message = "تم بناء ملخصات الشهور الاثني عشر.";
+      Logger.log(JSON.stringify(report, null, 2));
+      return report;
+    }
+
+    var startIndex =
+      batchIndex * ARRIVE_SUMMARY_3_MONTH_BATCH_SIZE;
+
+    var months = MONTH_ORDER.slice(
+      startIndex,
+      startIndex + ARRIVE_SUMMARY_3_MONTH_BATCH_SIZE
+    );
+
+    report.batchNumber = batchIndex + 1;
+    report.monthsInBatch = months.slice();
+
+    for (var i = 0; i < months.length; i++) {
+      var month = months[i];
+
+      // Skip only if this month was successfully built in this rebuild.
+      if (
+        Object.prototype.hasOwnProperty.call(
+          progress.completedMonths,
+          month
+        )
+      ) {
+        report.monthsAlreadyBuilt.push(month);
+        continue;
+      }
+
+      // Stop starting new months before reaching the execution limit.
+      if (
+        new Date().getTime() - started >
+        ARRIVE_SUMMARY_3_MONTH_BATCH_TIME_BUDGET_MS
+      ) {
+        for (var j = i; j < months.length; j++) {
+          var pendingMonth = months[j];
+
+          if (
+            !Object.prototype.hasOwnProperty.call(
+              progress.completedMonths,
+              pendingMonth
+            )
+          ) {
+            report.monthsNotStarted.push(pendingMonth);
+          }
+        }
+        break;
+      }
+
+      try {
+        Logger.log("[SUMMARY REBUILD START] " + month);
+
+        var result = buildAndSaveMonthSummary(month);
+
+        if (!result || result.success !== true) {
+          throw new Error(
+            result && result.error
+              ? result.error
+              : "فشل بناء الملخص بدون رسالة خطأ واضحة."
+          );
+        }
+
+        // Persist successful completion immediately.
+        progress.completedMonths[month] = {
+          completedAt: new Date().toISOString(),
+          totalRows: Number(result.totalRows || 0),
+          grandTotal: Number(result.grandTotal || 0)
+        };
+
+        delete progress.failedMonths[month];
+
+        report.monthsBuiltThisRun.push({
+          month: month,
+          totalRows: Number(result.totalRows || 0),
+          grandTotal: Number(result.grandTotal || 0),
+          chunks: result.chunks || 0
+        });
+
+        // The main dashboard summary may succeed even if the separate
+        // age snapshot reports a warning. Keep those outcomes distinct.
+        if (
+          result.ageSnapshot &&
+          result.ageSnapshot.success === false
+        ) {
+          report.ageSnapshotWarnings.push({
+            month: month,
+            warning: result.ageSnapshot.error ||
+              result.ageSnapshot.note ||
+              result.ageSnapshot.skipped ||
+              "تعذر تحديث ملخص عمر الشحنة."
+          });
+        }
+
+        Logger.log(
+          "[SUMMARY REBUILD SAVED] " +
+          month +
+          " " +
+          JSON.stringify(progress.completedMonths[month])
+        );
+
+      } catch (err) {
+        var errorMessage = String(
+          err && err.message ? err.message : err
+        );
+
+        progress.failedMonths[month] = {
+          error: errorMessage,
+          attemptedAt: new Date().toISOString()
+        };
+
+        report.monthsFailed.push({
+          month: month,
+          error: errorMessage
+        });
+
+        Logger.log(
+          "[SUMMARY REBUILD FAILED] " +
+          month +
+          " " +
+          errorMessage
+        );
+      }
+
+      // Save progress after each month so the next run can resume.
+      progress.lastUpdatedAt = new Date().toISOString();
+
+      props.setProperty(
+        ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY,
+        JSON.stringify(progress)
+      );
+    }
+
+    // Advance only after every month in this fixed batch has succeeded.
+    var batchComplete = true;
+
+    for (var k = 0; k < months.length; k++) {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          progress.completedMonths,
+          months[k]
+        )
+      ) {
+        batchComplete = false;
+        break;
+      }
+    }
+
+    if (batchComplete) {
+      progress.completedBatches.push({
+        batchNumber: batchIndex + 1,
+        months: months.slice(),
+        completedAt: new Date().toISOString()
+      });
+
+      progress.batchIndex = batchIndex + 1;
+      progress.lastUpdatedAt = new Date().toISOString();
+
+      props.setProperty(
+        ARRIVE_SUMMARY_3_MONTH_PROGRESS_KEY,
+        JSON.stringify(progress)
+      );
+    }
+
+    report.nextBatchNumber =
+      progress.batchIndex < batchCount
+        ? progress.batchIndex + 1
+        : null;
+
+    report.allMonthsComplete =
+      progress.batchIndex >= batchCount;
+
+    report.success =
+      report.monthsFailed.length === 0 &&
+      report.monthsNotStarted.length === 0 &&
+      batchComplete;
+
+    report.durationMs = new Date().getTime() - started;
+
+    report.message = report.allMonthsComplete
+      ? "اكتمل بناء ملخصات الشهور الاثني عشر."
+      : batchComplete
+        ? "اكتملت هذه الدفعة. شغّل الدالة مرة أخرى للدفعة التالية."
+        : "الدفعة لم تكتمل. شغّل الدالة مرة أخرى لاستكمال الشهور غير المكتملة.";
+
+    Logger.log(
+      "========== ARRIVE SUMMARY REBUILD ==========\n" +
+      JSON.stringify(report, null, 2)
+    );
+
+    return report;
+
+  } catch (err) {
+    report.error = String(
+      err && err.message ? err.message : err
+    );
+    report.durationMs = new Date().getTime() - started;
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+
+  } finally {
+    lock.releaseLock();
+  }
+}
