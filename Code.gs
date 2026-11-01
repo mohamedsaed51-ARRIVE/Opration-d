@@ -3345,6 +3345,68 @@ function listStatusNames() {
 
 
 // ============================================================
+// MISSING SLA DATA — الشحنات المُسلَّمة بدون بيانات SLA صالحة
+// ▶ شغّلها من قائمة ARRIVE Dashboard ← "List Missing-SLA Shipments" (أو من محرر Apps Script).
+// تمر على شهور الملف المفتوح (Q1/Q2/Q3/Q4) وتكتب تبويب MISSING_SLA_DATA: كل شحنة مُسلَّمة (بعد حذف تكرار رقم البوليصة)
+// لا يمكن حساب SLA لها، مع الشهر والفرع والعميل والتواريخ والسبب — لتصحيحها في الشيت أو معرفة مصدر المشكلة.
+// السبب: «تاريخ الاستلام فارغ/غير صالح»، أو «لا يوجد تاريخ تسليم ولا تاريخ آخر حالة».
+// ============================================================
+var MISSING_SLA_SHEET = "MISSING_SLA_DATA";
+function listMissingSlaShipments() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), id = ss.getId(), quarter = null;
+  for (var q in SPREADSHEET_IDS) { if (SPREADSHEET_IDS[q] === id) quarter = q; }
+  if (!quarter) throw new Error("هذا الملف ليس أحد ملفات Q1/Q2/Q3/Q4.");
+  var months = MONTH_ORDER.filter(function (mo) { return MONTH_SOURCE[mo] === quarter; });
+  var table = [["الشهر", "رقم البوليصة", "الفرع", "العميل", "حالة الشحنة", "تاريخ الاستلام", "تاريخ آخر حالة", "تاريخ التسليم", "السبب"]];
+  var perMonth = {}, tz = Session.getScriptTimeZone() || "Africa/Cairo";
+  function fmt(d) { return d ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : ""; }
+  for (var m = 0; m < months.length; m++) {
+    var sheet = ss.getSheetByName(months[m]);
+    if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) continue;
+    var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    var headers = values[0], colMap = summaryDetectColumnMap(headers), idx = {}, mapped = Object.keys(colMap);
+    for (var f = 0; f < mapped.length; f++) idx[mapped[f]] = headers.indexOf(colMap[mapped[f]]);
+    if (idx.awb === undefined || idx.status === undefined) continue;
+    // de-duplicate by AWB exactly like the dashboard: keep the record with the latest «تاريخ آخر حالة»
+    var byAwb = {};
+    for (var r = 1; r < values.length; r++) {
+      var row = values[r];
+      if (summaryRowIsAllEmpty(row)) continue;
+      var awb = summaryNormText(summaryGetField(row, idx, "awb"));
+      if (!awb) continue;
+      var last = summaryParseDate(summaryGetField(row, idx, "lastStatus"));
+      var prev = byAwb[awb];
+      if (!prev || (last ? last.getTime() : -Infinity) >= (prev.last ? prev.last.getTime() : -Infinity)) byAwb[awb] = { row: row, last: last };
+    }
+    var count = 0;
+    for (var key in byAwb) {
+      if (!byAwb.hasOwnProperty(key)) continue;
+      var rr = byAwb[key].row;
+      var finalStatus = summaryNormText(summaryGetField(rr, idx, "finalStatus"));
+      var status = summaryEffectiveStatus_(summaryGetField(rr, idx, "status"), finalStatus);
+      if (summaryKindToBucket_(summaryClassifyKind(status)) !== "delivered") continue;
+      var pickup = summaryParseDate(summaryGetField(rr, idx, "pickup"));
+      var lastS = byAwb[key].last;
+      var deliv = summaryParseDate(summaryGetField(rr, idx, "delivery"));
+      var endDate = deliv || lastS;
+      if (pickup && endDate) continue; // has usable SLA data
+      var reason = !pickup ? "تاريخ الاستلام فارغ/غير صالح" : "لا يوجد تاريخ تسليم ولا تاريخ آخر حالة";
+      table.push([months[m], key, summaryNormText(summaryGetField(rr, idx, "branch")), summaryNormText(summaryGetField(rr, idx, "client")), status, fmt(pickup), fmt(lastS), fmt(deliv), reason]);
+      count++;
+    }
+    perMonth[months[m]] = count;
+  }
+  var out = ss.getSheetByName(MISSING_SLA_SHEET) || ss.insertSheet(MISSING_SLA_SHEET);
+  out.clear();
+  out.getRange(1, 1, table.length, 9).setValues(table);
+  out.setFrozenRows(1);
+  var res = { success: true, quarter: quarter, total: table.length - 1, perMonth: perMonth };
+  Logger.log(JSON.stringify(res));
+  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + MISSING_SLA_SHEET + " — " + (table.length - 1) + " شحنة. حسب الشهر: " + JSON.stringify(perMonth)); } catch (e) { /* run from the editor: no UI */ }
+  return res;
+}
+
+// ============================================================
 // COLUMN PROFILE — بصمة أعمدة الشيت (لمعرفة أي عمود يميّز مرتجع مفتوح/مغلق وغيره)
 // ▶ قائمة ARRIVE Dashboard ← "Profile Columns (الأعمدة)" — تكتب تبويب COLUMN_PROFILE في الملف المفتوح
 // لأحدث شهر فيه بيانات (أو لشهر تحدده في profileColumns("October")): لكل عمود اسمه وعدد الخانات المعبّأة
@@ -4268,6 +4330,7 @@ function onOpen() {
     .addItem("Age Report: Build Missing Months Summary", "buildMissingAgeSnapshots")
     .addItem("Age Report: Update All Months Summary", "buildAllAgeSnapshots")
     .addItem("List Status Names (أسماء الحالات)", "listStatusNames")
+    .addItem("List Missing-SLA Shipments (شحنات بدون بيانات SLA)", "listMissingSlaShipments")
     .addItem("Profile Columns (الأعمدة)", "profileColumns")
     .addItem("Reset Snapshot Batch Progress", "resetSummaryBuildProgress")
     .addSeparator()
