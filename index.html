@@ -7517,7 +7517,7 @@ function renderAgeReport(d){
   if(d.missingMonths && d.missingMonths.length) notes.push(alertBox('violation','شيتات غير موجودة', `لم يتم العثور على بيانات للشهور: ${ageEsc(d.missingMonths.join('، '))} — الأرقام لا تشمل الفترة الواقعة فيها.`));
   const unm = Object.entries(q.unmappedBranches||{});
   if(unm.length) notes.push(alertBox('violation','فروع غير مصنّفة جغرافيًا', `${unm.map(([n,c])=>`${ageEsc(n)} (${ageN(c)})`).join('، ')} — لم تُقارن بالمعايير. أضِفها لمجموعتها في <code>AGE_REPORT_GROUPS</code> داخل Code.gs.`));
-  if(k.other>0) notes.push(alertBox('','شحنات خارج التصنيفات الأربعة', `${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام). تظهر في صف «أخرى» ولا تدخل في نسب المعايير. راجع جدول الحالات أدناه.${ageMonthsBreakdown((q.byMonth||{}).other)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.other))}`:''}`));
+  if(k.other>0) notes.push(alertBox('','شحنات خارج التصنيفات الأربعة', `${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل. تظهر في صف «أخرى» ولا تدخل في نسب المعايير. راجع جدول الحالات أدناه.${ageMonthsBreakdown((q.byMonth||{}).other)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.other))}`:''}`));
   if(q.invalidPickup) notes.push(alertBox('','تاريخ بيك أب غير صالح/فارغ', `${ageN(q.invalidPickup)} شحنة لا يمكن حساب عمرها (تُحسب ضمن العدد ولا تدخل في المتوسطات أو نسب الالتزام).${ageMonthsBreakdown((q.byMonth||{}).invalidPickup)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.invalidPickup))}`:''}`));
   if(q.closedWithoutEndDate) notes.push(alertBox('','حالة مغلقة بدون تاريخ آخر حالة', `${ageN(q.closedWithoutEndDate)} شحنة مسلّمة/مرتجع مغلق بلا تاريخ آخر حالة — بلا عمر محسوب.${ageMonthsBreakdown((q.byMonth||{}).closedWithoutEndDate)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.closedWithoutEndDate))}`:''}`));
   if(q.negativeAge) notes.push(alertBox('','أعمار سالبة', `${ageN(q.negativeAge)} شحنة تاريخ آخر حالتها (أو تاريخ القياس) أسبق من تاريخ البيك أب — استُبعدت من الأعمار ويلزم مراجعة البيانات.${ageMonthsBreakdown((q.byMonth||{}).negativeAge)?`<br><b>الشهور:</b> ${ageEsc(ageMonthsBreakdown(q.byMonth.negativeAge))}`:''}`));
@@ -7940,7 +7940,7 @@ async function exportAgeDocx(){
     if(d.missingMonths && d.missingMonths.length) notes.push(`لم يتم العثور على بيانات للشهور: ${d.missingMonths.join('، ')} — الأرقام لا تشمل الفترة الواقعة فيها.`);
     const unm = Object.entries(q.unmappedBranches||{});
     if(unm.length) notes.push(`فروع غير مصنّفة جغرافيًا (لم تُقارن بالمعايير): ${unm.map(([n,c])=>`${n} (${ageN(c)})`).join('، ')}.`);
-    if(k.other>0) notes.push(`${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل (مثل رفض الاستلام) — لا تدخل في نسب المعايير.`);
+    if(k.other>0) notes.push(`${ageN(k.other)} شحنة بحالات لا تُصنَّف تسليمًا ناجحًا ولا مرتجعًا ولا قيد تشغيل — لا تدخل في نسب المعايير.`);
     if(q.invalidPickup) notes.push(`${ageN(q.invalidPickup)} شحنة بتاريخ بيك أب غير صالح/فارغ — لا يمكن حساب عمرها.${ageMonthsBreakdown((q.byMonth||{}).invalidPickup)?` الشهور: ${ageMonthsBreakdown(q.byMonth.invalidPickup)}.`:''}`);
     if(q.closedWithoutEndDate) notes.push(`${ageN(q.closedWithoutEndDate)} شحنة مغلقة بدون تاريخ آخر حالة — بلا عمر محسوب.`);
     if(q.negativeAge) notes.push(`${ageN(q.negativeAge)} شحنة بعمر سالب (تاريخ آخر حالة أسبق من البيك أب) — استُبعدت من الأعمار.`);
@@ -8033,7 +8033,7 @@ async function exportAgeXlsx(){
     {vals:['المفتوحة','إجمالي المفتوحة',k.open,null,`${k.inProgress} قيد التشغيل + ${k.returnOpen} مرتجع مفتوح`]},
     {vals:['المفتوحة','متجاوز لمعيار الشركة',k.openOverdue,f(k.openOverduePct),`من ${k.open} شحنة مفتوحة`]},
     {vals:['المفتوحة','متوسط العمر (يوم)',null,null,`قيد التشغيل ${ageD(k.avgInProgressAge)} · مرتجع ${ageD(k.avgOpenReturnAge)} · الإجمالي ${ageD(k.avgOpenAge)}`]},
-    {vals:['أخرى','شحنات خارج التصنيفات (مثل رفض الاستلام)',k.other,null,'لا تدخل في نسب المعايير']},
+    {vals:['أخرى','شحنات خارج التصنيفات',k.other,null,'لا تدخل في نسب المعايير']},
   ], [null,null,INT,PCT,null], 4);
   widths(ws,[16,42,12,12,70]);
 

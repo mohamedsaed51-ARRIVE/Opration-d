@@ -2636,6 +2636,7 @@ var AGE_REPORT_GROUPS = [
   { key: "upper", name: "الصعيد", marketDays: 3, companyDeliveryDays: 20, companyReturnDays: 6,
     branches: ["الفيوم", "الصعيد"] }
 ];
+var AGE_HOLD_RETURNS_BRANCH = "رئيسي"; // on-hold returns are counted under the main branch (Cairo & Alexandria group)
 var AGE_REPORT_MAX_MONTHS = 4;
 var AGE_REPORT_MAX_OPEN_LIST = 3000;
 var AGE_REPORT_CACHE_TTL_SECONDS = 600;
@@ -2665,7 +2666,7 @@ function ageIsoDate_(d) {
 
 // kind: delivered | returnClosed | returnOpen | inProgress | other
 function ageClassify_(status) {
-  // `status` is the EFFECTIVE status (rejection already carried from the final-status column — see summaryEffectiveStatus_).
+  // `status` is the «حالة الشحنة» column only — the age report deliberately ignores «الحالة النهائية».
   // On-hold returns are aged like open returns (the shipment is not back with the sender yet).
   var kind = summaryClassifyKind(status);
   if (kind === "delivered") return "delivered";
@@ -2765,14 +2766,16 @@ function ageReportCompute_(records, groups, asOfNum) {
     if (!statusBreakdown[sKey]) statusBreakdown[sKey] = { count: 0, kind: kind };
     statusBreakdown[sKey].count++;
 
-    var bNorm = ageNormBranch_(rec.branch);
+    // Orders whose status is a ON-HOLD return («مرتجعات معلقة») belong to the main branch («رئيسي» — Cairo & Alexandria group), whatever branch the sheet says.
+    var recBranch = (summaryClassifyKind(rec.status) === "returnHold") ? AGE_HOLD_RETURNS_BRANCH : rec.branch;
+    var bNorm = ageNormBranch_(recBranch);
     var gIndex = bNorm && branchToGroup.hasOwnProperty(bNorm) ? branchToGroup[bNorm] : -1;
     var gs = gIndex >= 0 ? state[gIndex] : unassigned;
     var std = gIndex >= 0 ? groups[gIndex] : null;
-    if (!rec.branch) dq.missingBranch++;
-    else if (gIndex < 0) unmappedBranches[rec.branch] = (unmappedBranches[rec.branch] || 0) + 1;
+    if (!recBranch) dq.missingBranch++;
+    else if (gIndex < 0) unmappedBranches[recBranch] = (unmappedBranches[recBranch] || 0) + 1;
 
-    var branchLabel = rec.branch ? summaryNormText(rec.branch).replace(/^فرع\s+/, "") : "غير محدد";
+    var branchLabel = recBranch ? summaryNormText(recBranch).replace(/^فرع\s+/, "") : "غير محدد";
     if (gIndex >= 0) {
       for (bi = 0; bi < groups[gIndex].branches.length; bi++) {
         if (ageNormBranch_(groups[gIndex].branches[bi]) === bNorm) { branchLabel = groups[gIndex].branches[bi]; break; }
@@ -3023,7 +3026,7 @@ function getAgeReport(params) {
       if (pickup) { var pn = ageDayNum_(pickup); if ((fromNum !== null && pn < fromNum) || (toNum !== null && pn > toNum)) { outOfRange++; continue; } }
       var rec = {
         awb: awb, month: month, pickup: pickup, lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
-        branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryEffectiveStatus_(summaryGetField(row, idx, "status"), summaryGetField(row, idx, "finalStatus"))
+        branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status"))
       };
       if (awbMap.hasOwnProperty(awb)) {
         dupRemoved++;
@@ -3081,7 +3084,7 @@ function getAgeReport(params) {
 // Limitation: AWBs repeated across two different months are not de-duplicated in snapshot mode.
 // ------------------------------------------------------------
 var AGE_SNAPSHOT_SHEET = "AGE_SUMMARY";
-var AGE_SNAPSHOT_VERSION = "2"; // 2 = status stored as the effective status (rejection from the final-status column)
+var AGE_SNAPSHOT_VERSION = "3"; // 3 = status column ONLY (the age report ignores «الحالة النهائية»); 2 = effective status incl. final-status rejection (no longer used — rebuild)
 var AGE_SNAPSHOT_CHUNK = 45000;
 var AGE_SNAPSHOT_BATCH_BUDGET_MS = 270000;
 
@@ -3156,7 +3159,7 @@ function ageBuildSnapshot_(month) {
     var awb = summaryNormText(summaryGetField(row, idx, "awb"));
     if (!awb) { noAwb++; continue; }
     var rec = { awb: awb, pickup: summaryParseDate(summaryGetField(row, idx, "pickup")), lastStatus: summaryParseDate(summaryGetField(row, idx, "lastStatus")),
-      branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryEffectiveStatus_(summaryGetField(row, idx, "status"), summaryGetField(row, idx, "finalStatus")) };
+      branch: summaryNormText(summaryGetField(row, idx, "branch")), status: summaryNormText(summaryGetField(row, idx, "status")) };
     if (awbMap.hasOwnProperty(awb)) {
       dup++;
       var et = awbMap[awb].lastStatus ? awbMap[awb].lastStatus.getTime() : -Infinity;
@@ -3312,7 +3315,7 @@ function collectStatusNames_(ss, months) {
       if (!counts.hasOwnProperty(name)) continue;
       var real = name === "(فارغ)" ? "" : name;
       rows.push({ month: months[m], status: name, count: counts[name],
-        dashboard: DASH_KIND_LABELS_AR_[summaryClassifyKind(real)], age: AGE_KIND_LABELS_AR_[ageClassify_(real)] });
+        dashboard: DASH_KIND_LABELS_AR_[summaryClassifyKind(real)], age: (real.indexOf(SUMMARY_REJECT_LABEL_PREFIX) === 0 ? "— (عمر الشحنة لا يقرأ الحالة النهائية)" : AGE_KIND_LABELS_AR_[ageClassify_(real)]) });
     }
   }
   rows.sort(function (x, y) { return MONTH_ORDER.indexOf(x.month) - MONTH_ORDER.indexOf(y.month) || y.count - x.count; });
