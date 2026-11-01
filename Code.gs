@@ -2664,7 +2664,7 @@ function ageIsoDate_(d) {
   return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (day < 10 ? "0" : "") + day;
 }
 
-// kind: delivered | returnClosed | returnOpen | inProgress | other
+// kind: delivered | returnClosed | returnOpen | returnHold | inProgress | other
 function ageClassify_(status) {
   // `status` is the «حالة الشحنة» column only — the age report deliberately ignores «الحالة النهائية».
   // On-hold returns are aged like open returns (the shipment is not back with the sender yet).
@@ -2672,7 +2672,8 @@ function ageClassify_(status) {
   if (kind === "delivered") return "delivered";
   if (kind === "inProgress") return "inProgress";
   if (kind === "returnClosed") return "returnClosed";
-  if (kind === "returnOpen" || kind === "returnHold") return "returnOpen";
+  if (kind === "returnOpen") return "returnOpen";
+  if (kind === "returnHold") return "returnHold"; // reported separately from open returns, but aged the same way (still not back with the sender)
   return "other"; // rejected / unknown — reported separately, never judged against a standard
 }
 
@@ -2696,13 +2697,13 @@ function ageAddToAcc_(a, kind, age, std) {
   if (age <= limit) a.withinCompany++; else a.over++;
 }
 function ageNewKindAccs_() {
-  return { delivered: ageNewAcc_(), returnClosed: ageNewAcc_(), returnOpen: ageNewAcc_(), inProgress: ageNewAcc_(), other: ageNewAcc_() };
+  return { delivered: ageNewAcc_(), returnClosed: ageNewAcc_(), returnOpen: ageNewAcc_(), returnHold: ageNewAcc_(), inProgress: ageNewAcc_(), other: ageNewAcc_() };
 }
 function ageFinalizeKindAccs_(k) {
   return { delivered: ageFinalizeAcc_(k.delivered), returnClosed: ageFinalizeAcc_(k.returnClosed),
-    returnOpen: ageFinalizeAcc_(k.returnOpen), inProgress: ageFinalizeAcc_(k.inProgress), other: ageFinalizeAcc_(k.other) };
+    returnOpen: ageFinalizeAcc_(k.returnOpen), returnHold: ageFinalizeAcc_(k.returnHold), inProgress: ageFinalizeAcc_(k.inProgress), other: ageFinalizeAcc_(k.other) };
 }
-function ageSumKinds_(k) { return k.delivered.count + k.returnClosed.count + k.returnOpen.count + k.inProgress.count + k.other.count; }
+function ageSumKinds_(k) { return k.delivered.count + k.returnClosed.count + k.returnOpen.count + k.returnHold.count + k.inProgress.count + k.other.count; }
 
 // Resolves the effective groups, applying optional overrides
 // {cairo:{market,delivery,returns}, ...}. Non-positive / non-numeric values are ignored.
@@ -2755,7 +2756,7 @@ function ageReportCompute_(records, groups, asOfNum) {
   var dqByMonth = { invalidPickup: {}, closedWithoutEndDate: {}, negativeAge: {}, other: {} }; // month -> count, so the report can say WHICH months the issues are in
   function bumpMonth_(bucket, m) { var k = m || "?"; dqByMonth[bucket][k] = (dqByMonth[bucket][k] || 0) + 1; }
   var openList = [];
-  var minRetAge = null, maxRetAge = null;
+  var minRetAge = null, maxRetAge = null, sumHoldAge = 0, holdAgeN = 0;
   var sumOpenAge = 0, openAgeN = 0, sumPendAge = 0, pendAgeN = 0, sumRetAge = 0, retAgeN = 0;
   var branchOpenAgg = {};
 
@@ -2785,7 +2786,7 @@ function ageReportCompute_(records, groups, asOfNum) {
 
     // age
     var age = null;
-    var isOpen = kind === "inProgress" || kind === "returnOpen";
+    var isOpen = kind === "inProgress" || kind === "returnOpen" || kind === "returnHold";
     if (kind === "other") bumpMonth_("other", rec.month);
     if (!rec.pickup) { dq.invalidPickup++; bumpMonth_("invalidPickup", rec.month); }
     else if (kind !== "other") {
@@ -2814,13 +2815,13 @@ function ageReportCompute_(records, groups, asOfNum) {
 
     if (isOpen && age !== null) {
       sumOpenAge += age; openAgeN++;
-      if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else { sumRetAge += age; retAgeN++; if (minRetAge === null || age < minRetAge) minRetAge = age; if (maxRetAge === null || age > maxRetAge) maxRetAge = age; }
+      if (kind === "inProgress") { sumPendAge += age; pendAgeN++; } else if (kind === "returnHold") { sumHoldAge += age; holdAgeN++; } else { sumRetAge += age; retAgeN++; if (minRetAge === null || age < minRetAge) minRetAge = age; if (maxRetAge === null || age > maxRetAge) maxRetAge = age; }
     }
     if (isOpen) {
       var limit = std ? (kind === "inProgress" ? branchStd.delivery : branchStd.returns) : null;
       var overdue = (limit !== null && age !== null) ? age > limit : false;
-      var bo = branchOpenAgg[branchLabel] || (branchOpenAgg[branchLabel] = { branch: branchLabel, group: std ? std.name : "غير مصنّف", pending: 0, pendingOver: 0, ret: 0, retOver: 0 });
-      if (kind === "inProgress") { bo.pending++; if (overdue) bo.pendingOver++; } else { bo.ret++; if (overdue) bo.retOver++; }
+      var bo = branchOpenAgg[branchLabel] || (branchOpenAgg[branchLabel] = { branch: branchLabel, group: std ? std.name : "غير مصنّف", pending: 0, pendingOver: 0, ret: 0, retOver: 0, hold: 0, holdOver: 0 });
+      if (kind === "inProgress") { bo.pending++; if (overdue) bo.pendingOver++; } else if (kind === "returnHold") { bo.hold++; if (overdue) bo.holdOver++; } else { bo.ret++; if (overdue) bo.retOver++; }
       openList.push({ awb: rec.awb, branch: branchLabel, group: std ? std.name : "غير مصنّف", status: rec.status, kind: kind,
         pickup: rec.pickup ? ageIsoDate_(rec.pickup) : null, age: age, limit: limit, overdue: overdue });
     }
@@ -2838,8 +2839,8 @@ function ageReportCompute_(records, groups, asOfNum) {
       branches.push({ name: name, total: ageSumKinds_(bk), kinds: ageFinalizeKindAccs_(bk), market: bStd ? bStd.market : null, delivery: bStd ? bStd.delivery : null, returns: bStd ? bStd.returns : null });
     }
     branches.sort(function (x, y) { return y.total - x.total; });
-    var within = gs.kinds.delivered.withinCompany + gs.kinds.returnClosed.withinCompany + gs.kinds.returnOpen.withinCompany + gs.kinds.inProgress.withinCompany;
-    var over = gs.kinds.delivered.over + gs.kinds.returnClosed.over + gs.kinds.returnOpen.over + gs.kinds.inProgress.over;
+    var within = gs.kinds.delivered.withinCompany + gs.kinds.returnClosed.withinCompany + gs.kinds.returnOpen.withinCompany + gs.kinds.returnHold.withinCompany + gs.kinds.inProgress.withinCompany;
+    var over = gs.kinds.delivered.over + gs.kinds.returnClosed.over + gs.kinds.returnOpen.over + gs.kinds.returnHold.over + gs.kinds.inProgress.over;
     return Object.assign({ total: gTotal, kinds: kinds, branches: branches, dist: gs.dist || null,
       withinCompany: within, over: over,
       withinPct: gTotal > 0 ? within / gTotal * 100 : null, overPct: gTotal > 0 ? over / gTotal * 100 : null }, meta);
@@ -2865,12 +2866,13 @@ function ageReportCompute_(records, groups, asOfNum) {
   var delivered = kt.delivered.count + closedUnassigned.delivered.count;
   var returnClosed = kt.returnClosed.count + closedUnassigned.returnClosed.count;
   var returnOpen = kt.returnOpen.count + closedUnassigned.returnOpen.count;
+  var returnHold = kt.returnHold.count + closedUnassigned.returnHold.count;
   var inProgress = kt.inProgress.count + closedUnassigned.inProgress.count;
   var otherCount = kt.other.count + closedUnassigned.other.count;
-  var returns = returnClosed + returnOpen;
+  var returns = returnClosed + returnOpen + returnHold;
   function pct(n, d) { return d > 0 ? n / d * 100 : null; }
-  var openTotal = inProgress + returnOpen;
-  var overdueOpen = kt.inProgress.over + kt.returnOpen.over;
+  var openTotal = inProgress + returnOpen + returnHold;
+  var overdueOpen = kt.inProgress.over + kt.returnOpen.over + kt.returnHold.over;
   var kpis = {
     shipments: grandTotal,
     delivered: delivered, deliveredPct: pct(delivered, grandTotal),
@@ -2881,11 +2883,14 @@ function ageReportCompute_(records, groups, asOfNum) {
     returnClosed: returnClosed, returnClosedWithin: kt.returnClosed.withinCompany, returnClosedWithinPct: pct(kt.returnClosed.withinCompany, returns),
     returnClosedOver: kt.returnClosed.over, returnClosedOverPct: pct(kt.returnClosed.over, returns),
     returnOpen: returnOpen, returnOpenPct: pct(returnOpen, returns),
+    returnHold: returnHold, returnHoldPct: pct(returnHold, returns),
     avgReturnClosedAge: ageFinalizeAcc_(kt.returnClosed).avgAge,
     open: openTotal, inProgress: inProgress,
     openOverdue: overdueOpen, openOverduePct: pct(overdueOpen, openTotal),
     inProgressOverdue: kt.inProgress.over, inProgressOverduePct: pct(kt.inProgress.over, inProgress),
     returnOpenOverdue: kt.returnOpen.over, returnOpenOverduePct: pct(kt.returnOpen.over, returnOpen),
+    returnHoldOverdue: kt.returnHold.over, returnHoldOverduePct: pct(kt.returnHold.over, returnHold),
+    avgHoldReturnAge: holdAgeN > 0 ? sumHoldAge / holdAgeN : null,
     avgOpenAge: openAgeN > 0 ? sumOpenAge / openAgeN : null,
     avgInProgressAge: pendAgeN > 0 ? sumPendAge / pendAgeN : null,
     avgOpenReturnAge: retAgeN > 0 ? sumRetAge / retAgeN : null,
@@ -2896,18 +2901,19 @@ function ageReportCompute_(records, groups, asOfNum) {
   // open overview by group + top branches by overdue
   var openByGroup = [];
   for (gj = 0; gj < outGroups.length; gj++) {
-    var og = outGroups[gj], ik = og.kinds.inProgress, rk = og.kinds.returnOpen;
-    var openN = ik.count + rk.count, overN = ik.over + rk.over;
+    var og = outGroups[gj], ik = og.kinds.inProgress, rk = og.kinds.returnOpen, hk = og.kinds.returnHold;
+    var openN = ik.count + rk.count + hk.count, overN = ik.over + rk.over + hk.over;
     openByGroup.push({ key: og.key, name: og.name, delivery: og.delivery, returns: og.returns,
       inProgress: ik.count, inProgressOver: ik.over, inProgressOverPct: ik.overPct,
       returnOpen: rk.count, returnOpenOver: rk.over, returnOpenOverPct: rk.overPct,
+      returnHold: hk.count, returnHoldOver: hk.over, returnHoldOverPct: hk.overPct,
       overTotal: overN, overPctOfOpen: openN > 0 ? overN / openN * 100 : null });
   }
   var topBranches = [];
   for (var bk2 in branchOpenAgg) {
     if (!branchOpenAgg.hasOwnProperty(bk2)) continue;
-    var x = branchOpenAgg[bk2], openB = x.pending + x.ret, overB = x.pendingOver + x.retOver;
-    topBranches.push({ branch: x.branch, group: x.group, inProgress: x.pending, inProgressOver: x.pendingOver, returnOpen: x.ret, returnOpenOver: x.retOver,
+    var x = branchOpenAgg[bk2], openB = x.pending + x.ret + x.hold, overB = x.pendingOver + x.retOver + x.holdOver;
+    topBranches.push({ branch: x.branch, group: x.group, inProgress: x.pending, inProgressOver: x.pendingOver, returnOpen: x.ret, returnOpenOver: x.retOver, returnHold: x.hold, returnHoldOver: x.holdOver,
       overTotal: overB, overPctOfOpen: openB > 0 ? overB / openB * 100 : null });
   }
   topBranches.sort(function (a, b) { return b.overTotal - a.overTotal; });

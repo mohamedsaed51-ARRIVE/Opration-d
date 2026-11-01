@@ -16,9 +16,9 @@ const recs = [
 ];
 const r = sandbox.ageReportCompute_(recs, groups, asOf);
 const cairo = r.groups.find(g => g.key === 'cairo'), upper = r.groups.find(g => g.key === 'upper');
-check('hold return counted in the Cairo & Alexandria group', cairo.kinds.returnOpen.count === 1, cairo.kinds.returnOpen);
+check('hold return counted in the Cairo & Alexandria group', cairo.kinds.returnHold.count === 1, cairo.kinds.returnHold);
 check('hold return NOT counted in its sheet branch group (Upper)', upper.total === 0, upper.total);
-check('hold return listed under branch «رئيسي»', cairo.branches.some(b => b.name === 'رئيسي' && b.kinds.returnOpen.count === 1), cairo.branches.map(b => b.name));
+check('hold return listed under branch «رئيسي»', cairo.branches.some(b => b.name === 'رئيسي' && b.kinds.returnHold.count === 1), cairo.branches.map(b => b.name));
 check('open list branch is the main branch', r.open.list.length === 1 && r.open.list[0].branch === 'رئيسي', r.open.list);
 check('closed return counted normally', cairo.kinds.returnClosed.count === 1);
 // final status is ignored: a row whose status text is a closed return stays a closed return (the age report never sees the final-status column)
