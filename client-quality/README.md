@@ -1,4 +1,4 @@
-# جودة أداء العملاء — ARRIVE (React + Vite)
+# KPI Operation — ARRIVE (React + Vite)
 
 داش بورد منفصلة تقرأ من **نفس Apps Script Web App** الخاص بالداش التشغيلية (نفس البيانات)، عن طريق action جديد: `?action=clientMonthly`.
 

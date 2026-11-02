@@ -209,7 +209,7 @@ export default function App() {
       <header className="top">
         <div>
           <div className="brand">ARRIVE</div>
-          <h1>جودة أداء العملاء</h1>
+          <h1>KPI Operation</h1>
           <p className="sub">نسبة النجاح = (التسليم + «رفض الاستلام وتم دفع الشحن») ÷ إجمالي الشحنات، مقارنة بمتوسط آخر 3 شهور للعملاء المكررين</p>
         </div>
         <button className="btn" onClick={load} disabled={loading}>{loading ? 'جاري التحميل…' : 'تحديث'}</button>
