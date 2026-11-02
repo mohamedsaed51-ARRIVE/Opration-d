@@ -169,6 +169,12 @@ function doGet(e) {
       result = getAgeReport(params);
     }
 
+    // Per-customer monthly counts (total / delivered / rejected-with-shipping-paid)
+    // for the separate "Client Quality" dashboard. Read-only, uses saved snapshots only.
+    else if (action === "clientMonthly") {
+      result = getClientMonthlyPayload(params);
+    }
+
     else if (action === "buildAgeSnapshot") {
       if (!sheetName) result = { success: false, error: "لم يتم تحديد الشهر." };
       else result = buildAgeSnapshot(sheetName);
@@ -4947,6 +4953,77 @@ function diagnoseStatusBreakdown(sheetName) {
 function diagnoseJuneStatuses() {
   return diagnoseStatusBreakdown("June");
 }
+
+// ============================================================
+// 8Z. CLIENT MONTHLY (feeds the separate Client Quality dashboard)
+// ============================================================
+// For every month that has a saved snapshot (DASHBOARD_SUMMARY → filterCube) returns, per customer:
+//   [total shipments, delivered, rejected-with-shipping-paid]
+// "Shipping paid" = a rejection (taken from the FINAL-status column, same rule as the main dashboard) whose
+// text says «تم دفع الشحن». A rejection where the sender also refused to pay is NOT counted.
+// Read-only: no sheet is read except the saved snapshots; months without a snapshot are listed in missingMonths.
+// Optional params: months=July,August,... (default: all months).
+var CLIENT_QUALITY_PAID_KEYWORDS = ["تم دفع الشحن"];
+var CLIENT_QUALITY_TIME_BUDGET_MS = 240000;
+
+function clientQualityStatusClass_(statusLabel) {
+  var kind = summaryClassifyKind(statusLabel);
+  if (kind === "delivered") return "delivered";
+  if (kind === "rejected") {
+    var n = summaryNormalizeArabicForMatch_(summaryNormText(statusLabel));
+    return summaryHasAnyKeyword_(n, CLIENT_QUALITY_PAID_KEYWORDS) ? "paid" : "rejectedOther";
+  }
+  return "other";
+}
+
+function getClientMonthlyPayload(params) {
+  var t0 = new Date().getTime();
+  var requested = MONTH_ORDER.slice();
+  if (params && params.months) {
+    var asked = String(params.months).split(",").map(function (s) { return s.trim(); });
+    requested = MONTH_ORDER.filter(function (m) { return asked.indexOf(m) !== -1; });
+  }
+  var months = [], missing = [], skipped = [];
+  var clients = {}, clientOrder = [];
+  var statusRows = {}; // label -> { cls, count } for delivered / rejected labels only (so the user can verify the classification)
+  for (var mi = 0; mi < requested.length; mi++) {
+    var month = requested[mi];
+    if (new Date().getTime() - t0 > CLIENT_QUALITY_TIME_BUDGET_MS) { skipped.push(month); continue; }
+    var snap = null;
+    try { snap = getSavedMonthSummary_(month); } catch (e) { snap = null; }
+    if (!snap || !snap.filterCube || !snap.filterCube.records || !snap.filterCube.dict) { missing.push(month); continue; }
+    var dict = snap.filterCube.dict, records = snap.filterCube.records;
+    var classes = dict.status.map(clientQualityStatusClass_);
+    var perClient = {};
+    for (var ri = 0; ri < records.length; ri++) {
+      var rec = records[ri], n = rec[7], cls = classes[rec[4]];
+      var name = dict.client[rec[3]];
+      var v = perClient[name] || (perClient[name] = [0, 0, 0]);
+      v[0] += n;
+      if (cls === "delivered") v[1] += n; else if (cls === "paid") v[2] += n;
+      if (cls !== "other") {
+        var label = dict.status[rec[4]];
+        if (!statusRows[label]) statusRows[label] = { status: label, cls: cls, count: 0 };
+        statusRows[label].count += n;
+      }
+    }
+    months.push(month);
+    Object.keys(perClient).forEach(function (name) {
+      if (!clients[name]) { clients[name] = {}; clientOrder.push(name); }
+      clients[name][month] = perClient[name];
+    });
+  }
+  return {
+    success: true,
+    months: months, missingMonths: missing, skippedMonths: skipped,
+    clients: clientOrder.map(function (name) { return { n: name, v: clients[name] }; }),
+    statusClassification: Object.keys(statusRows).map(function (k) { return statusRows[k]; })
+      .sort(function (a, b) { return b.count - a.count; }),
+    paidKeywords: CLIENT_QUALITY_PAID_KEYWORDS,
+    durationMs: new Date().getTime() - t0
+  };
+}
+
 
 // ============================================================
 // 9. JSON RESPONSE
