@@ -500,6 +500,9 @@ table.cmp-table thead th.cmp-month{text-align:center; border-inline-start:2px so
 table.cmp-table thead th.cmp-first, table.cmp-table tbody td.cmp-first{border-inline-start:2px solid var(--border-strong);}
 table.cmp-table thead th.cmp-name{vertical-align:middle;}
 table.cmp-table tbody td.cmp-na{color:var(--text-faint); text-align:center;}
+.custchg-ctl{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin:6px 0 12px;}
+.custchg-ctl .filter-group{min-width:190px; max-width:260px; flex:0 1 230px;}
+.custchg-ctl select{height:var(--control-h-md); font-size:var(--fs-small);}
 .cmp-note{font-size:var(--fs-caption); color:var(--text-secondary); margin:2px 0 10px;}
 .active-filters{display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:0 16px 14px;}
 .active-filters:empty{display:none;}
@@ -1007,6 +1010,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   <div class="tab-panel" id="tab-newcust">
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد وتسليماتهم</div>
+      <div class="custchg-ctl" id="newcustCtl"></div>
       <div class="card-sub" id="newcustSub"></div>
       <div id="newcustBody"></div>
     </div>
@@ -1015,6 +1019,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   <div class="tab-panel" id="tab-stopcust">
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-user-minus" aria-hidden="true"></i> العملاء المتوقفون</div>
+      <div class="custchg-ctl" id="stopcustCtl"></div>
       <div class="card-sub" id="stopcustSub"></div>
       <div id="stopcustBody"></div>
     </div>
@@ -1023,6 +1028,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   <div class="tab-panel" id="tab-custcmp">
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-people-arrows" aria-hidden="true"></i> مقارنة فقد واكتساب العملاء بين الشهور</div>
+      <div class="custchg-ctl" id="custcmpCtl"></div>
       <div class="card-sub" id="custcmpSub"></div>
       <div id="custcmpBody"></div>
     </div>
@@ -6038,18 +6044,26 @@ async function custLoadSummaries(months){
   }));
   return out;
 }
+// Month choice shared by the three pages: «الشهر» (empty = follow the top selector) and «قارن بشهر» (empty = the previous month).
+const CUSTSEL = { target:'', base:'' };
 async function custChangeRows(mode){
   const chrono = mgmtChronoMonths();
-  const isAll = selectedMonth === ALL_MONTHS_SENTINEL;
-  let targets;
-  if(isAll) targets = chrono.slice();
-  else { const i = chrono.indexOf(selectedMonth); targets = i < 0 ? [selectedMonth] : (mode === 'cmp' ? chrono.slice(Math.max(0, i-2), i+1) : [selectedMonth]); }
-  const need = new Set();
-  targets.forEach(m=>{ need.add(m); const i = chrono.indexOf(m); if(i > 0) need.add(chrono[i-1]); });
+  const effTarget = CUSTSEL.target || (selectedMonth !== ALL_MONTHS_SENTINEL ? selectedMonth : '');
+  let pairs;
+  if(CUSTSEL.base){
+    if(!effTarget) return { needTarget:true };
+    pairs = [{ m:effTarget, prev:CUSTSEL.base }];
+  } else if(!effTarget){
+    pairs = chrono.map((m,i)=>({ m, prev: i>0 ? chrono[i-1] : null }));
+  } else {
+    const i = chrono.indexOf(effTarget);
+    const list = i < 0 ? [effTarget] : (mode === 'cmp' ? chrono.slice(Math.max(0, i-2), i+1) : [effTarget]);
+    pairs = list.map(m=>{ const j = chrono.indexOf(m); return { m, prev: j > 0 ? chrono[j-1] : null }; });
+  }
+  const need = new Set(); pairs.forEach(p=>{ need.add(p.m); if(p.prev) need.add(p.prev); });
   const sums = await custLoadSummaries([...need]);
-  return targets.map(m=>{
-    const i = chrono.indexOf(m), prev = i > 0 ? chrono[i-1] : null;
-    const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && cmpHasData(sums[prev]));
+  return pairs.map(({ m, prev })=>{
+    const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && prev !== m && cmpHasData(sums[prev]));
     const cur = custMapOf(sums[m]);
     const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0 };
     if(!hasCur || !hasPrev) return o;
@@ -6062,10 +6076,22 @@ async function custChangeRows(mode){
     return o;
   });
 }
+function custRenderControls(ctlId, mode){
+  const el = document.getElementById(ctlId); if(!el) return;
+  const chrono = mgmtChronoMonths();
+  const opt = (v,l,cur)=>`<option value="${v}"${v===cur?' selected':''}>${l}</option>`;
+  const monthsOpts = cur=>chrono.map(m=>opt(m, monthDisplayName(m), cur)).join('');
+  el.innerHTML = `<div class="filter-group"><label>الشهر</label><select data-cc="target">${opt('', 'حسب قائمة الشهر أعلى الصفحة', CUSTSEL.target)}${monthsOpts(CUSTSEL.target)}</select></div>` +
+    `<div class="filter-group"><label>قارن بشهر</label><select data-cc="base">${opt('', 'الشهر السابق (تلقائي)', CUSTSEL.base)}${monthsOpts(CUSTSEL.base)}</select></div>` +
+    `<button type="button" class="btn-ghost" data-cc="reset">إعادة للتلقائي</button>`;
+  el.querySelectorAll('select[data-cc]').forEach(sel=>sel.addEventListener('change', ()=>{ CUSTSEL[sel.dataset.cc] = sel.value; renderCustChangeTab(mode); }));
+  el.querySelector('button[data-cc="reset"]').addEventListener('click', ()=>{ CUSTSEL.target = ''; CUSTSEL.base = ''; renderCustChangeTab(mode); });
+}
 async function renderCustChangeTab(mode){
-  const ids = { new:['newcustBody','newcustSub'], stopped:['stopcustBody','stopcustSub'], cmp:['custcmpBody','custcmpSub'] }[mode];
+  const ids = { new:['newcustBody','newcustSub','newcustCtl'], stopped:['stopcustBody','stopcustSub','stopcustCtl'], cmp:['custcmpBody','custcmpSub','custcmpCtl'] }[mode];
   const body = document.getElementById(ids[0]), sub = document.getElementById(ids[1]);
   if(!body) return;
+  custRenderControls(ids[2], mode);
   const token = ++CUSTCHG_TOKEN;
   if(!selectedMonth){ body.innerHTML = ''; return; }
   body.innerHTML = '<div class="mgmt-empty-note">جاري تحميل الشهر السابق للمقارنة…</div>';
@@ -6073,6 +6099,8 @@ async function renderCustChangeTab(mode){
   try{ rows = await custChangeRows(mode); }
   catch(e){ if(token === CUSTCHG_TOKEN) body.innerHTML = '<div class="mgmt-empty-note">تعذر تحميل البيانات — حاول مرة أخرى.</div>'; return; }
   if(token !== CUSTCHG_TOKEN) return;
+  if(rows && rows.needTarget){ body.innerHTML = '<div class="mgmt-empty-note">اختر «الشهر» من القائمة أعلاه (أو من قائمة الشهر أعلى الصفحة) ثم الشهر الذي تقارنه به.</div>'; sub.textContent = ''; return; }
+  if(rows.length === 1 && rows[0].prev === rows[0].month){ body.innerHTML = '<div class="mgmt-empty-note">اختر شهرين مختلفين للمقارنة.</div>'; sub.textContent = ''; return; }
   const mdn = m=>monthDisplayName(m);
   const kpi = (l,v)=>`<div class="mgmt-mini-kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`;
   const tbl = (head, trs)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${trs}</tbody></table></div>`;
