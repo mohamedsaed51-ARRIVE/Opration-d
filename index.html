@@ -688,7 +688,7 @@ body.ds-updating::before{content:""; position:fixed; top:0; inset-inline:0; heig
 /* ==========================================================================
    تقرير عمر الشحنة (tab-shipage) — presentation only, outside the ARRIVE-DS inlined block
    ========================================================================== */
-body.on-shipage .filter-panel{display:none;}
+body.on-shipage .filter-panel, body.on-custchg .filter-panel{display:none;}
 /* الملخص التنفيذي يظهر فقط في تاب «المؤشرات الرئيسية» */
 body:not(.on-overview) .exec-wrap{display:none;}
 .age-controls{margin-bottom:var(--space-4);}
@@ -806,6 +806,9 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       <button class="tab-btn" data-tab="branches" type="button"><i class="fa-solid fa-location-dot" aria-hidden="true"></i><span>الفروع</span></button>
       <button class="tab-btn" data-tab="geo" type="button"><i class="fa-solid fa-map-location-dot" aria-hidden="true"></i><span>المحافظات والمناطق</span></button>
       <button class="tab-btn" data-tab="clients" type="button"><i class="fa-solid fa-users" aria-hidden="true"></i><span>العملاء</span></button>
+      <button class="tab-btn" data-tab="newcust" type="button"><i class="fa-solid fa-user-plus" aria-hidden="true"></i><span>العملاء الجدد</span></button>
+      <button class="tab-btn" data-tab="stopcust" type="button"><i class="fa-solid fa-user-minus" aria-hidden="true"></i><span>العملاء المتوقفون</span></button>
+      <button class="tab-btn" data-tab="custcmp" type="button"><i class="fa-solid fa-people-arrows" aria-hidden="true"></i><span>مقارنة العملاء (فقد واكتساب)</span></button>
       <button class="tab-btn" data-tab="trend" type="button"><i class="fa-solid fa-chart-line" aria-hidden="true"></i><span>الاتجاه الزمني</span></button>
       <button class="tab-btn" data-tab="dq" type="button"><i class="fa-solid fa-clipboard-check" aria-hidden="true"></i><span>جودة البيانات</span></button>
       <button class="tab-btn" data-tab="management" type="button"><i class="fa-solid fa-chart-column" aria-hidden="true"></i><span>تحليل الإدارة</span></button>
@@ -1001,6 +1004,30 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
     </div>
   </div>
 
+  <div class="tab-panel" id="tab-newcust">
+    <div class="card">
+      <div class="card-title"><i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد وتسليماتهم</div>
+      <div class="card-sub" id="newcustSub"></div>
+      <div id="newcustBody"></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-stopcust">
+    <div class="card">
+      <div class="card-title"><i class="fa-solid fa-user-minus" aria-hidden="true"></i> العملاء المتوقفون</div>
+      <div class="card-sub" id="stopcustSub"></div>
+      <div id="stopcustBody"></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-custcmp">
+    <div class="card">
+      <div class="card-title"><i class="fa-solid fa-people-arrows" aria-hidden="true"></i> مقارنة فقد واكتساب العملاء بين الشهور</div>
+      <div class="card-sub" id="custcmpSub"></div>
+      <div id="custcmpBody"></div>
+    </div>
+  </div>
+
   <div class="tab-panel" id="tab-trend">
     <div class="card">
       <div class="table-toolbar">
@@ -1061,9 +1088,6 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
           <option value="both">الفروع والعملاء</option>
           <option value="branches">الفروع فقط</option>
           <option value="customers">العملاء فقط</option>
-          <option value="newCustomers">العملاء الجدد وتسليماتهم</option>
-          <option value="stoppedCustomers">العملاء المتوقفون</option>
-          <option value="customerChurn">مقارنة فقد واكتساب العملاء بين الشهور</option>
         </select>
       </div>
       <div class="mgmt-ctrl" style="justify-content:flex-end; gap:8px;">
@@ -1131,12 +1155,6 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       </div>
       <div class="card-sub">الترتيب حسب حجم الشحنات في آخر شهر بالفترة المختارة.</div>
       <div class="table-scroll"><table class="data-table sticky-col" id="mgmtCustomerMovementTable"></table></div>
-    </div>
-
-    <div class="card mgmt-section" id="mgmtCustomerChangeSection" style="display:none;">
-      <div class="card-title" id="mgmtCustomerChangeTitle"><i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد والمتوقفون</div>
-      <div class="card-sub" id="mgmtCustomerChangeSub"></div>
-      <div id="mgmtCustomerChangeBody"></div>
     </div>
 
     <div class="card mgmt-section" id="mgmtCustomerAnalysisSection">
@@ -5996,96 +6014,107 @@ async function mgmtGenerateExcelReportLegacy(){
 
 
 
+
 /* =========================================================
-   NEW / STOPPED CUSTOMERS — each month is compared with the PREVIOUS month
-   new     = shipped in this month, did not ship in the previous month
-   stopped = shipped in the previous month, did not ship in this month
-   The month before the first selected month is loaded too, so the first month of the period can be compared as well.
+   العملاء الجدد / العملاء المتوقفون / مقارنة فقد واكتساب العملاء — three sidebar pages
+   Each month is compared with the PREVIOUS month:
+     new     = shipped in the month, did NOT ship in the previous month
+     stopped = shipped in the previous month, did NOT ship in the month
+   Follows the top month selector: one month (these pages' «مقارنة» shows that month and the two before it), or every
+   month with data when «كل الشهور» is selected. Not affected by the dimension filters (a customer filter would make
+   "new / stopped" meaningless), so the filter bar is hidden on these pages.
    ========================================================= */
-let MGMT_CHANGE_TOKEN = 0;
-function mgmtPrevMonthOf(m){ const c = mgmtChronoMonths(); const i = c.indexOf(m); return i > 0 ? c[i-1] : null; }
-function mgmtMonthHasData(m){ const d = MGMT.monthsData[m]; return !!(d && d.summary && !d.summary.isEmpty); }
-function mgmtCustMap(m){
+let CUSTCHG_TOKEN = 0;
+function custMapOf(s){
   const mm = new Map();
-  if(mgmtMonthHasData(m)) (MGMT.monthsData[m].summary.customerSummary||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
+  if(cmpHasData(s)) (s.customerSummary||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
   return mm;
 }
-function mgmtComputeCustomerChange(months){
-  return months.map(m=>{
-    const prev = mgmtPrevMonthOf(m), cur = mgmtCustMap(m);
-    const hasCur = mgmtMonthHasData(m), hasPrev = !!(prev && mgmtMonthHasData(prev));
-    const out = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0 };
-    if(!hasCur || !hasPrev) return out;
-    const pm = mgmtCustMap(prev);
-    cur.forEach((r,n)=>{ if(!pm.has(n)) out.newList.push({ name:n, month:m, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
-    pm.forEach((r,n)=>{ if(!cur.has(n)) out.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
-    out.newList.sort((a,b)=>b.shipments-a.shipments); out.stoppedList.sort((a,b)=>b.shipments-a.shipments);
-    out.newList.forEach(x=>{ out.newShipments += x.shipments; out.newDelivered += x.delivered; });
-    out.stoppedList.forEach(x=>{ out.stoppedShipments += x.shipments; out.stoppedDelivered += x.delivered; });
-    out.prevTotal = 0; pm.forEach(r=>{ out.prevTotal += r.shipments; });
-    return out;
+async function custLoadSummaries(months){
+  const out = {};
+  await Promise.all(months.map(async m=>{
+    try{ const r = await getMonthFullSummary(m, { slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS }); out[m] = r && r.summary; }
+    catch(e){ console.warn('[CUSTCHG LOAD FAILED]', m, e); out[m] = null; }
+  }));
+  return out;
+}
+async function custChangeRows(mode){
+  const chrono = mgmtChronoMonths();
+  const isAll = selectedMonth === ALL_MONTHS_SENTINEL;
+  let targets;
+  if(isAll) targets = chrono.slice();
+  else { const i = chrono.indexOf(selectedMonth); targets = i < 0 ? [selectedMonth] : (mode === 'cmp' ? chrono.slice(Math.max(0, i-2), i+1) : [selectedMonth]); }
+  const need = new Set();
+  targets.forEach(m=>{ need.add(m); const i = chrono.indexOf(m); if(i > 0) need.add(chrono[i-1]); });
+  const sums = await custLoadSummaries([...need]);
+  return targets.map(m=>{
+    const i = chrono.indexOf(m), prev = i > 0 ? chrono[i-1] : null;
+    const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && cmpHasData(sums[prev]));
+    const cur = custMapOf(sums[m]);
+    const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0 };
+    if(!hasCur || !hasPrev) return o;
+    const pm = custMapOf(sums[prev]);
+    cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:n, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
+    pm.forEach((r,n)=>{ o.prevTotal += r.shipments; if(!cur.has(n)) o.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
+    o.newList.sort((a,b)=>b.shipments-a.shipments); o.stoppedList.sort((a,b)=>b.shipments-a.shipments);
+    o.newList.forEach(x=>{ o.newShipments += x.shipments; o.newDelivered += x.delivered; });
+    o.stoppedList.forEach(x=>{ o.stoppedShipments += x.shipments; o.stoppedDelivered += x.delivered; });
+    return o;
   });
 }
-async function mgmtRenderCustomerChange(months){
-  const body = document.getElementById('mgmtCustomerChangeBody'), title = document.getElementById('mgmtCustomerChangeTitle'), sub = document.getElementById('mgmtCustomerChangeSub');
+async function renderCustChangeTab(mode){
+  const ids = { new:['newcustBody','newcustSub'], stopped:['stopcustBody','stopcustSub'], cmp:['custcmpBody','custcmpSub'] }[mode];
+  const body = document.getElementById(ids[0]), sub = document.getElementById(ids[1]);
   if(!body) return;
-  const token = ++MGMT_CHANGE_TOKEN;
+  const token = ++CUSTCHG_TOKEN;
+  if(!selectedMonth){ body.innerHTML = ''; return; }
   body.innerHTML = '<div class="mgmt-empty-note">جاري تحميل الشهر السابق للمقارنة…</div>';
-  const prevOfFirst = months.length ? mgmtPrevMonthOf(months[0]) : null;
-  if(prevOfFirst) await mgmtEnsureMonthsLoaded([prevOfFirst]);
-  if(token !== MGMT_CHANGE_TOKEN) return;
-  const rows = mgmtComputeCustomerChange(months);
-  const comparable = rows.filter(r=>r.hasCur && r.hasPrev);
-  const type = MGMT.comparisonType;
+  let rows;
+  try{ rows = await custChangeRows(mode); }
+  catch(e){ if(token === CUSTCHG_TOKEN) body.innerHTML = '<div class="mgmt-empty-note">تعذر تحميل البيانات — حاول مرة أخرى.</div>'; return; }
+  if(token !== CUSTCHG_TOKEN) return;
   const mdn = m=>monthDisplayName(m);
   const kpi = (l,v)=>`<div class="mgmt-mini-kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`;
-  const tbl = (head, bodyRows)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
-  const noPrev = rows.filter(r=>!(r.hasCur && r.hasPrev));
-  const note = noPrev.length ? `<div class="card-sub" style="margin-top:8px;">لا توجد مقارنة للشهور: ${noPrev.map(r=>mdn(r.month)+(r.hasCur?(r.prev?' (الشهر السابق بلا بيانات)':' (لا يوجد شهر سابق)'):' (لا توجد بيانات)')).join('، ')}.</div>` : '';
+  const tbl = (head, trs)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${trs}</tbody></table></div>`;
+  const comparable = rows.filter(r=>r.hasCur && r.hasPrev);
+  const skipped = rows.filter(r=>!(r.hasCur && r.hasPrev) && (mode==='cmp' || selectedMonth!==ALL_MONTHS_SENTINEL || r.hasCur));
+  const note = skipped.length ? `<div class="card-sub" style="margin-top:8px;">لا توجد مقارنة للشهور: ${skipped.map(r=>mdn(r.month)+(r.hasCur?(r.prev?' (الشهر السابق بلا بيانات)':' (لا يوجد شهر سابق)'):' (لا توجد بيانات)')).join('، ')}.</div>` : '';
   const sum = f=>comparable.reduce((a,r)=>a+r[f],0);
+  const cnt = f=>comparable.reduce((a,r)=>a+r[f].length,0);
   const pc = (a,b)=> b>0 ? fmtPct(a/b*100) : '—';
-  if(type === 'newCustomers'){
-    title.innerHTML = '<i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد وتسليماتهم';
-    sub.textContent = 'عميل جديد = له شحنات في الشهر ولم يكن له أي شحنات في الشهر السابق له مباشرة.';
-    const all = comparable.flatMap(r=>r.newList);
-    const nd = sum('newDelivered'), ns = sum('newShipments');
+  const sg = n=>(n>0?'+':'')+fmtInt(n);
+  const scope = rows.length===1 ? `${mdn(rows[0].month)}${rows[0].prev?` مقارنةً بـ ${mdn(rows[0].prev)}`:''}` : '';
+  if(mode === 'new'){
+    sub.textContent = 'عميل جديد = له شحنات في الشهر ولم يكن له أي شحنات في الشهر السابق له مباشرة. ' + scope;
+    const all = comparable.flatMap(r=>r.newList), nd = sum('newDelivered'), ns = sum('newShipments');
     const kp = `<div class="mgmt-mini-kpis">${kpi('عدد العملاء الجدد', fmtInt(all.length))}${kpi('شحناتهم', fmtInt(ns))}${kpi('تسليماتهم', fmtInt(nd))}${kpi('نسبة تسليمهم', pc(nd, ns))}</div>`;
-    const trs = all.length ? all.map(x=>`<tr><td>${x.name}</td><td>${mdn(x.month)}</td><td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td><td>${fmtPct(x.successRate)}</td></tr>`).join('')
-      : '<tr><td colspan="6" class="mgmt-empty-note">لا يوجد عملاء جدد في الفترة المختارة.</td></tr>';
-    body.innerHTML = kp + tbl(['العميل','شهر البداية','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], trs) + note;
-  } else if(type === 'stoppedCustomers'){
-    title.innerHTML = '<i class="fa-solid fa-user-minus" aria-hidden="true"></i> العملاء المتوقفون';
-    sub.textContent = 'عميل متوقف = كان له شحنات في الشهر السابق ولا توجد له أي شحنات في هذا الشهر. الأرقام هي شحناته في آخر شهر نشاط.';
-    const all = comparable.flatMap(r=>r.stoppedList.map(x=>Object.assign({ prevTotal:r.prevTotal }, x)));
-    const sd = sum('stoppedDelivered'), ss = sum('stoppedShipments');
+    const trs = all.length ? all.map(x=>`<tr><td>${x.name}</td><td>${mdn(x.month)}</td><td>${mdn(x.prev)}</td><td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td><td>${fmtPct(x.successRate)}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="mgmt-empty-note">لا يوجد عملاء جدد.</td></tr>';
+    body.innerHTML = kp + tbl(['العميل','شهر البداية','قورن بشهر','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], trs) + note;
+  } else if(mode === 'stopped'){
+    sub.textContent = 'عميل متوقف = كان له شحنات في الشهر السابق ولا توجد له أي شحنات في هذا الشهر. الأرقام هي شحناته في آخر شهر نشاط. ' + scope;
+    const all = comparable.flatMap(r=>r.stoppedList.map(x=>Object.assign({ prevTotal:r.prevTotal }, x))), sd = sum('stoppedDelivered'), ss = sum('stoppedShipments');
     const kp = `<div class="mgmt-mini-kpis">${kpi('عدد العملاء المتوقفين', fmtInt(all.length))}${kpi('شحناتهم في آخر شهر نشاط', fmtInt(ss))}${kpi('تسليماتهم', fmtInt(sd))}${kpi('نسبة تسليمهم', pc(sd, ss))}</div>`;
     const trs = all.length ? all.map(x=>`<tr><td>${x.name}</td><td>${mdn(x.month)}</td><td>${mdn(x.prevMonth)}</td><td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td><td>${pc(x.shipments, x.prevTotal)}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="mgmt-empty-note">لا يوجد عملاء متوقفون في الفترة المختارة.</td></tr>';
+      : '<tr><td colspan="7" class="mgmt-empty-note">لا يوجد عملاء متوقفون.</td></tr>';
     body.innerHTML = kp + tbl(['العميل','توقف في شهر','آخر شهر نشاط','شحنات آخر شهر','التسليمات','نسبة التسليم','حصته من شحنات الشهر السابق'], trs) + note;
   } else {
-    title.innerHTML = '<i class="fa-solid fa-people-arrows" aria-hidden="true"></i> مقارنة فقد واكتساب العملاء بين الشهور';
     sub.textContent = 'كل شهر مقارَن بالشهر السابق له: كم عميل توقف وبكم شحنة (شحناته في الشهر السابق)، وكم عميل جديد دخل وبكم شحنة.';
     const dash = '<td>—</td>';
     const trs = rows.map(r=>{
       if(!(r.hasCur && r.hasPrev)) return `<tr><td>${mdn(r.month)}</td><td>${r.prev?mdn(r.prev):'—'}</td><td>${r.hasCur?fmtInt(r.active):'—'}</td>${dash.repeat(7)}</tr>`;
-      const netC = r.newList.length - r.stoppedList.length, netS = r.newShipments - r.stoppedShipments;
-      const sg = n=>(n>0?'+':'')+fmtInt(n);
-      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${fmtInt(r.newList.length)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${fmtInt(r.stoppedList.length)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(netC)}</td><td>${sg(netS)}</td></tr>`;
+      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${fmtInt(r.newList.length)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${fmtInt(r.stoppedList.length)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(r.newList.length - r.stoppedList.length)}</td><td>${sg(r.newShipments - r.stoppedShipments)}</td></tr>`;
     }).join('');
-    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${fmtInt(comparable.reduce((a,r)=>a+r.newList.length,0))}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${fmtInt(comparable.reduce((a,r)=>a+r.stoppedList.length,0))}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${(()=>{const n=comparable.reduce((a,r)=>a+r.newList.length-r.stoppedList.length,0);return (n>0?'+':'')+fmtInt(n);})()}</td><td>${(()=>{const n=sum('newShipments')-sum('stoppedShipments');return (n>0?'+':'')+fmtInt(n);})()}</td></tr>` : '';
-    const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(comparable.reduce((a,r)=>a+r.stoppedList.length,0)))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(comparable.reduce((a,r)=>a+r.newList.length,0)))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
+    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${fmtInt(cnt('newList'))}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${fmtInt(cnt('stoppedList'))}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${sg(cnt('newList') - cnt('stoppedList'))}</td><td>${sg(sum('newShipments') - sum('stoppedShipments'))}</td></tr>` : '';
+    const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(cnt('stoppedList')))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(cnt('newList')))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
     body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], trs + tot) + note;
   }
 }
 
 /* ---------- Orchestration ---------- */
 function mgmtRenderAll(months){
-  const changeMode = ['newCustomers','stoppedCustomers','customerChurn'].includes(MGMT.comparisonType);
-  const showBranches = !changeMode && MGMT.comparisonType !== 'customers';
-  const showCustomers = !changeMode && MGMT.comparisonType !== 'branches';
-  const chgSec = document.getElementById('mgmtCustomerChangeSection');
-  if(chgSec) chgSec.style.display = changeMode ? '' : 'none';
-  if(changeMode) mgmtRenderCustomerChange(months);
+  const showBranches = MGMT.comparisonType !== 'customers';
+  const showCustomers = MGMT.comparisonType !== 'branches';
   document.getElementById('mgmtBranchMovementSection').style.display = showBranches?'':'none';
   document.getElementById('mgmtBranchAnalysisSection').style.display = showBranches?'':'none';
   document.getElementById('mgmtCustomerMovementSection').style.display = showCustomers?'':'none';
@@ -6304,6 +6333,9 @@ const TAB_RENDERERS = {
   trend:    ()=> hasUsableServerSummary() ? renderTrendTabFromServer(STATE.serverOverviewSummary) : renderTabPending(),
   dq:       ()=> hasUsableServerSummary() ? renderDqTabFromServer(STATE.serverOverviewSummary) : renderTabPending(),
   shipage:  ()=>renderShipAgeTab(),
+  newcust:  ()=>renderCustChangeTab('new'),
+  stopcust: ()=>renderCustChangeTab('stopped'),
+  custcmp:  ()=>renderCustChangeTab('cmp'),
   management: ()=>renderManagementTab(),
   settings: ()=>renderSettingsTab(),
 };
@@ -6318,7 +6350,7 @@ function getActiveTabKey(){
 // participate in the summary-driven dirty-tracking below — nothing ever
 // marks them dirty, so they must always render on click rather than being
 // gated by a flag that would otherwise never be true for them.
-const TAB_ALWAYS_RENDER = new Set(['management', 'settings', 'shipage']);
+const TAB_ALWAYS_RENDER = new Set(['management', 'settings', 'shipage', 'newcust', 'stopcust', 'custcmp']);
 function renderActiveTabIfDirty(){
   const key = getActiveTabKey();
   if(TAB_ALWAYS_RENDER.has(key)){ TAB_RENDERERS[key](); return; }
@@ -7085,15 +7117,16 @@ function cmpDraw(tableId){
   });
   if(t.limit) rows = rows.slice(0, t.limit);
   const arrow = (m,k)=> (st.key===k && (k==='name' || st.month===m)) ? (st.dir==='asc'?' ▲':' ▼') : '';
+  // columns grouped BY METRIC (e.g. «نسبة التسليم» with its 3 months side by side), not by month
   let thead = `<thead><tr><th class="cmp-name" rowspan="2" data-key="name" data-month="">${CMP_NAME_LABEL[t.type]}${arrow('', 'name')}</th>` +
-    months.map(m=>`<th class="cmp-month" colspan="${metrics.length}">${monthDisplayName(m)}${t.maps[m].size?'':' <small>(لا بيانات)</small>'}</th>`).join('') + '</tr><tr>' +
-    months.map(m=>metrics.map((c,i)=>`<th class="${i===0?'cmp-first':''}" data-key="${c.key}" data-month="${m}">${c.label}${arrow(m,c.key)}</th>`).join('')).join('') + '</tr></thead>';
+    metrics.map(c=>`<th class="cmp-month" colspan="${months.length}">${c.label}</th>`).join('') + '</tr><tr>' +
+    metrics.map(c=>months.map((m,i)=>`<th class="${i===0?'cmp-first':''}" data-key="${c.key}" data-month="${m}">${monthDisplayName(m)}${t.maps[m].size?'':' <small>(لا بيانات)</small>'}${arrow(m,c.key)}</th>`).join('')).join('') + '</tr></thead>';
   let tbody = '<tbody>' + rows.map((r,i)=>{
     const rank = (t.type==='branch'||t.type==='geo') ? `<span class="rank-badge">${i+1}</span>` : '';
-    return `<tr><td>${rank}${r.name}</td>` + months.map(m=>{
+    return `<tr><td>${rank}${r.name}</td>` + metrics.map(c=>months.map((m,j)=>{
       const e = r.by[m];
-      return metrics.map((c,j)=> e ? `<td class="${j===0?'cmp-first':''}">${fmtCell(e[c.key], c.type, c.good)}</td>` : `<td class="cmp-na ${j===0?'cmp-first':''}">—</td>`).join('');
-    }).join('') + '</tr>';
+      return e ? `<td class="${j===0?'cmp-first':''}">${fmtCell(e[c.key], c.type, c.good)}</td>` : `<td class="cmp-na ${j===0?'cmp-first':''}">—</td>`;
+    }).join('')).join('') + '</tr>';
   }).join('') + '</tbody>';
   if(!rows.length) tbody = `<tbody><tr><td colspan="${months.length*metrics.length+1}" style="text-align:center;color:var(--text-faint);padding:20px;">لا توجد بيانات مطابقة للفلاتر الحالية</td></tr></tbody>`;
   table.classList.add('cmp-table');
@@ -8380,6 +8413,7 @@ function initTabs(){
       document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
       document.body.classList.toggle('on-shipage', btn.dataset.tab==='shipage');
       document.body.classList.toggle('on-overview', btn.dataset.tab==='overview');
+      document.body.classList.toggle('on-custchg', ['newcust','stopcust','custcmp'].includes(btn.dataset.tab));
       renderActiveTabIfDirty(); // build this tab's charts/tables now, only if data changed since it was last shown
     });
   });
