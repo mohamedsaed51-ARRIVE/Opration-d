@@ -1004,7 +1004,6 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
           <select id="clientSortSelect">
             <option value="shipments">أعلى حجم شحنات</option>
             <option value="deliveryRate">أعلى نسبة تسليم</option>
-            <option value="returnRate">أعلى نسبة مرتجعات</option>
             <option value="slaPct">أعلى SLA</option>
             <option value="slaPctAsc">أسوأ SLA</option>
           </select>
@@ -7201,7 +7200,7 @@ function renderClientsTabFromArray(byClient){
   // the sort selector orders by the LATEST month of the comparison; clicking a column header afterwards overrides it
   if(CMP.clientSortApplied !== STATE.clientSort){
     CMP.clientSortApplied = STATE.clientSort;
-    const map = { shipments:['shipments','desc'], deliveryRate:['deliveryRate','desc'], returnRate:['returnRate','desc'], slaPct:['slaPct','desc'], slaPctAsc:['slaPct','asc'] };
+    const map = { shipments:['shipments','desc'], deliveryRate:['deliveryRate','desc'], slaPct:['slaPct','desc'], slaPctAsc:['slaPct','asc'] };
     const m = map[STATE.clientSort] || map.shipments;
     delete CMP.sort['clientTable'];
     CMP.sortPending = { key:m[0], dir:m[1] };
@@ -7286,7 +7285,6 @@ const CMP_METRICS = {
     {key:'shipments', label:'الشحنات', type:'int'},
     {key:'deliveryRate', label:'نسبة التسليم', type:'pct', good:true},
     {key:'successRate', label:'نسبة الوصول', type:'pct', good:true},
-    {key:'returnRate', label:'نسبة المرتجعات', type:'pct', good:false},
     {key:'rejectedRate', label:'نسبة الرفض', type:'pct', good:false},
     {key:'avgDays', label:'م. أيام التسليم', type:'days'},
     {key:'slaPct', label:'SLA %', type:'pct', good:true},
