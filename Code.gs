@@ -175,6 +175,14 @@ function doGet(e) {
       result = getClientMonthlyPayload(params);
     }
 
+    // Branch targets for the separate KPI dashboard (one number per branch per KPI, stored in Script Properties).
+    else if (action === "getKpiTargets") {
+      result = getKpiTargetsPayload();
+    }
+    else if (action === "saveKpiTargets") {
+      result = saveKpiTargetsPayload(params);
+    }
+
     else if (action === "buildAgeSnapshot") {
       if (!sheetName) result = { success: false, error: "لم يتم تحديد الشهر." };
       else result = buildAgeSnapshot(sheetName);
@@ -5049,6 +5057,56 @@ function getClientMonthlyPayload(params) {
     paidKeywords: CLIENT_QUALITY_PAID_KEYWORDS,
     durationMs: new Date().getTime() - t0
   };
+}
+
+
+// ------------------------------------------------------------
+// KPI TARGETS (Client Quality / KPI Operation dashboard)
+// { delivery: { "<branch>": <percent> }, firstAttempt: { "<branch>": <percent> } } — stored in Script Properties,
+// same pattern as the branch config above. A target is a percentage between 0 and 100.
+// ------------------------------------------------------------
+var KPI_TARGETS_PROPERTY_KEY = "KPI_TARGETS_JSON";
+var KPI_TARGET_METRICS = ["delivery", "firstAttempt"];
+
+function kpiTargetsRead_() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(KPI_TARGETS_PROPERTY_KEY);
+    var parsed = raw ? JSON.parse(raw) : {};
+    var out = {};
+    KPI_TARGET_METRICS.forEach(function (m) { out[m] = (parsed && parsed[m] && typeof parsed[m] === "object") ? parsed[m] : {}; });
+    return out;
+  } catch (e) {
+    return { delivery: {}, firstAttempt: {} };
+  }
+}
+
+function getKpiTargetsPayload() {
+  return { success: true, targets: kpiTargetsRead_() };
+}
+
+function saveKpiTargetsPayload(params) {
+  try {
+    var parsed = (params && params.targets) ? JSON.parse(params.targets) : {};
+    var clean = {};
+    KPI_TARGET_METRICS.forEach(function (m) {
+      clean[m] = {};
+      var src = (parsed && parsed[m]) || {};
+      for (var b in src) {
+        if (!Object.prototype.hasOwnProperty.call(src, b)) continue;
+        var name = summaryNormText(b);
+        var v = src[b];
+        if (!name || v === null || v === undefined || v === "") continue;
+        var n = Number(v);
+        if (!isFinite(n) || n < 0 || n > 100) continue; // a target is a percentage
+        clean[m][name] = n;
+      }
+    });
+    PropertiesService.getScriptProperties().setProperty(KPI_TARGETS_PROPERTY_KEY, JSON.stringify(clean));
+    return { success: true, targets: clean };
+  } catch (e) {
+    console.log("[KPI TARGETS SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
 }
 
 
