@@ -4958,7 +4958,7 @@ function diagnoseJuneStatuses() {
 // 8Z. CLIENT MONTHLY (feeds the separate Client Quality dashboard)
 // ============================================================
 // For every month that has a saved snapshot (DASHBOARD_SUMMARY → filterCube) returns, per customer:
-//   [total shipments, delivered, rejected-with-shipping-paid]
+//   [total shipments, delivered, rejected-with-shipping-paid, delivered-on-first-attempt]
 // "Shipping paid" = a rejection (taken from the FINAL-status column, same rule as the main dashboard) whose
 // text says «تم دفع الشحن». A rejection where the sender also refused to pay is NOT counted.
 // Read-only: no sheet is read except the saved snapshots; months without a snapshot are listed in missingMonths.
@@ -5001,16 +5001,19 @@ function getClientMonthlyPayload(params) {
     for (var ri = 0; ri < records.length; ri++) {
       var rec = records[ri], n = rec[7], cls = classes[rec[4]];
       var name = dict.client[rec[3]];
-      var v = perClient[name] || (perClient[name] = [0, 0, 0]);
+      var v = perClient[name] || (perClient[name] = [0, 0, 0, 0]);
       v[0] += n;
       if (cls === "delivered") v[1] += n; else if (cls === "paid") v[2] += n;
+      var isFirst = (cls === "delivered" && rec[5] === 0); // rec[5]: attempt category index (0 = first attempt, same rule as the main dashboard)
+      if (isFirst) v[3] += n;
       if (withBranches) {
         var bn = dict.branch[rec[2]];
         var bi = branchIdx.hasOwnProperty(bn) ? branchIdx[bn] : (branchIdx[bn] = branchList.push(bn) - 1);
         var pb = perClientBranch[name] || (perClientBranch[name] = {});
-        var pbv = pb[bi] || (pb[bi] = [0, 0, 0]);
+        var pbv = pb[bi] || (pb[bi] = [0, 0, 0, 0]);
         pbv[0] += n;
         if (cls === "delivered") pbv[1] += n; else if (cls === "paid") pbv[2] += n;
+        if (isFirst) pbv[3] += n;
       }
       if (cls !== "other") {
         var label = dict.status[rec[4]];
