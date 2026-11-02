@@ -54,3 +54,5 @@ tr.sel td { background: var(--subtle); }
 footer { color: var(--gray); font-size: 12px; margin-top: 20px; }
 code { background: #EEF2F7; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 @media (max-width: 640px) { h1 { font-size: 21px; } .top { flex-direction: column; } .controls label, select, input { width: 100%; } }
+.summary { white-space: pre-wrap; font: inherit; line-height: 1.9; background: #F8FAFC; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 0; }
+@media print { .top .btn, .controls, .toolbar, .btn, details, footer { display: none !important; } body { background: #fff; } .card, .kpi { break-inside: avoid; } }

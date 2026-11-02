@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { fetchClientMonthly } from './api.js';
 import { demoData } from './demo.js';
+import { managementSummary } from './lib/summary.js';
 import {
   LEVELS, MONTH_AR, MONTH_ORDER, evaluateAllMonths, evaluateMonth,
 } from './lib/quality.js';
@@ -166,6 +167,18 @@ function CustomersTable({ result }) {
   );
 }
 
+function SummaryBox({ text }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+  return (
+    <>
+      <pre className="summary">{text}</pre>
+      <button className="btn ghost" onClick={copy}>{copied ? 'تم النسخ ✔' : 'نسخ الملخص'}</button>
+      <button className="btn ghost" style={{ marginInlineStart: 8 }} onClick={() => window.print()}>طباعة / PDF</button>
+    </>
+  );
+}
+
 export default function App() {
   const demo = new URLSearchParams(location.search).has('demo');
   const [data, setData] = useState(null);
@@ -247,6 +260,11 @@ export default function App() {
                 </div>
                 <Kpi title="العملاء المحسوبين" value={num(result.group.customers)}
                   sub={`مستبعد: ${num(result.excluded.notInAllMonths)} (مش موجودين في الـ4 شهور)${result.excluded.belowMinimum ? ` + ${num(result.excluded.belowMinimum)} (أقل من الحد الأدنى)` : ''}`} />
+              </section>
+
+              <section className="card">
+                <h2>ملخص للإدارة</h2>
+                <SummaryBox text={managementSummary(result)} />
               </section>
 
               <section className="card">
