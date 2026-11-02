@@ -7,7 +7,7 @@ const header = ['رقم البوليصة', 'الراسل', 'المحافظة', '
 const PAID = 'رفض الاستلام و تم دفع الشحن', NOPAY = 'رفض الاستلام و رفض والدفع';
 function build(spec) { // spec: [client, status, final, n]
   const rows = [header];
-  spec.forEach(([client, status, fin, n]) => { for (let i = 0; i < n; i++) rows.push(['W' + rows.length + client, client, 'القاهرة', 'مدينة نصر', 'مدينة نصر', status, fin, new Date(2026, 9, 1 + (rows.length % 5)), new Date(2026, 9, 3 + (rows.length % 5))]); });
+  spec.forEach(([client, status, fin, n, branch]) => { for (let i = 0; i < n; i++) rows.push(['W' + rows.length + client, client, 'القاهرة', 'مدينة نصر', branch || 'مدينة نصر', status, fin, new Date(2026, 9, 1 + (rows.length % 5)), new Date(2026, 9, 3 + (rows.length % 5))]); });
   return rows;
 }
 const store = {};
@@ -21,7 +21,7 @@ sb.SpreadsheetApp = { openById: () => ({ getSheetByName: () => ({ getLastRow: ()
 vm.createContext(sb); vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), sb);
 
 const months = {
-  August:    [['A', 'تسليم ناجح', 'تم التسليم', 8], ['A', 'مرتجعات', PAID, 1], ['A', 'مرتجعات', NOPAY, 1], ['B', 'تسليم ناجح', 'تم التسليم', 5]],
+  August:    [['A', 'تسليم ناجح', 'تم التسليم', 5, 'الإسكندرية'], ['A', 'تسليم ناجح', 'تم التسليم', 3], ['A', 'مرتجعات', PAID, 1], ['A', 'مرتجعات', NOPAY, 1], ['B', 'تسليم ناجح', 'تم التسليم', 5]],
   September: [['A', 'تسليم ناجح', 'تم التسليم', 9], ['A', 'قيد التشغيل', '', 1], ['C', 'تسليم ناجح', 'تم التسليم', 3]],
 };
 const snaps = {};
@@ -39,6 +39,15 @@ check('client B only in August', byName.B.August[0] === 5 && !byName.B.September
 check('client C only in September', byName.C.September[0] === 3 && !byName.C.August, byName.C);
 const cls = {}; r.statusClassification.forEach(s => cls[s.status.replace('رفض (الحالة النهائية): ', '')] = s.cls);
 check('status diagnostics classify paid vs not-paid rejection', cls[PAID] === 'paid' && cls[NOPAY] === 'rejectedOther', cls);
+check('branches are NOT returned unless asked', r.branches === undefined && r.clients[0].b === undefined);
+const rb = sb.getClientMonthlyPayload({ withBranches: '1' });
+const bn = rb.branches, byB = {}; rb.clients.forEach(c => byB[c.n] = c);
+check('branch list returned', JSON.stringify(bn.slice().sort()) === JSON.stringify(['الإسكندرية', 'مدينة نصر']), bn);
+const aAug = byB.A.b; const cell = (name, month) => { const i = bn.indexOf(name); return aAug[i] && aAug[i][month]; };
+check('client A August split by branch: Alexandria 5 delivered', JSON.stringify(cell('الإسكندرية', 'August')) === '[5,5,0]', aAug);
+check('client A August other branch: 3 delivered + 1 paid + 1 not-paid-rejection (5 shipments)', JSON.stringify(cell('مدينة نصر', 'August')) === '[5,3,1]', aAug);
+let sumOk = true; rb.clients.forEach(c => { Object.keys(c.v).forEach(m => { const t = Object.keys(c.b).reduce((s, i) => s + (c.b[i][m] ? c.b[i][m][0] : 0), 0); if (t !== c.v[m][0]) sumOk = false; }); });
+check('branch totals add up to the client totals for every month', sumOk);
 const only = sb.getClientMonthlyPayload({ months: 'September' });
 check('months param restricts the result', JSON.stringify(only.months) === '["September"]', only.months);
 console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail ? 1 : 0);

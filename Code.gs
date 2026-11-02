@@ -4986,6 +4986,9 @@ function getClientMonthlyPayload(params) {
   var months = [], missing = [], skipped = [];
   var clients = {}, clientOrder = [];
   var statusRows = {}; // label -> { cls, count } for delivered / rejected labels only (so the user can verify the classification)
+  // Optional (withBranches=1): per customer, per branch, per month counts so the dashboard can build a branch table.
+  var withBranches = !!(params && String(params.withBranches) === "1");
+  var branchList = [], branchIdx = {}, clientBranches = {};
   for (var mi = 0; mi < requested.length; mi++) {
     var month = requested[mi];
     if (new Date().getTime() - t0 > CLIENT_QUALITY_TIME_BUDGET_MS) { skipped.push(month); continue; }
@@ -4994,13 +4997,21 @@ function getClientMonthlyPayload(params) {
     if (!snap || !snap.filterCube || !snap.filterCube.records || !snap.filterCube.dict) { missing.push(month); continue; }
     var dict = snap.filterCube.dict, records = snap.filterCube.records;
     var classes = dict.status.map(clientQualityStatusClass_);
-    var perClient = {};
+    var perClient = {}, perClientBranch = {};
     for (var ri = 0; ri < records.length; ri++) {
       var rec = records[ri], n = rec[7], cls = classes[rec[4]];
       var name = dict.client[rec[3]];
       var v = perClient[name] || (perClient[name] = [0, 0, 0]);
       v[0] += n;
       if (cls === "delivered") v[1] += n; else if (cls === "paid") v[2] += n;
+      if (withBranches) {
+        var bn = dict.branch[rec[2]];
+        var bi = branchIdx.hasOwnProperty(bn) ? branchIdx[bn] : (branchIdx[bn] = branchList.push(bn) - 1);
+        var pb = perClientBranch[name] || (perClientBranch[name] = {});
+        var pbv = pb[bi] || (pb[bi] = [0, 0, 0]);
+        pbv[0] += n;
+        if (cls === "delivered") pbv[1] += n; else if (cls === "paid") pbv[2] += n;
+      }
       if (cls !== "other") {
         var label = dict.status[rec[4]];
         if (!statusRows[label]) statusRows[label] = { status: label, cls: cls, count: 0 };
@@ -5012,11 +5023,24 @@ function getClientMonthlyPayload(params) {
       if (!clients[name]) { clients[name] = {}; clientOrder.push(name); }
       clients[name][month] = perClient[name];
     });
+    if (withBranches) {
+      Object.keys(perClientBranch).forEach(function (name) {
+        var cb = clientBranches[name] || (clientBranches[name] = {});
+        Object.keys(perClientBranch[name]).forEach(function (bi) {
+          (cb[bi] || (cb[bi] = {}))[month] = perClientBranch[name][bi];
+        });
+      });
+    }
   }
   return {
     success: true,
     months: months, missingMonths: missing, skippedMonths: skipped,
-    clients: clientOrder.map(function (name) { return { n: name, v: clients[name] }; }),
+    clients: clientOrder.map(function (name) {
+      var row = { n: name, v: clients[name] };
+      if (withBranches) row.b = clientBranches[name] || {};
+      return row;
+    }),
+    branches: withBranches ? branchList : undefined,
     statusClassification: Object.keys(statusRows).map(function (k) { return statusRows[k]; })
       .sort(function (a, b) { return b.count - a.count; }),
     paidKeywords: CLIENT_QUALITY_PAID_KEYWORDS,
