@@ -501,6 +501,7 @@ table.cmp-table thead th.cmp-first, table.cmp-table tbody td.cmp-first{border-in
 table.cmp-table thead th.cmp-name{vertical-align:middle;}
 table.cmp-table tbody td.cmp-na{color:var(--text-faint); text-align:center;}
 .custchg-ctl{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin:6px 0 12px;}
+.custchg-actions{display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px;}
 .custchg-ctl .filter-group{min-width:190px; max-width:260px; flex:0 1 230px;}
 .custchg-ctl select{height:var(--control-h-md); font-size:var(--fs-small);}
 .cmp-note{font-size:var(--fs-caption); color:var(--text-secondary); margin:2px 0 10px;}
@@ -1011,6 +1012,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد وتسليماتهم</div>
       <div class="custchg-ctl" id="newcustCtl"></div>
+      <div class="custchg-actions"><button class="btn-primary btn-sm" id="newcustPdfBtn" type="button" disabled><i class="fa-solid fa-file-pdf" aria-hidden="true"></i> تقرير الإدارة (PDF)</button> <button class="btn-secondary btn-sm" id="newcustXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تقرير Excel</button></div>
       <div class="card-sub" id="newcustSub"></div>
       <div id="newcustBody"></div>
     </div>
@@ -1020,6 +1022,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-user-minus" aria-hidden="true"></i> العملاء المتوقفون</div>
       <div class="custchg-ctl" id="stopcustCtl"></div>
+      <div class="custchg-actions"><button class="btn-primary btn-sm" id="stopcustPdfBtn" type="button" disabled><i class="fa-solid fa-file-pdf" aria-hidden="true"></i> تقرير الإدارة (PDF)</button> <button class="btn-secondary btn-sm" id="stopcustXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تقرير Excel</button></div>
       <div class="card-sub" id="stopcustSub"></div>
       <div id="stopcustBody"></div>
     </div>
@@ -1029,6 +1032,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
     <div class="card">
       <div class="card-title"><i class="fa-solid fa-people-arrows" aria-hidden="true"></i> مقارنة فقد واكتساب العملاء بين الشهور</div>
       <div class="custchg-ctl" id="custcmpCtl"></div>
+      <div class="custchg-actions"><button class="btn-primary btn-sm" id="custcmpPdfBtn" type="button" disabled><i class="fa-solid fa-file-pdf" aria-hidden="true"></i> تقرير الإدارة (PDF)</button> <button class="btn-secondary btn-sm" id="custcmpXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تقرير Excel</button></div>
       <div class="card-sub" id="custcmpSub"></div>
       <div id="custcmpBody"></div>
     </div>
@@ -6031,6 +6035,13 @@ async function mgmtGenerateExcelReportLegacy(){
    "new / stopped" meaningless), so the filter bar is hidden on these pages.
    ========================================================= */
 let CUSTCHG_TOKEN = 0;
+const CUSTCHG_LAST = {};
+// real year of a month's data (from its own daily series) — never assumed to be the current year
+function custYearOf(s){
+  const d = s && s.timeSeries && s.timeSeries.daily;
+  if(d && d.length && d[0].label){ const y = parseInt(String(d[0].label).slice(0,4), 10); if(!isNaN(y)) return y; }
+  return new Date().getFullYear();
+}
 function custMapOf(s){
   const mm = new Map();
   if(cmpHasData(s)) (s.customerSummary||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
@@ -6065,7 +6076,7 @@ async function custChangeRows(mode){
   return pairs.map(({ m, prev })=>{
     const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && prev !== m && cmpHasData(sums[prev]));
     const cur = custMapOf(sums[m]);
-    const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0 };
+    const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0, year:custYearOf(sums[m]), prevYear:custYearOf(sums[prev]) };
     if(!hasCur || !hasPrev) return o;
     const pm = custMapOf(sums[prev]);
     cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:n, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
@@ -6101,6 +6112,11 @@ async function renderCustChangeTab(mode){
   if(token !== CUSTCHG_TOKEN) return;
   if(rows && rows.needTarget){ body.innerHTML = '<div class="mgmt-empty-note">اختر «الشهر» من القائمة أعلاه (أو من قائمة الشهر أعلى الصفحة) ثم الشهر الذي تقارنه به.</div>'; sub.textContent = ''; return; }
   if(rows.length === 1 && rows[0].prev === rows[0].month){ body.innerHTML = '<div class="mgmt-empty-note">اختر شهرين مختلفين للمقارنة.</div>'; sub.textContent = ''; return; }
+  CUSTCHG_LAST[mode] = rows;
+  { const pid = { new:'newcust', stopped:'stopcust', cmp:'custcmp' }[mode];
+    const pdfB = document.getElementById(pid+'PdfBtn'), xB = document.getElementById(pid+'XlsxBtn');
+    if(pdfB){ pdfB.disabled = false; pdfB.onclick = ()=>custExportPdf(mode); }
+    if(xB){ xB.disabled = false; xB.onclick = ()=>custExportXlsx(mode); } }
   const mdn = m=>monthDisplayName(m);
   const kpi = (l,v)=>`<div class="mgmt-mini-kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`;
   const tbl = (head, trs)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${trs}</tbody></table></div>`;
@@ -6137,6 +6153,202 @@ async function renderCustChangeTab(mode){
     const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(cnt('stoppedList')))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(cnt('newList')))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
     body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], trs + tot) + note;
   }
+}
+
+
+/* ---------- exports of the three customer pages: management PDF + Excel (one report per page) ---------- */
+const CUST_TITLES = {
+  new:     { page:'العملاء الجدد وتسليماتهم', file:'New_Customers' },
+  stopped: { page:'العملاء المتوقفون', file:'Stopped_Customers' },
+  cmp:     { page:'مقارنة فقد واكتساب العملاء', file:'Customer_Churn_Comparison' },
+};
+function custMonthPdf(m, y){ return `${pdfArabicMonthName(m)} ${y}`; }
+function custPeriodInfo(rows){
+  const ok = rows.filter(r=>r.hasCur && r.hasPrev);
+  if(rows.length === 1) return { label: `${custMonthPdf(rows[0].month, rows[0].year)} مقارنةً بـ ${rows[0].prev ? custMonthPdf(rows[0].prev, rows[0].prevYear) : '—'}`, file: `${rows[0].month}_vs_${rows[0].prev||'NA'}` };
+  const f = rows[0], l = rows[rows.length-1];
+  return { label: `${custMonthPdf(f.month, f.year)} – ${custMonthPdf(l.month, l.year)} (كل شهر مقابل الشهر السابق له)`, file: `${f.month}-${l.month}` };
+}
+function custAggregate(rows){
+  const ok = rows.filter(r=>r.hasCur && r.hasPrev);
+  const sum = f=>ok.reduce((a,r)=>a+r[f],0), cnt = f=>ok.reduce((a,r)=>a+r[f].length,0);
+  return { ok, newCount:cnt('newList'), newShipments:sum('newShipments'), newDelivered:sum('newDelivered'),
+    stoppedCount:cnt('stoppedList'), stoppedShipments:sum('stoppedShipments'), stoppedDelivered:sum('stoppedDelivered'),
+    newAll: ok.flatMap(r=>r.newList.map(x=>Object.assign({ year:r.year, prevYear:r.prevYear }, x))),
+    stoppedAll: ok.flatMap(r=>r.stoppedList.map(x=>Object.assign({ prevTotal:r.prevTotal, year:r.year, prevYear:r.prevYear }, x))) };
+}
+async function custExportPdf(mode){
+  const rows = CUSTCHG_LAST[mode];
+  const btn = document.getElementById({ new:'newcust', stopped:'stopcust', cmp:'custcmp' }[mode]+'PdfBtn');
+  try{
+    if(!rows || !rows.length) throw new Error('لا توجد بيانات — افتح الصفحة واختر الشهور أولاً.');
+    if(typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) throw new Error('مكتبة PDF لم يتم تحميلها (تحقق من اتصال الإنترنت) — أعد تحميل الصفحة وحاول مرة أخرى.');
+    const A = custAggregate(rows);
+    if(!A.ok.length) throw new Error('لا توجد مقارنة متاحة للشهور المختارة (الشهر السابق بلا بيانات).');
+    if(btn) btn.disabled = true;
+    const info = custPeriodInfo(rows), T = CUST_TITLES[mode];
+    const { jsPDF } = window.jspdf; const doc = new jsPDF('p','pt','a4');
+    const font = mgmtRegisterArabicFont(doc);
+    const C0 = pdfC(), bannerH = 96;
+    doc.setFillColor(...C0.blue); doc.rect(0, 0, PDF_PAGE_W, bannerH, 'F');
+    doc.setFillColor(...C0.teal); doc.rect(0, bannerH, PDF_PAGE_W, 3, 'F');
+    try{ const lh = 30, lw = lh * (window.ARRIVE_LOGO_RATIO || (1000/275)); if(window.ARRIVE_LOGO_PDF) doc.addImage(window.ARRIVE_LOGO_PDF, 'PNG', 30, 24, lw, lh); }catch(e){}
+    doc.setFont(font,'bold'); doc.setFontSize(20); doc.setTextColor(255,255,255);
+    pdfText(doc, 'تقرير الإدارة — ' + T.page, PDF_PAGE_W-30, 46, {align:'right'});
+    doc.setFontSize(11.5); doc.setFont(font,'normal');
+    pdfText(doc, 'مقارنة نشاط العملاء بين الشهور', PDF_PAGE_W-30, 68, {align:'right'});
+    doc.setFontSize(9.5); doc.setTextColor(...C0.light);
+    pdfText(doc, 'ARRIVE · شركة الشحن والتوصيل', PDF_PAGE_W-30, 86, {align:'right'});
+    let y = bannerH + 19;
+    const g = new Date(), genStr = `${String(g.getDate()).padStart(2,'0')} ${pdfArabicMonthName(['January','February','March','April','May','June','July','August','September','October','November','December'][g.getMonth()])} ${g.getFullYear()}`;
+    const boxes = [ { label:'الفترة المقارَنة', value: info.label }, { label:'تاريخ الإصدار', value: genStr },
+      { label:'التعريف', value: mode==='stopped' ? 'عميل متوقف = له شحنات في الشهر السابق ولا شحنات له في الشهر.' : 'عميل جديد = له شحنات في الشهر ولا شحنات له في الشهر السابق.' } ];
+    const gap = 10, bw = (PDF_USABLE_W - gap*2)/3, bh = 50;
+    boxes.forEach((b,i)=>{
+      const bx = PDF_RIGHT - (i+1)*bw - i*gap;
+      doc.setFillColor(...pdfC().light); doc.roundedRect(bx, y, bw, bh, 5, 5, 'F');
+      doc.setFontSize(8); doc.setFont(font,'normal'); doc.setTextColor(...pdfC().gray); pdfText(doc, b.label, bx+bw-8, y+14, {align:'right'});
+      doc.setFontSize(8.5); doc.setFont(font,'bold'); doc.setTextColor(...pdfC().navy);
+      const lines = doc.splitTextToSize(b.value, bw-16).slice(0,3);
+      const lvl = (typeof pdfDetectParagraphLevel==='function') ? pdfDetectParagraphLevel(b.value) : undefined;
+      pdfText(doc, lines, bx+bw-8, y+27, {align:'right'}, lvl);
+    });
+    y += bh + 16;
+    const pc = (a,b)=> b>0 ? pdfFormatPercent(a/b*100) : '-';
+    const sg = n=>(n>0?'+':'')+pdfFormatNumber(n);
+    const C = pdfC();
+    if(mode === 'new'){
+      y = pdfSectionTitle(doc, font, y, 'ملخص العملاء الجدد');
+      y = pdfKpiGrid(doc, font, y, [
+        { label:'عدد العملاء الجدد', value:pdfFormatNumber(A.newCount), valueColor:C.blue },
+        { label:'شحناتهم', value:pdfFormatNumber(A.newShipments), valueColor:C.blue },
+        { label:'تسليماتهم', value:pdfFormatNumber(A.newDelivered), sub:pc(A.newDelivered, A.newShipments), valueColor:C.success } ]);
+      y = pdfSectionTitle(doc, font, y, 'قائمة العملاء الجدد');
+      y = pdfDrawTable(doc, font, y,
+        [{header:'العميل',width:150,align:'right'},{header:'شهر البداية',width:62},{header:'قورن بشهر',width:62},{header:'شحنات الشهر',width:56},{header:'التسليمات',width:52},{header:'نسبة التسليم',width:60},{header:'نسبة الوصول',width:60}],
+        A.newAll.map(x=>[x.name, custMonthPdf(x.month,x.year), custMonthPdf(x.prev,x.prevYear), pdfFormatNumber(x.shipments), pdfFormatNumber(x.delivered), pdfRateCell(x.deliveryRate,'delivery'), pdfRateCell(x.successRate,'delivery')]));
+    } else if(mode === 'stopped'){
+      y = pdfSectionTitle(doc, font, y, 'ملخص العملاء المتوقفين');
+      y = pdfKpiGrid(doc, font, y, [
+        { label:'عدد العملاء المتوقفين', value:pdfFormatNumber(A.stoppedCount), valueColor:C.violation },
+        { label:'شحناتهم في آخر شهر نشاط', value:pdfFormatNumber(A.stoppedShipments), valueColor:C.violation },
+        { label:'تسليماتهم', value:pdfFormatNumber(A.stoppedDelivered), sub:pc(A.stoppedDelivered, A.stoppedShipments), valueColor:C.blue } ]);
+      y = pdfSectionTitle(doc, font, y, 'قائمة العملاء المتوقفين');
+      y = pdfDrawTable(doc, font, y,
+        [{header:'العميل',width:140,align:'right'},{header:'توقف في شهر',width:62},{header:'آخر شهر نشاط',width:66},{header:'شحنات آخر شهر',width:60},{header:'التسليمات',width:52},{header:'نسبة التسليم',width:58},{header:'حصته من الشهر السابق',width:72}],
+        A.stoppedAll.map(x=>[x.name, custMonthPdf(x.month,x.year), custMonthPdf(x.prevMonth,x.prevYear), pdfFormatNumber(x.shipments), pdfFormatNumber(x.delivered), pdfRateCell(x.deliveryRate,'delivery'), pc(x.shipments, x.prevTotal)]));
+    } else {
+      y = pdfSectionTitle(doc, font, y, 'ملخص الفقد والاكتساب');
+      y = pdfKpiGrid(doc, font, y, [
+        { label:'عملاء فقدناهم', value:pdfFormatNumber(A.stoppedCount), valueColor:C.violation },
+        { label:'شحنات فُقدت (مع المتوقفين)', value:pdfFormatNumber(A.stoppedShipments), valueColor:C.violation },
+        { label:'صافي الشحنات', value:sg(A.newShipments - A.stoppedShipments), valueColor:(A.newShipments - A.stoppedShipments)>=0?C.success:C.violation },
+        { label:'عملاء جدد', value:pdfFormatNumber(A.newCount), valueColor:C.success },
+        { label:'شحنات العملاء الجدد', value:pdfFormatNumber(A.newShipments), valueColor:C.success },
+        { label:'صافي العملاء', value:sg(A.newCount - A.stoppedCount), valueColor:(A.newCount - A.stoppedCount)>=0?C.success:C.violation } ]);
+      y = pdfSectionTitle(doc, font, y, 'المقارنة بين الشهور');
+      const body = rows.map(r=> (r.hasCur && r.hasPrev)
+        ? [custMonthPdf(r.month,r.year), custMonthPdf(r.prev,r.prevYear), pdfFormatNumber(r.active), pdfFormatNumber(r.newList.length), pdfFormatNumber(r.newShipments), pdfFormatNumber(r.newDelivered), pdfFormatNumber(r.stoppedList.length), pdfFormatNumber(r.stoppedShipments), sg(r.newList.length - r.stoppedList.length), sg(r.newShipments - r.stoppedShipments)]
+        : [custMonthPdf(r.month,r.year), r.prev?custMonthPdf(r.prev,r.prevYear):'—', r.hasCur?pdfFormatNumber(r.active):'—','—','—','—','—','—','—','—']);
+      if(A.ok.length > 1) body.push(['إجمالي الفترة','—','—', pdfFormatNumber(A.newCount), pdfFormatNumber(A.newShipments), pdfFormatNumber(A.newDelivered), pdfFormatNumber(A.stoppedCount), pdfFormatNumber(A.stoppedShipments), sg(A.newCount-A.stoppedCount), sg(A.newShipments-A.stoppedShipments)]);
+      y = pdfDrawTable(doc, font, y,
+        [{header:'الشهر',width:62},{header:'مقارنةً بـ',width:62},{header:'العملاء النشطون',width:52},{header:'عملاء جدد',width:44},{header:'شحناتهم',width:48},{header:'تسليماتهم',width:50},{header:'عملاء متوقفون',width:48},{header:'شحنات كانت لهم',width:52},{header:'صافي العملاء',width:48},{header:'صافي الشحنات',width:52}], body);
+      const top = 15;
+      if(A.newAll.length){
+        y = pdfSectionTitle(doc, font, y, `أكبر العملاء الجدد (حتى ${top})`);
+        y = pdfDrawTable(doc, font, y, [{header:'العميل',width:170,align:'right'},{header:'شهر البداية',width:80},{header:'شحنات الشهر',width:80},{header:'التسليمات',width:80},{header:'نسبة التسليم',width:100}],
+          [...A.newAll].sort((a,b)=>b.shipments-a.shipments).slice(0,top).map(x=>[x.name, custMonthPdf(x.month,x.year), pdfFormatNumber(x.shipments), pdfFormatNumber(x.delivered), pdfRateCell(x.deliveryRate,'delivery')]));
+      }
+      if(A.stoppedAll.length){
+        y = pdfSectionTitle(doc, font, y, `أكبر العملاء المتوقفين (حتى ${top})`);
+        y = pdfDrawTable(doc, font, y, [{header:'العميل',width:170,align:'right'},{header:'توقف في شهر',width:80},{header:'شحنات آخر شهر',width:80},{header:'التسليمات',width:80},{header:'حصته من الشهر السابق',width:100}],
+          [...A.stoppedAll].sort((a,b)=>b.shipments-a.shipments).slice(0,top).map(x=>[x.name, custMonthPdf(x.month,x.year), pdfFormatNumber(x.shipments), pdfFormatNumber(x.delivered), pc(x.shipments, x.prevTotal)]));
+      }
+    }
+    const skipped = rows.filter(r=>!(r.hasCur && r.hasPrev));
+    if(skipped.length) y = pdfParagraph(doc, font, y, 'لا توجد مقارنة للشهور: ' + skipped.map(r=>pdfArabicMonthName(r.month)).join('، ') + ' (لا توجد بيانات أو لا يوجد شهر سابق).', {gap:4});
+    const total = doc.internal.getNumberOfPages();
+    for(let p=1; p<=total; p++){
+      doc.setPage(p);
+      doc.setDrawColor(...pdfC().g200); doc.setLineWidth(0.5); doc.line(PDF_MARGIN, PDF_PAGE_H-30, PDF_RIGHT, PDF_PAGE_H-30);
+      doc.setFont(font,'normal'); doc.setFontSize(8); doc.setTextColor(...pdfC().gray);
+      pdfText(doc, `تقرير الإدارة — ${T.page}`, PDF_MARGIN, PDF_PAGE_H-20, {align:'left'});
+      pdfText(doc, 'سرّي — للاستخدام الداخلي فقط', PDF_PAGE_W/2, PDF_PAGE_H-20, {align:'center'});
+      pdfText(doc, `صفحة ${p} من ${total}`, PDF_RIGHT, PDF_PAGE_H-20, {align:'right'});
+    }
+    doc.save(`${T.file}_Report_${info.file.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_')}.pdf`);
+  }catch(err){
+    console.error('Customer PDF failed:', err);
+    alert('تعذر إصدار التقرير: ' + (err.message || err));
+  }finally{ if(btn) btn.disabled = false; }
+}
+async function custExportXlsx(mode){
+  const rows = CUSTCHG_LAST[mode];
+  const btn = document.getElementById({ new:'newcust', stopped:'stopcust', cmp:'custcmp' }[mode]+'XlsxBtn');
+  try{
+    if(!rows || !rows.length) throw new Error('لا توجد بيانات — افتح الصفحة واختر الشهور أولاً.');
+    if(typeof ExcelJS === 'undefined') throw new Error('مكتبة Excel لم تُحمَّل — تحقق من الاتصال بالإنترنت وأعد المحاولة.');
+    const A = custAggregate(rows);
+    if(!A.ok.length) throw new Error('لا توجد مقارنة متاحة للشهور المختارة (الشهر السابق بلا بيانات).');
+    if(btn) btn.disabled = true;
+    const info = custPeriodInfo(rows), T = CUST_TITLES[mode];
+    const hex = n => 'FF' + ARRIVE_DS.tok(n).replace('#','').toUpperCase();
+    const BLUE = hex('--arrive-blue'), LIGHT = hex('--arrive-light-blue'), NAVY = hex('--arrive-navy');
+    const PCT = '0.0%', INT = '#,##0';
+    const wb = new ExcelJS.Workbook(); wb.creator = 'ARRIVE'; wb.created = new Date();
+    const mn = (m,y)=>`${pdfArabicMonthName(m)} ${y}`;
+    function sheet(name){
+      const ws = wb.addWorksheet(name, { views:[{ rightToLeft:true, state:'frozen', ySplit:3 }] });
+      ws.getCell('A1').value = 'تقرير الإدارة — ' + T.page; ws.getCell('A1').font = { bold:true, size:14, color:{argb:NAVY} };
+      ws.getCell('A2').value = 'الفترة: ' + info.label; ws.getCell('A2').font = { size:10, color:{argb:'FF6B7280'} };
+      return ws;
+    }
+    function table(ws, heads, data, fmts, startRow){
+      const hr = ws.getRow(startRow);
+      heads.forEach((h,i)=>{ const c = hr.getCell(i+1); c.value = h; c.font = { bold:true, color:{argb:'FFFFFFFF'} }; c.fill = { type:'pattern', pattern:'solid', fgColor:{argb:BLUE} }; c.alignment = { horizontal:i===0?'right':'center', vertical:'middle', wrapText:true }; });
+      hr.height = 30;
+      data.forEach((r,ri)=>{
+        const row = ws.getRow(startRow+1+ri);
+        r.vals.forEach((v,i)=>{
+          const c = row.getCell(i+1); c.value = v;
+          if(fmts && fmts[i] && typeof v === 'number') c.numFmt = fmts[i];
+          c.alignment = { horizontal:i===0?'right':'center', vertical:'middle' };
+          c.border = { bottom:{style:'thin', color:{argb:'FFE5E7EB'}} };
+          if(r.total){ c.font = { bold:true, color:{argb:NAVY} }; c.fill = { type:'pattern', pattern:'solid', fgColor:{argb:LIGHT} }; }
+        });
+      });
+      return startRow + data.length + 2;
+    }
+    const f = v => v==null ? null : v/100;
+    const widths = (ws, w)=>w.forEach((x,i)=>{ ws.getColumn(i+1).width = x; });
+    const newRows = A.newAll.map(x=>({ vals:[x.name, mn(x.month,x.year), mn(x.prev,x.prevYear), x.shipments, x.delivered, f(x.deliveryRate), f(x.successRate)] }));
+    const stopRows = A.stoppedAll.map(x=>({ vals:[x.name, mn(x.month,x.year), mn(x.prevMonth,x.prevYear), x.shipments, x.delivered, f(x.deliveryRate), x.prevTotal>0 ? x.shipments/x.prevTotal : null] }));
+    const summaryRows = [
+      { vals:['عملاء جدد', A.newCount, A.newShipments, A.newDelivered, A.newShipments>0 ? A.newDelivered/A.newShipments : null] },
+      { vals:['عملاء متوقفون', A.stoppedCount, A.stoppedShipments, A.stoppedDelivered, A.stoppedShipments>0 ? A.stoppedDelivered/A.stoppedShipments : null] },
+      { vals:['الصافي (جدد − متوقفون)', A.newCount - A.stoppedCount, A.newShipments - A.stoppedShipments, A.newDelivered - A.stoppedDelivered, null], total:true } ];
+    if(mode === 'new'){
+      let ws = sheet('الملخص'); table(ws, ['البند','عدد العملاء','الشحنات','التسليمات','نسبة التسليم'], summaryRows.slice(0,1), [null,INT,INT,INT,PCT], 4); widths(ws,[26,14,14,14,14]);
+      ws = sheet('العملاء الجدد'); table(ws, ['العميل','شهر البداية','قورن بشهر','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], newRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,14]);
+    } else if(mode === 'stopped'){
+      let ws = sheet('الملخص'); table(ws, ['البند','عدد العملاء','الشحنات (آخر شهر نشاط)','التسليمات','نسبة التسليم'], summaryRows.slice(1,2), [null,INT,INT,INT,PCT], 4); widths(ws,[26,14,22,14,14]);
+      ws = sheet('العملاء المتوقفون'); table(ws, ['العميل','توقف في شهر','آخر شهر نشاط','شحنات آخر شهر','التسليمات','نسبة التسليم','حصته من شحنات الشهر السابق'], stopRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,22]);
+    } else {
+      let ws = sheet('المقارنة بين الشهور');
+      const body = rows.map(r=> (r.hasCur && r.hasPrev)
+        ? { vals:[mn(r.month,r.year), mn(r.prev,r.prevYear), r.active, r.newList.length, r.newShipments, r.newDelivered, r.stoppedList.length, r.stoppedShipments, r.newList.length - r.stoppedList.length, r.newShipments - r.stoppedShipments] }
+        : { vals:[mn(r.month,r.year), r.prev?mn(r.prev,r.prevYear):'—', r.hasCur?r.active:'—','—','—','—','—','—','—','—'] });
+      if(A.ok.length > 1) body.push({ total:true, vals:['إجمالي الفترة','—','—', A.newCount, A.newShipments, A.newDelivered, A.stoppedCount, A.stoppedShipments, A.newCount-A.stoppedCount, A.newShipments-A.stoppedShipments] });
+      table(ws, ['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], body, [null,null,INT,INT,INT,INT,INT,INT,INT,INT], 4);
+      widths(ws,[18,18,16,12,12,12,14,16,14,14]);
+      ws = sheet('العملاء الجدد'); table(ws, ['العميل','شهر البداية','قورن بشهر','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], newRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,14]);
+      ws = sheet('العملاء المتوقفون'); table(ws, ['العميل','توقف في شهر','آخر شهر نشاط','شحنات آخر شهر','التسليمات','نسبة التسليم','حصته من شحنات الشهر السابق'], stopRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,22]);
+    }
+    await ARRIVE_XLSX.download(wb, `${T.file}_Report_${info.file.replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,'_')}.xlsx`);
+  }catch(err){
+    console.error('Customer Excel failed:', err);
+    alert('تعذر إصدار ملف Excel: ' + (err.message || err));
+  }finally{ if(btn) btn.disabled = false; }
 }
 
 /* ---------- Orchestration ---------- */
