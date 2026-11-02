@@ -580,6 +580,13 @@ table.cmp-table.sticky-col thead tr:first-child th:first-child{z-index:9; top:0;
 .settings-input-row input[type=number]{width:90px;}
 .helptext{font-size:var(--fs-caption); color:var(--text-secondary); margin-top:8px; line-height:1.8;}
 
+#custNamesOverlay{position:fixed; inset:0; background:var(--overlay-navy); z-index:var(--z-modal); display:none; align-items:center; justify-content:center; padding:20px;}
+#custNamesOverlay.open{display:flex;}
+.cust-names-modal{width:100%; max-width:760px; background:var(--surface-card); border-radius:var(--radius-lg); padding:22px 22px; box-shadow:var(--shadow-raised); max-height:88vh; overflow:auto;}
+.cust-names-head{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;}
+.cust-names-head h3{font-size:var(--fs-subtitle); color:var(--arrive-blue);}
+.cust-count-link{background:none; border:0; padding:2px 8px; font:inherit; font-weight:700; color:var(--arrive-blue); cursor:pointer; text-decoration:underline; border-radius:var(--radius-sm,6px);}
+.cust-count-link:hover{background:var(--arrive-light-blue);}
 /* ---------- Settings modal ---------- */
 #settingsOverlay{position:fixed; inset:0; background:var(--overlay-navy); z-index:var(--z-modal); display:none; align-items:center; justify-content:center; padding:20px;}
 #settingsOverlay.open{display:flex;}
@@ -6152,14 +6159,40 @@ async function renderCustChangeTab(mode){
   } else {
     sub.textContent = 'كل شهر مقارَن بالشهر السابق له: كم عميل توقف وبكم شحنة (شحناته في الشهر السابق)، وكم عميل جديد دخل وبكم شحنة.';
     const dash = '<td>—</td>';
+    const cl = (kind, n, month)=> n>0 ? `<button type="button" class="cust-count-link" data-cust-list="${kind}" data-cust-month="${month}" title="اضغط لعرض أسماء العملاء">${fmtInt(n)}</button>` : fmtInt(n);
     const trs = rows.map(r=>{
       if(!(r.hasCur && r.hasPrev)) return `<tr><td>${mdn(r.month)}</td><td>${r.prev?mdn(r.prev):'—'}</td><td>${r.hasCur?fmtInt(r.active):'—'}</td>${dash.repeat(7)}</tr>`;
-      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${fmtInt(r.newList.length)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${fmtInt(r.stoppedList.length)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(r.newList.length - r.stoppedList.length)}</td><td>${sg(r.newShipments - r.stoppedShipments)}</td></tr>`;
+      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${cl('new',r.newList.length,r.month)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${cl('stopped',r.stoppedList.length,r.month)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(r.newList.length - r.stoppedList.length)}</td><td>${sg(r.newShipments - r.stoppedShipments)}</td></tr>`;
     }).join('');
-    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${fmtInt(cnt('newList'))}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${fmtInt(cnt('stoppedList'))}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${sg(cnt('newList') - cnt('stoppedList'))}</td><td>${sg(sum('newShipments') - sum('stoppedShipments'))}</td></tr>` : '';
+    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${cl('new',cnt('newList'),'')}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${cl('stopped',cnt('stoppedList'),'')}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${sg(cnt('newList') - cnt('stoppedList'))}</td><td>${sg(sum('newShipments') - sum('stoppedShipments'))}</td></tr>` : '';
     const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(cnt('stoppedList')))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(cnt('newList')))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
     body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], trs + tot) + note;
+    body.onclick = (e)=>{
+      const b = e.target.closest && e.target.closest('button[data-cust-list]'); if(!b) return;
+      custShowNamesModal(b.dataset.custList, b.dataset.custMonth, comparable);
+    };
   }
+}
+function custEsc(v){ return String(v==null?'':v).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function custShowNamesModal(kind, month, rows){
+  const isStop = kind === 'stopped';
+  const sel = month ? rows.filter(r=>r.month === month) : rows;
+  const items = sel.flatMap(r=>(isStop ? r.stoppedList : r.newList).map(x=>Object.assign({ _m:r.month, _p:r.prev }, x)));
+  const mdn = m=>monthDisplayName(m);
+  const title = (isStop ? 'العملاء المتوقفون' : 'العملاء الجدد') + ' — ' + (month ? `${mdn(month)} مقارنةً بـ ${mdn(sel[0] ? sel[0]._p || sel[0].prev : '')}` : 'إجمالي الفترة');
+  const ship = items.reduce((a,x)=>a+x.shipments,0);
+  const head = ['#','العميل'].concat(month ? [] : ['الشهر']).concat([isStop ? 'شحنات آخر شهر نشاط' : 'شحنات الشهر','التسليمات','نسبة التسليم']);
+  const trs = items.map((x,i)=>`<tr><td>${i+1}</td><td>${custEsc(x.name)}</td>${month?'':`<td>${custEsc(mdn(x._m))}</td>`}<td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td></tr>`).join('');
+  let ov = document.getElementById('custNamesOverlay');
+  if(!ov){
+    ov = document.createElement('div'); ov.id = 'custNamesOverlay';
+    ov.addEventListener('click', e=>{ if(e.target === ov) ov.classList.remove('open'); });
+    document.addEventListener('keydown', e=>{ if(e.key === 'Escape') ov.classList.remove('open'); });
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = `<div class="cust-names-modal" role="dialog" aria-modal="true"><div class="cust-names-head"><h3>${custEsc(title)}</h3><button type="button" class="btn-ghost" id="custNamesClose">إغلاق</button></div><div class="card-sub" style="margin-bottom:10px;">عدد العملاء: ${fmtInt(items.length)} — إجمالي الشحنات: ${fmtInt(ship)}</div><div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${trs || `<tr><td colspan="${head.length}" class="mgmt-empty-note">لا يوجد عملاء.</td></tr>`}</tbody></table></div></div>`;
+  ov.querySelector('#custNamesClose').onclick = ()=>ov.classList.remove('open');
+  ov.classList.add('open');
 }
 
 
