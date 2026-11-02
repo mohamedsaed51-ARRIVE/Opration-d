@@ -7749,6 +7749,7 @@ function renderAgeReport(d){
     card('التسليم الناجح', ageP(k.deliveredPct), 'pos', 'circle-check', `${ageN(k.delivered)} من ${ageN(k.shipments)} شحنة`),
     card('التسليم ضمن معيار السوق', ageP(k.deliveredWithinMarketPct), 'neu', 'stopwatch', `${ageN(k.deliveredWithinMarket)} من ${ageN(k.delivered)} مسلّمة<br>(${ageEsc(deliveredStd)})`),
     card('التسليم ضمن معيار الشركة', ageP(k.deliveredWithinCompanyPct), 'neu', 'building-circle-check', `${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة<br>(${ageEsc(companyDelStd)})`),
+    card('متوسط مدة التسليم', k.avgDeliveryAge==null ? '—' : `${ageD(k.avgDeliveryAge)} يوم`, 'neu', 'hourglass-half', `من استلام البيك أب حتى التسليم<br>لـ ${ageN(k.delivered)} شحنة مسلّمة`),
   ].join('');
   const kpiReturns = [
     card('إجمالي المرتجعات', ageP(k.returnsPct), 'warn', 'rotate-left', `${ageN(k.returns)} من إجمالي الشحنات ${ageN(k.shipments)}`),
@@ -8141,7 +8142,8 @@ async function exportAgeDocx(){
       { value:ageN(k.shipments), label:'إجمالي الشحنات', sub:'شحنة استُلمت من المرسل في الفترة' },
       { value:ageP(k.deliveredPct), label:'التسليم الناجح', sub:`${ageN(k.delivered)} من ${ageN(k.shipments)} شحنة`, color:'E36C0A' },
       { value:ageP(k.deliveredWithinMarketPct), label:`التسليم ضمن (${stdM})`, sub:`${ageN(k.deliveredWithinMarket)} من ${ageN(k.delivered)} مسلّمة`, color:'E36C0A' },
-      { value:ageP(k.deliveredWithinCompanyPct), label:`التسليم ضمن (${stdC})`, sub:`${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة`, color:'16A34A' } ]));
+      { value:ageP(k.deliveredWithinCompanyPct), label:`التسليم ضمن (${stdC})`, sub:`${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة`, color:'16A34A' },
+      { value:k.avgDeliveryAge==null ? '—' : `${ageD(k.avgDeliveryAge)} يوم`, label:'متوسط مدة التسليم', sub:`من استلام البيك أب حتى التسليم`, color:'1F4E79' } ]));
     children.push(bullet('المرتجعات'));
     children.push(kpiTable([
       { value:ageP(k.returnsPct), label:'إجمالي المرتجعات', sub:`${ageN(k.returns)} من إجمالي الشحنات ${ageN(k.shipments)}` },
@@ -8313,6 +8315,7 @@ async function exportAgeXlsx(){
     {vals:['التسليمات','التسليم الناجح',k.delivered,f(k.deliveredPct),`من ${k.shipments} شحنة`]},
     {vals:['التسليمات','التسليم ضمن معيار السوق',k.deliveredWithinMarket,f(k.deliveredWithinMarketPct),`من ${k.delivered} مسلّمة (${ageStdText('market', d.standards)})`]},
     {vals:['التسليمات','التسليم ضمن معيار الشركة',k.deliveredWithinCompany,f(k.deliveredWithinCompanyPct),`من ${k.delivered} مسلّمة (${ageStdText('delivery', d.standards)})`]},
+    {vals:['التسليمات','متوسط مدة التسليم (يوم)',k.avgDeliveryAge==null?null:Number(k.avgDeliveryAge.toFixed(2)),null,'من استلام البيك أب حتى التسليم']},
     {vals:['المرتجعات','إجمالي المرتجعات',k.returns,f(k.returnsPct),`من إجمالي الشحنات ${k.shipments}`]},
     {vals:['المرتجعات','مرتجع مغلق ضمن المدة',k.returnClosedWithin,f(k.returnClosedWithinPct),`من ${k.returns} مرتجعًا (${ageStdText('returns', d.standards)})`]},
     {vals:['المرتجعات','مرتجعات مغلقة وتجاوزت المدة',k.returnClosedOver,f(k.returnClosedOverPct),`من ${k.returns} مرتجعًا`]},
