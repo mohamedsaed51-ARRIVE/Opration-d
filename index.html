@@ -501,6 +501,12 @@ table.cmp-table thead th.cmp-first, table.cmp-table tbody td.cmp-first{border-in
 table.cmp-table thead th.cmp-name{vertical-align:middle;}
 table.cmp-table tbody td.cmp-na{color:var(--text-faint); text-align:center;}
 .custchg-ctl{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin:6px 0 12px;}
+/* tall comparison tables: the scroll box fills the screen, header rows stay visible while scrolling down */
+.table-scroll.tall{max-height:calc(100vh - 190px); min-height:320px;}
+table.cmp-table thead tr:first-child th{height:46px; padding-block:0; top:0; z-index:7; box-sizing:border-box;}
+table.cmp-table thead tr:nth-child(2) th{top:46px; z-index:6;}
+table.cmp-table.sticky-col thead tr:nth-child(2) th:first-child{position:sticky; inset-inline-start:auto; z-index:6; background:var(--table-header-bg); box-shadow:none;}
+table.cmp-table.sticky-col thead tr:first-child th:first-child{z-index:9; top:0;}
 .custchg-actions{display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px;}
 .custchg-ctl .filter-group{min-width:190px; max-width:260px; flex:0 1 230px;}
 .custchg-ctl select{height:var(--control-h-md); font-size:var(--fs-small);}
@@ -969,19 +975,19 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <div class="card-title" style="margin-bottom:0;">جدول أداء الفروع</div>
       </div>
       <div class="card-sub">الترتيب الافتراضي: من الأضعف SLA إلى الأفضل. اضغط أي عمود لإعادة الترتيب.</div>
-      <div class="table-scroll"><table class="data-table" id="branchTable"></table></div>
+      <div class="table-scroll tall"><table class="data-table" id="branchTable" data-dt-all></table></div>
     </div>
   </div>
 
   <div class="tab-panel" id="tab-geo">
     <div class="card" style="margin-bottom:16px;">
       <div class="card-title">أداء المحافظات</div>
-      <div class="table-scroll"><table class="data-table" id="provinceTable"></table></div>
+      <div class="table-scroll tall"><table class="data-table" id="provinceTable" data-dt-all></table></div>
     </div>
     <div class="card">
       <div class="card-title">أداء المناطق</div>
       <div class="card-sub">أعلى 30 منطقة حسب عدد الشحنات ضمن الفلاتر الحالية</div>
-      <div class="table-scroll"><table class="data-table" id="areaTable"></table></div>
+      <div class="table-scroll tall"><table class="data-table" id="areaTable" data-dt-all></table></div>
     </div>
   </div>
 
@@ -1004,7 +1010,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
           </select>
         </div>
       </div>
-      <div class="table-scroll"><table class="data-table" id="clientTable"></table></div>
+      <div class="table-scroll tall"><table class="data-table" id="clientTable" data-dt-all></table></div>
     </div>
   </div>
 
@@ -1433,7 +1439,8 @@ const ARRIVE_DS = (function(){
     table._dsEnh = true;
     const wrap = table.parentElement;
     if(!wrap || !wrap.parentNode) return;
-    const st = { q:'', page:1, size:25 };
+    const showAll = table.hasAttribute('data-dt-all'); // tables that must always list EVERY row (branches / provinces / areas / clients): search only, no paging
+    const st = { q:'', page:1, size: showAll ? 1e9 : 25 };
     const tools = document.createElement('div');
     tools.className = 'dt-tools';
     tools.innerHTML = '<div class="dt-search"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i><input type="search" placeholder="بحث في الجدول…" aria-label="بحث في الجدول"></div>' +
@@ -1444,6 +1451,7 @@ const ARRIVE_DS = (function(){
     wrap.parentNode.insertBefore(tools, wrap);
     wrap.parentNode.insertBefore(pager, wrap.nextSibling);
     const input = tools.querySelector('input'), sizeSel = tools.querySelector('select'), count = tools.querySelector('.dt-count');
+    if(showAll){ const lbl = sizeSel.closest('label'); if(lbl) lbl.style.display = 'none'; }
     let busy = false;
 
     function dataRows(body){
@@ -7177,7 +7185,7 @@ function renderBranchesTabFromServer(serverSummary){ renderBranchesTabFromArray(
    ========================================================= */
 function renderGeoTabFromArrays(byProvinceAll, byAreaAll){
   cmpRenderTable('provinceTable', 'geo', 'provinceSummary', STATE.serverOverviewSummary);
-  cmpRenderTable('areaTable', 'geo', 'areaSummary', STATE.serverOverviewSummary, 30);
+  cmpRenderTable('areaTable', 'geo', 'areaSummary', STATE.serverOverviewSummary);
 }
 function renderGeoTabFromServer(serverSummary){ renderGeoTabFromArrays(serverSummary.provinceSummary||[], serverSummary.areaSummary||[]); }
 
@@ -7198,7 +7206,7 @@ function renderClientsTabFromArray(byClient){
     delete CMP.sort['clientTable'];
     CMP.sortPending = { key:m[0], dir:m[1] };
   }
-  cmpRenderTable('clientTable', 'client', 'customerSummary', STATE.serverOverviewSummary, 100);
+  cmpRenderTable('clientTable', 'client', 'customerSummary', STATE.serverOverviewSummary);
 }
 function renderClientsTabFromServer(serverSummary){ renderClientsTabFromArray(serverSummary.customerSummary||[]); }
 
@@ -7369,7 +7377,7 @@ function cmpDraw(tableId){
     }).join('')).join('') + '</tr>';
   }).join('') + '</tbody>';
   if(!rows.length) tbody = `<tbody><tr><td colspan="${months.length*metrics.length+1}" style="text-align:center;color:var(--text-faint);padding:20px;">لا توجد بيانات مطابقة للفلاتر الحالية</td></tr></tbody>`;
-  table.classList.add('cmp-table');
+  table.classList.add('cmp-table','sticky-col');
   table.innerHTML = thead + tbody;
   table.querySelectorAll('thead th[data-key]').forEach(th=>{
     th.addEventListener('click', ()=>{
