@@ -121,7 +121,7 @@ function CustomersTable({ result }) {
     const csv = '﻿' + [head, ...lines].map((l) => l.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    a.download = `client-quality-${result.month}.csv`; a.click();
+    a.download = `kpi-operation-${result.month}.csv`; a.click();
   };
   return (
     <>

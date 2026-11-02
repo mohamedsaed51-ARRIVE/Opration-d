@@ -9,7 +9,7 @@
 
 ## التشغيل
 ```bash
-cd client-quality
+cd kpi-operation
 npm install
 npm run dev      # أو npm run build للنشر على Vercel
 npm test         # اختبارات منطق الحساب
