@@ -495,6 +495,12 @@ table.data-table tfoot td{background:var(--arrive-light-blue); font-weight:var(-
 .date-range input{height:var(--control-h-md); font-size:var(--fs-small); flex:1 1 0; min-width:0;}
 .filter-group.filter-date{flex:2 1 340px; max-width:440px;} /* two date inputs + «إلى» need more room than one dropdown, otherwise the reset button overlaps them */
 .filter-clear{margin-inline-start:auto; flex:0 0 auto; white-space:nowrap;}
+/* 3-month comparison tables (branches / provinces / areas / clients) */
+table.cmp-table thead th.cmp-month{text-align:center; border-inline-start:2px solid rgba(255,255,255,.55); background:var(--arrive-blue-700);}
+table.cmp-table thead th.cmp-first, table.cmp-table tbody td.cmp-first{border-inline-start:2px solid var(--border-strong);}
+table.cmp-table thead th.cmp-name{vertical-align:middle;}
+table.cmp-table tbody td.cmp-na{color:var(--text-faint); text-align:center;}
+.cmp-note{font-size:var(--fs-caption); color:var(--text-secondary); margin:2px 0 10px;}
 .active-filters{display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:0 16px 14px;}
 .active-filters:empty{display:none;}
 .active-filters .lbl{font-size:var(--fs-caption); color:var(--text-secondary); font-weight:var(--fw-semibold);}
@@ -1055,6 +1061,9 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
           <option value="both">الفروع والعملاء</option>
           <option value="branches">الفروع فقط</option>
           <option value="customers">العملاء فقط</option>
+          <option value="newCustomers">العملاء الجدد وتسليماتهم</option>
+          <option value="stoppedCustomers">العملاء المتوقفون</option>
+          <option value="customerChurn">مقارنة فقد واكتساب العملاء بين الشهور</option>
         </select>
       </div>
       <div class="mgmt-ctrl" style="justify-content:flex-end; gap:8px;">
@@ -1122,6 +1131,12 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       </div>
       <div class="card-sub">الترتيب حسب حجم الشحنات في آخر شهر بالفترة المختارة.</div>
       <div class="table-scroll"><table class="data-table sticky-col" id="mgmtCustomerMovementTable"></table></div>
+    </div>
+
+    <div class="card mgmt-section" id="mgmtCustomerChangeSection" style="display:none;">
+      <div class="card-title" id="mgmtCustomerChangeTitle"><i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد والمتوقفون</div>
+      <div class="card-sub" id="mgmtCustomerChangeSub"></div>
+      <div id="mgmtCustomerChangeBody"></div>
     </div>
 
     <div class="card mgmt-section" id="mgmtCustomerAnalysisSection">
@@ -5980,10 +5995,97 @@ async function mgmtGenerateExcelReportLegacy(){
 }
 
 
+
+/* =========================================================
+   NEW / STOPPED CUSTOMERS — each month is compared with the PREVIOUS month
+   new     = shipped in this month, did not ship in the previous month
+   stopped = shipped in the previous month, did not ship in this month
+   The month before the first selected month is loaded too, so the first month of the period can be compared as well.
+   ========================================================= */
+let MGMT_CHANGE_TOKEN = 0;
+function mgmtPrevMonthOf(m){ const c = mgmtChronoMonths(); const i = c.indexOf(m); return i > 0 ? c[i-1] : null; }
+function mgmtMonthHasData(m){ const d = MGMT.monthsData[m]; return !!(d && d.summary && !d.summary.isEmpty); }
+function mgmtCustMap(m){
+  const mm = new Map();
+  if(mgmtMonthHasData(m)) (MGMT.monthsData[m].summary.customerSummary||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
+  return mm;
+}
+function mgmtComputeCustomerChange(months){
+  return months.map(m=>{
+    const prev = mgmtPrevMonthOf(m), cur = mgmtCustMap(m);
+    const hasCur = mgmtMonthHasData(m), hasPrev = !!(prev && mgmtMonthHasData(prev));
+    const out = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0 };
+    if(!hasCur || !hasPrev) return out;
+    const pm = mgmtCustMap(prev);
+    cur.forEach((r,n)=>{ if(!pm.has(n)) out.newList.push({ name:n, month:m, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
+    pm.forEach((r,n)=>{ if(!cur.has(n)) out.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
+    out.newList.sort((a,b)=>b.shipments-a.shipments); out.stoppedList.sort((a,b)=>b.shipments-a.shipments);
+    out.newList.forEach(x=>{ out.newShipments += x.shipments; out.newDelivered += x.delivered; });
+    out.stoppedList.forEach(x=>{ out.stoppedShipments += x.shipments; out.stoppedDelivered += x.delivered; });
+    out.prevTotal = 0; pm.forEach(r=>{ out.prevTotal += r.shipments; });
+    return out;
+  });
+}
+async function mgmtRenderCustomerChange(months){
+  const body = document.getElementById('mgmtCustomerChangeBody'), title = document.getElementById('mgmtCustomerChangeTitle'), sub = document.getElementById('mgmtCustomerChangeSub');
+  if(!body) return;
+  const token = ++MGMT_CHANGE_TOKEN;
+  body.innerHTML = '<div class="mgmt-empty-note">جاري تحميل الشهر السابق للمقارنة…</div>';
+  const prevOfFirst = months.length ? mgmtPrevMonthOf(months[0]) : null;
+  if(prevOfFirst) await mgmtEnsureMonthsLoaded([prevOfFirst]);
+  if(token !== MGMT_CHANGE_TOKEN) return;
+  const rows = mgmtComputeCustomerChange(months);
+  const comparable = rows.filter(r=>r.hasCur && r.hasPrev);
+  const type = MGMT.comparisonType;
+  const mdn = m=>monthDisplayName(m);
+  const kpi = (l,v)=>`<div class="mgmt-mini-kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`;
+  const tbl = (head, bodyRows)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+  const noPrev = rows.filter(r=>!(r.hasCur && r.hasPrev));
+  const note = noPrev.length ? `<div class="card-sub" style="margin-top:8px;">لا توجد مقارنة للشهور: ${noPrev.map(r=>mdn(r.month)+(r.hasCur?(r.prev?' (الشهر السابق بلا بيانات)':' (لا يوجد شهر سابق)'):' (لا توجد بيانات)')).join('، ')}.</div>` : '';
+  const sum = f=>comparable.reduce((a,r)=>a+r[f],0);
+  const pc = (a,b)=> b>0 ? fmtPct(a/b*100) : '—';
+  if(type === 'newCustomers'){
+    title.innerHTML = '<i class="fa-solid fa-user-plus" aria-hidden="true"></i> العملاء الجدد وتسليماتهم';
+    sub.textContent = 'عميل جديد = له شحنات في الشهر ولم يكن له أي شحنات في الشهر السابق له مباشرة.';
+    const all = comparable.flatMap(r=>r.newList);
+    const nd = sum('newDelivered'), ns = sum('newShipments');
+    const kp = `<div class="mgmt-mini-kpis">${kpi('عدد العملاء الجدد', fmtInt(all.length))}${kpi('شحناتهم', fmtInt(ns))}${kpi('تسليماتهم', fmtInt(nd))}${kpi('نسبة تسليمهم', pc(nd, ns))}</div>`;
+    const trs = all.length ? all.map(x=>`<tr><td>${x.name}</td><td>${mdn(x.month)}</td><td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td><td>${fmtPct(x.successRate)}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="mgmt-empty-note">لا يوجد عملاء جدد في الفترة المختارة.</td></tr>';
+    body.innerHTML = kp + tbl(['العميل','شهر البداية','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], trs) + note;
+  } else if(type === 'stoppedCustomers'){
+    title.innerHTML = '<i class="fa-solid fa-user-minus" aria-hidden="true"></i> العملاء المتوقفون';
+    sub.textContent = 'عميل متوقف = كان له شحنات في الشهر السابق ولا توجد له أي شحنات في هذا الشهر. الأرقام هي شحناته في آخر شهر نشاط.';
+    const all = comparable.flatMap(r=>r.stoppedList.map(x=>Object.assign({ prevTotal:r.prevTotal }, x)));
+    const sd = sum('stoppedDelivered'), ss = sum('stoppedShipments');
+    const kp = `<div class="mgmt-mini-kpis">${kpi('عدد العملاء المتوقفين', fmtInt(all.length))}${kpi('شحناتهم في آخر شهر نشاط', fmtInt(ss))}${kpi('تسليماتهم', fmtInt(sd))}${kpi('نسبة تسليمهم', pc(sd, ss))}</div>`;
+    const trs = all.length ? all.map(x=>`<tr><td>${x.name}</td><td>${mdn(x.month)}</td><td>${mdn(x.prevMonth)}</td><td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td><td>${pc(x.shipments, x.prevTotal)}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="mgmt-empty-note">لا يوجد عملاء متوقفون في الفترة المختارة.</td></tr>';
+    body.innerHTML = kp + tbl(['العميل','توقف في شهر','آخر شهر نشاط','شحنات آخر شهر','التسليمات','نسبة التسليم','حصته من شحنات الشهر السابق'], trs) + note;
+  } else {
+    title.innerHTML = '<i class="fa-solid fa-people-arrows" aria-hidden="true"></i> مقارنة فقد واكتساب العملاء بين الشهور';
+    sub.textContent = 'كل شهر مقارَن بالشهر السابق له: كم عميل توقف وبكم شحنة (شحناته في الشهر السابق)، وكم عميل جديد دخل وبكم شحنة.';
+    const dash = '<td>—</td>';
+    const trs = rows.map(r=>{
+      if(!(r.hasCur && r.hasPrev)) return `<tr><td>${mdn(r.month)}</td><td>${r.prev?mdn(r.prev):'—'}</td><td>${r.hasCur?fmtInt(r.active):'—'}</td>${dash.repeat(7)}</tr>`;
+      const netC = r.newList.length - r.stoppedList.length, netS = r.newShipments - r.stoppedShipments;
+      const sg = n=>(n>0?'+':'')+fmtInt(n);
+      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${fmtInt(r.newList.length)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${fmtInt(r.stoppedList.length)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(netC)}</td><td>${sg(netS)}</td></tr>`;
+    }).join('');
+    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${fmtInt(comparable.reduce((a,r)=>a+r.newList.length,0))}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${fmtInt(comparable.reduce((a,r)=>a+r.stoppedList.length,0))}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${(()=>{const n=comparable.reduce((a,r)=>a+r.newList.length-r.stoppedList.length,0);return (n>0?'+':'')+fmtInt(n);})()}</td><td>${(()=>{const n=sum('newShipments')-sum('stoppedShipments');return (n>0?'+':'')+fmtInt(n);})()}</td></tr>` : '';
+    const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(comparable.reduce((a,r)=>a+r.stoppedList.length,0)))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(comparable.reduce((a,r)=>a+r.newList.length,0)))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
+    body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], trs + tot) + note;
+  }
+}
+
 /* ---------- Orchestration ---------- */
 function mgmtRenderAll(months){
-  const showBranches = MGMT.comparisonType !== 'customers';
-  const showCustomers = MGMT.comparisonType !== 'branches';
+  const changeMode = ['newCustomers','stoppedCustomers','customerChurn'].includes(MGMT.comparisonType);
+  const showBranches = !changeMode && MGMT.comparisonType !== 'customers';
+  const showCustomers = !changeMode && MGMT.comparisonType !== 'branches';
+  const chgSec = document.getElementById('mgmtCustomerChangeSection');
+  if(chgSec) chgSec.style.display = changeMode ? '' : 'none';
+  if(changeMode) mgmtRenderCustomerChange(months);
   document.getElementById('mgmtBranchMovementSection').style.display = showBranches?'':'none';
   document.getElementById('mgmtBranchAnalysisSection').style.display = showBranches?'':'none';
   document.getElementById('mgmtCustomerMovementSection').style.display = showCustomers?'':'none';
@@ -6403,6 +6505,8 @@ function renderKpiCards(k){
   const cards = [
     {label:'إجمالي الشحنات', value:fmtInt(total), cls:'neu', icon:'boxes-stacked', sub:'ضمن الفلاتر المطبّقة'},
     card('التسليمات', k.delivered, 'pos', 'circle-check'),
+    { label:'متوسط مدة التسليم', value: (k.avgDays!=null && !isNaN(k.avgDays)) ? (fmtDays(k.avgDays)+' يوم') : '—', cls:'neu', icon:'stopwatch',
+      sub: (k.avgDays!=null && !isNaN(k.avgDays)) ? ('من استلام البيك أب حتى التسليم'+((k.medianDays!=null && !isNaN(k.medianDays))?(' · الوسيط '+fmtDays(k.medianDays)+' يوم'):'')) : 'لا توجد شحنات مُسلَّمة بتواريخ صالحة' },
     split ? card('المرتجعات المغلقة', k.returnClosed, 'warn', 'rotate-left') : staleCard('المرتجعات المغلقة', 'warn', 'rotate-left'),
     split ? card('المرتجعات المفتوحة', k.returnOpen, 'warn', 'box-open') : staleCard('المرتجعات المفتوحة', 'warn', 'box-open'),
     split ? card('المرتجعات المعلقة', k.returnHold, 'warn', 'pause') : staleCard('المرتجعات المعلقة', 'warn', 'pause'),
@@ -6790,7 +6894,7 @@ function renderBranchesTabFromArray(byBranchAll){
     [{label:'SLA %', data:worst10.map(b=>b.slaPct), backgroundColor: worst10.map(b=>slaBarColor(b.slaPct))}],
     {rotate:true, overrides:{scales:{y:{max:100}}}});
 
-  renderSortableTable('branchTable', byBranch, STATE.branchSortKey, STATE.branchSortDir, 'branch');
+  cmpRenderTable('branchTable', 'branch', 'branchSummary', STATE.serverOverviewSummary);
 }
 // PHASE 3 — direct feed from the compact summary's branchSummary (already
 // filtered server-side, same shape as groupBy()'s output).
@@ -6800,10 +6904,8 @@ function renderBranchesTabFromServer(serverSummary){ renderBranchesTabFromArray(
    TAB: GEO (Province & Area)
    ========================================================= */
 function renderGeoTabFromArrays(byProvinceAll, byAreaAll){
-  const byProvince = [...byProvinceAll].sort((a,b)=>b.shipments-a.shipments);
-  renderSortableTable('provinceTable', byProvince, 'shipments', 'desc', 'geo');
-  const byArea = [...byAreaAll].sort((a,b)=>b.shipments-a.shipments).slice(0,30);
-  renderSortableTable('areaTable', byArea, 'shipments', 'desc', 'geo');
+  cmpRenderTable('provinceTable', 'geo', 'provinceSummary', STATE.serverOverviewSummary);
+  cmpRenderTable('areaTable', 'geo', 'areaSummary', STATE.serverOverviewSummary, 30);
 }
 function renderGeoTabFromServer(serverSummary){ renderGeoTabFromArrays(serverSummary.provinceSummary||[], serverSummary.areaSummary||[]); }
 
@@ -6816,14 +6918,15 @@ function renderClientsTabFromArray(byClient){
     [{label:'عدد الشحنات', data:top10.map(c=>c.shipments), backgroundColor:CHART_COLORS.accent}],
     {rotate:true});
 
-  let sorted;
-  const key = STATE.clientSort;
-  if(key==='shipments') sorted=[...byClient].sort((a,b)=>b.shipments-a.shipments);
-  else if(key==='deliveryRate') sorted=[...byClient].sort((a,b)=>(b.deliveryRate??-1)-(a.deliveryRate??-1));
-  else if(key==='returnRate') sorted=[...byClient].sort((a,b)=>(b.returnRate??-1)-(a.returnRate??-1));
-  else if(key==='slaPct') sorted=[...byClient].sort((a,b)=>(b.slaPct??-1)-(a.slaPct??-1));
-  else if(key==='slaPctAsc') sorted=[...byClient].sort((a,b)=>(a.slaPct??999)-(b.slaPct??999));
-  renderSortableTable('clientTable', sorted.slice(0,100), null, null, 'client');
+  // the sort selector orders by the LATEST month of the comparison; clicking a column header afterwards overrides it
+  if(CMP.clientSortApplied !== STATE.clientSort){
+    CMP.clientSortApplied = STATE.clientSort;
+    const map = { shipments:['shipments','desc'], deliveryRate:['deliveryRate','desc'], returnRate:['returnRate','desc'], slaPct:['slaPct','desc'], slaPctAsc:['slaPct','asc'] };
+    const m = map[STATE.clientSort] || map.shipments;
+    delete CMP.sort['clientTable'];
+    CMP.sortPending = { key:m[0], dir:m[1] };
+  }
+  cmpRenderTable('clientTable', 'client', 'customerSummary', STATE.serverOverviewSummary, 100);
 }
 function renderClientsTabFromServer(serverSummary){ renderClientsTabFromArray(serverSummary.customerSummary||[]); }
 
@@ -6870,6 +6973,139 @@ const TABLE_COLS = {
   ]},
 };
 let TABLE_SORT_STATE = {};
+
+/* =========================================================
+   3-MONTH COMPARISON TABLES — الفروع / المحافظات / المناطق / العملاء
+   One row per entity, one column group per month (the selected month + the two before it; in «كل الشهور» the last three
+   months that have data). Per month: shipments and the rates only (no delivered / returned / rejected counts).
+   «نسبة الوصول» = successRate (delivered + rejected, of all shipments) and sits right after «نسبة التسليم».
+   The selected month uses the dashboard's own (filtered) summary; the other months are fetched with the same dimension
+   filters (the date filter belongs to the selected month only and is not applied to the other months).
+   ========================================================= */
+const CMP_METRICS = {
+  branch: [
+    {key:'shipments', label:'الشحنات', type:'int'},
+    {key:'deliveryRate', label:'نسبة التسليم', type:'pct', good:true},
+    {key:'successRate', label:'نسبة الوصول', type:'pct', good:true},
+    {key:'returnRate', label:'نسبة المرتجعات', type:'pct', good:false},
+    {key:'rejectedRate', label:'نسبة الرفض', type:'pct', good:false},
+    {key:'avgDays', label:'م. أيام التسليم', type:'days'},
+    {key:'slaPct', label:'SLA %', type:'pct', good:true},
+  ],
+  geo: [
+    {key:'shipments', label:'الشحنات', type:'int'},
+    {key:'deliveryRate', label:'نسبة التسليم', type:'pct', good:true},
+    {key:'successRate', label:'نسبة الوصول', type:'pct', good:true},
+    {key:'returnRate', label:'نسبة المرتجعات', type:'pct', good:false},
+    {key:'rejectedRate', label:'نسبة الرفض', type:'pct', good:false},
+    {key:'slaPct', label:'SLA %', type:'pct', good:true},
+  ],
+  client: [
+    {key:'shipments', label:'الشحنات', type:'int'},
+    {key:'deliveryRate', label:'نسبة التسليم', type:'pct', good:true},
+    {key:'successRate', label:'نسبة الوصول', type:'pct', good:true},
+    {key:'returnRate', label:'نسبة المرتجعات', type:'pct', good:false},
+    {key:'rejectedRate', label:'نسبة الرفض', type:'pct', good:false},
+    {key:'avgDays', label:'م. أيام التسليم', type:'days'},
+    {key:'slaPct', label:'SLA %', type:'pct', good:true},
+  ],
+};
+const CMP = { cache:null, tables:{}, sort:{}, tokens:{}, clientSortApplied:null };
+const CMP_NAME_LABEL = { branch:'الفرع', geo:'المنطقة', client:'العميل' };
+
+async function cmpLoadSummary(month, filters){
+  try{
+    if(!filters || !Object.keys(filters).length){
+      const r = await getMonthFullSummary(month, { slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
+      return r && r.summary;
+    }
+    const sm = await fetchMonthDashboardSummary(month, { filters, slaTarget: SLA_TARGET_DAYS, branchSlaTargets: BRANCH_SLA_TARGETS });
+    return (sm && sm.success !== false) ? sm : null;
+  }catch(e){ console.warn('[CMP LOAD FAILED]', month, e); return null; }
+}
+function cmpHasData(s){ return !!(s && s.success !== false && !s.empty && !s.noData && !s.isEmpty); }
+// {months:[oldest..newest], summaries:{month:summary|null}} — cached per (month, filters, SLA, summary build time)
+function cmpGetSummaries(selectedSummary){
+  const filters = buildServerFiltersFromState();
+  const key = [selectedMonth, JSON.stringify(filters), selectedSummary && selectedSummary.generatedAt, SLA_TARGET_DAYS, JSON.stringify(BRANCH_SLA_TARGETS)].join('|');
+  if(CMP.cache && CMP.cache.key === key) return CMP.cache.promise;
+  const promise = (async()=>{
+    const chrono = mgmtChronoMonths();
+    const isAll = selectedMonth === ALL_MONTHS_SENTINEL;
+    let candidates;
+    if(isAll) candidates = chrono.slice(-6);
+    else { const i = chrono.indexOf(selectedMonth); candidates = i < 0 ? [selectedMonth] : chrono.slice(Math.max(0, i-2), i+1); }
+    const loaded = await Promise.all(candidates.map(async m=>({ m, s: (!isAll && m === selectedMonth) ? selectedSummary : await cmpLoadSummary(m, filters) })));
+    let list = loaded;
+    if(isAll) list = loaded.filter(x=>cmpHasData(x.s)).slice(-3);
+    const summaries = {}; list.forEach(x=>{ summaries[x.m] = x.s; });
+    return { months: list.map(x=>x.m), summaries };
+  })();
+  CMP.cache = { key, promise };
+  promise.catch(()=>{ if(CMP.cache && CMP.cache.key === key) CMP.cache = null; });
+  return promise;
+}
+async function cmpRenderTable(tableId, type, listKey, selectedSummary, limit){
+  const table = document.getElementById(tableId); if(!table) return;
+  const myToken = (CMP.tokens[tableId] = (CMP.tokens[tableId]||0) + 1);
+  table.innerHTML = '<tbody><tr><td style="text-align:center;color:var(--text-faint);padding:20px;">جاري تحميل مقارنة آخر 3 شهور…</td></tr></tbody>';
+  let data;
+  try{ data = await cmpGetSummaries(selectedSummary); }
+  catch(e){ if(myToken !== CMP.tokens[tableId]) return; table.innerHTML = '<tbody><tr><td style="text-align:center;color:var(--negative);padding:20px;">تعذر تحميل المقارنة — حاول مرة أخرى.</td></tr></tbody>'; return; }
+  if(myToken !== CMP.tokens[tableId]) return; // a newer render started meanwhile
+  const maps = {};
+  data.months.forEach(m=>{
+    const mm = new Map(); const sm = data.summaries[m];
+    if(cmpHasData(sm)) (sm[listKey]||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
+    maps[m] = mm;
+  });
+  CMP.tables[tableId] = { type, listKey, months: data.months, maps, limit: limit||0 };
+  cmpDraw(tableId);
+}
+function cmpDraw(tableId){
+  const t = CMP.tables[tableId]; const table = document.getElementById(tableId);
+  if(!t || !table) return;
+  const metrics = CMP_METRICS[t.type], months = t.months;
+  if(!months.length){ table.innerHTML = '<tbody><tr><td style="text-align:center;color:var(--text-faint);padding:20px;">لا توجد بيانات</td></tr></tbody>'; return; }
+  const latest = months[months.length-1];
+  let st = CMP.sort[tableId];
+  if(!st){ const pend = (tableId==='clientTable' && CMP.sortPending) ? CMP.sortPending : null; st = CMP.sort[tableId] = { month: latest, key: pend?pend.key:'shipments', dir: pend?pend.dir:'desc' }; }
+  if(st.key !== 'name' && !months.includes(st.month)) st = CMP.sort[tableId] = { month: latest, key:'shipments', dir:'desc' };
+  // entities: any that has shipments in any of the months
+  const names = new Set(); months.forEach(m=>t.maps[m].forEach((_,n)=>names.add(n)));
+  let rows = [...names].map(n=>({ name:n, by: Object.fromEntries(months.map(m=>[m, t.maps[m].get(n)||null])) }));
+  const val = r=>{ const e = r.by[st.month]; const v = e ? e[st.key] : null; return (v===null||v===undefined||isNaN(v)) ? -Infinity : v; };
+  rows.sort((a,b)=>{
+    if(st.key === 'name') return st.dir==='asc' ? a.name.localeCompare(b.name,'ar') : b.name.localeCompare(a.name,'ar');
+    const d = val(b) - val(a);
+    const base = (d===0 || isNaN(d)) ? ((b.by[latest]?b.by[latest].shipments:0) - (a.by[latest]?a.by[latest].shipments:0)) : d;
+    return st.dir==='asc' ? -base : base;
+  });
+  if(t.limit) rows = rows.slice(0, t.limit);
+  const arrow = (m,k)=> (st.key===k && (k==='name' || st.month===m)) ? (st.dir==='asc'?' ▲':' ▼') : '';
+  let thead = `<thead><tr><th class="cmp-name" rowspan="2" data-key="name" data-month="">${CMP_NAME_LABEL[t.type]}${arrow('', 'name')}</th>` +
+    months.map(m=>`<th class="cmp-month" colspan="${metrics.length}">${monthDisplayName(m)}${t.maps[m].size?'':' <small>(لا بيانات)</small>'}</th>`).join('') + '</tr><tr>' +
+    months.map(m=>metrics.map((c,i)=>`<th class="${i===0?'cmp-first':''}" data-key="${c.key}" data-month="${m}">${c.label}${arrow(m,c.key)}</th>`).join('')).join('') + '</tr></thead>';
+  let tbody = '<tbody>' + rows.map((r,i)=>{
+    const rank = (t.type==='branch'||t.type==='geo') ? `<span class="rank-badge">${i+1}</span>` : '';
+    return `<tr><td>${rank}${r.name}</td>` + months.map(m=>{
+      const e = r.by[m];
+      return metrics.map((c,j)=> e ? `<td class="${j===0?'cmp-first':''}">${fmtCell(e[c.key], c.type, c.good)}</td>` : `<td class="cmp-na ${j===0?'cmp-first':''}">—</td>`).join('');
+    }).join('') + '</tr>';
+  }).join('') + '</tbody>';
+  if(!rows.length) tbody = `<tbody><tr><td colspan="${months.length*metrics.length+1}" style="text-align:center;color:var(--text-faint);padding:20px;">لا توجد بيانات مطابقة للفلاتر الحالية</td></tr></tbody>`;
+  table.classList.add('cmp-table');
+  table.innerHTML = thead + tbody;
+  table.querySelectorAll('thead th[data-key]').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const key = th.getAttribute('data-key'), month = th.getAttribute('data-month') || latest;
+      const cur = CMP.sort[tableId];
+      if(cur && cur.key===key && (key==='name' || cur.month===month)) cur.dir = cur.dir==='asc'?'desc':'asc';
+      else CMP.sort[tableId] = { month, key, dir: key==='name'?'asc':'desc' };
+      cmpDraw(tableId);
+    });
+  });
+}
 
 function fmtCell(val, type, good){
   if(type==='int') return fmtInt(val);
