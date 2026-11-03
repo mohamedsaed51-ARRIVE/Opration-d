@@ -219,6 +219,10 @@ function doGet(e) {
       result = saveBranchConfigPayload(params);
     }
 
+    else if (action === "getCustomerCodes") {
+      result = getCustomerCodesPayload();
+    }
+
     else if (action === "getAgeStandards") {
       result = getAgeStandardsPayload();
     }
@@ -578,6 +582,44 @@ function saveStatusMappingPayload(params) {
     return { success: true, mapping: clean };
   } catch (e) {
     console.log("[STATUS MAPPING SAVE FAILED] " + String(e && e.message ? e.message : e));
+    return { success: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// ============================================================
+// 4E-2. CUSTOMER CODES (code <-> name), read from a tab in the Q4 spreadsheet
+// ============================================================
+// Tab "CUSTOMER_CODES": column A = كود العميل, column B = اسم العميل (header row optional).
+// A code may appear on several rows (old + new name of the same customer): the dashboard then treats all those
+// names as ONE customer, so a rename is never counted as "new customer" / "stopped customer".
+var CUSTOMER_CODES_SHEET = "CUSTOMER_CODES";
+function getCustomerCodesPayload() {
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.Q4);
+    var sh = ss.getSheetByName(CUSTOMER_CODES_SHEET);
+    if (!sh) return { success: true, found: false, sheet: CUSTOMER_CODES_SHEET, rows: [] };
+    var last = sh.getLastRow();
+    if (last < 1) return { success: true, found: true, sheet: CUSTOMER_CODES_SHEET, rows: [] };
+    var vals = sh.getRange(1, 1, last, Math.max(2, Math.min(sh.getLastColumn(), 6))).getValues();
+    var codeCol = 0, nameCol = 1, start = 0;
+    var head = vals[0].map(function (h) { return summaryNormText(h).toLowerCase(); });
+    for (var c = 0; c < head.length; c++) {
+      if (head[c].indexOf("كود") >= 0 || head[c] === "code" || head[c].indexOf("customer code") >= 0) codeCol = c;
+      else if (head[c].indexOf("اسم") >= 0 || head[c] === "name" || head[c] === "client" || head[c].indexOf("الراسل") >= 0 || head[c].indexOf("العميل") >= 0) nameCol = c;
+    }
+    if (/كود|code|اسم|name/i.test(head.join("|"))) start = 1;
+    var rows = [], seen = {};
+    for (var r = start; r < vals.length; r++) {
+      var code = summaryNormText(vals[r][codeCol]), name = summaryNormText(vals[r][nameCol]);
+      if (!code || !name) continue;
+      var k = code + "\u0001" + name;
+      if (seen[k]) continue;
+      seen[k] = true;
+      rows.push({ code: code, name: name });
+    }
+    return { success: true, found: true, sheet: CUSTOMER_CODES_SHEET, rows: rows };
+  } catch (e) {
+    console.log("[CUSTOMER CODES READ FAILED] " + String(e && e.message ? e.message : e));
     return { success: false, error: String(e && e.message ? e.message : e) };
   }
 }

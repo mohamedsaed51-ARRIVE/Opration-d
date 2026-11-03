@@ -6056,10 +6056,51 @@ function custYearOf(s){
   if(d && d.length && d[0].label){ const y = parseInt(String(d[0].label).slice(0,4), 10); if(!isNaN(y)) return y; }
   return new Date().getFullYear();
 }
+/* Customer identity = customer CODE (tab CUSTOMER_CODES in the Q4 spreadsheet: code ↔ name, several names may share a code).
+   A rename therefore never shows as "new" or "stopped". A name that has no code falls back to being identified by its name. */
+const CUSTCODES = { loaded:false, found:false, error:false, byName:new Map(), namesByCode:new Map() };
+function custNormName(n){ return String(n==null?'':n).replace(/\s+/g,' ').trim().replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').toLowerCase(); }
+async function custLoadCodes(){
+  if(CUSTCODES.loaded) return;
+  try{
+    if(!effectiveWebAppUrl()) return;
+    const res = await fetchWithTimeout(buildAppsScriptUrl({ action:'getCustomerCodes' }), {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const payload = JSON.parse(await res.text());
+    if(!payload || payload.success !== true) throw new Error((payload && payload.error) || 'getCustomerCodes failed');
+    CUSTCODES.byName.clear(); CUSTCODES.namesByCode.clear();
+    (payload.rows||[]).forEach(r=>{
+      const code = String(r.code).trim(), name = String(r.name).trim(); if(!code || !name) return;
+      CUSTCODES.byName.set(custNormName(name), code);
+      if(!CUSTCODES.namesByCode.has(code)) CUSTCODES.namesByCode.set(code, []);
+      const arr = CUSTCODES.namesByCode.get(code); if(!arr.includes(name)) arr.push(name);
+    });
+    CUSTCODES.found = payload.found !== false && CUSTCODES.byName.size > 0; CUSTCODES.error = false; CUSTCODES.loaded = true;
+  }catch(e){ CUSTCODES.error = true; console.warn('[CUSTOMER CODES LOAD FAILED]', e); }
+}
+// key = code when the name is mapped, else the (normalised) name; rows of the same code in one month are merged
 function custMapOf(s){
   const mm = new Map();
-  if(cmpHasData(s)) (s.customerSummary||[]).forEach(r=>{ if(r && r.name && r.shipments>0) mm.set(r.name, r); });
+  if(!cmpHasData(s)) return mm;
+  (s.customerSummary||[]).forEach(r=>{
+    if(!(r && r.name && r.shipments>0)) return;
+    const code = CUSTCODES.byName.get(custNormName(r.name)) || '';
+    const key = code ? 'code:'+code : 'name:'+custNormName(r.name);
+    const e = mm.get(key);
+    if(!e){ mm.set(key, Object.assign({}, r, { code, _best:r.shipments, rejected:r.rejected||0 })); return; }
+    const ship = e.shipments + r.shipments, del = (e.delivered||0) + (r.delivered||0), rej = (e.rejected||0) + (r.rejected||0);
+    if(r.shipments > e._best){ e.name = r.name; e._best = r.shipments; }
+    e.shipments = ship; e.delivered = del; e.rejected = rej;
+    e.deliveryRate = ship>0 ? del/ship*100 : null; e.successRate = ship>0 ? (del+rej)/ship*100 : null;
+  });
   return mm;
+}
+// «الاسم الجديد (الاسم القديم)» — the other names registered for the same code
+function custDisplayName(r){
+  if(!r.code) return r.name;
+  const cur = custNormName(r.name);
+  const olds = (CUSTCODES.namesByCode.get(r.code)||[]).filter(n=>custNormName(n) !== cur);
+  return olds.length ? `${r.name} (${olds.join('، ')})` : r.name;
 }
 async function custLoadSummaries(months){
   const out = {};
@@ -6086,6 +6127,7 @@ async function custChangeRows(mode){
     pairs = list.map(m=>{ const j = chrono.indexOf(m); return { m, prev: j > 0 ? chrono[j-1] : null }; });
   }
   const need = new Set(); pairs.forEach(p=>{ need.add(p.m); if(p.prev) need.add(p.prev); });
+  await custLoadCodes();
   const sums = await custLoadSummaries([...need]);
   return pairs.map(({ m, prev })=>{
     const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && prev !== m && cmpHasData(sums[prev]));
@@ -6093,8 +6135,8 @@ async function custChangeRows(mode){
     const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0, year:custYearOf(sums[m]), prevYear:custYearOf(sums[prev]) };
     if(!hasCur || !hasPrev) return o;
     const pm = custMapOf(sums[prev]);
-    cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:n, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
-    pm.forEach((r,n)=>{ o.prevTotal += r.shipments; if(!cur.has(n)) o.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
+    cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:custDisplayName(r), code:r.code, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
+    pm.forEach((r,n)=>{ o.prevTotal += r.shipments; if(!cur.has(n)) o.stoppedList.push({ name:custDisplayName(r), code:r.code, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
     o.newList.sort((a,b)=>b.shipments-a.shipments); o.stoppedList.sort((a,b)=>b.shipments-a.shipments);
     o.newList.forEach(x=>{ o.newShipments += x.shipments; o.newDelivered += x.delivered; });
     o.stoppedList.forEach(x=>{ o.stoppedShipments += x.shipments; o.stoppedDelivered += x.delivered; });
@@ -6136,7 +6178,9 @@ async function renderCustChangeTab(mode){
   const tbl = (head, trs)=>`<div class="table-scroll"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${trs}</tbody></table></div>`;
   const comparable = rows.filter(r=>r.hasCur && r.hasPrev);
   const skipped = rows.filter(r=>!(r.hasCur && r.hasPrev) && (mode==='cmp' || selectedMonth!==ALL_MONTHS_SENTINEL || r.hasCur));
-  const note = skipped.length ? `<div class="card-sub" style="margin-top:8px;">لا توجد مقارنة للشهور: ${skipped.map(r=>mdn(r.month)+(r.hasCur?(r.prev?' (الشهر السابق بلا بيانات)':' (لا يوجد شهر سابق)'):' (لا توجد بيانات)')).join('، ')}.</div>` : '';
+  const codeNote = CUSTCODES.error ? '<div class="card-sub" style="margin-top:8px;color:var(--negative);">تعذر قراءة أكواد العملاء — التجميع حاليًا بالاسم فقط.</div>'
+    : (!CUSTCODES.found ? `<div class="card-sub" style="margin-top:8px;">لا يوجد تاب أكواد العملاء (CUSTOMER_CODES في شيت Q4) — التجميع حاليًا بالاسم فقط، وتغيير اسم العميل قد يظهر كعميل جديد/متوقف.</div>` : '');
+  const note = codeNote + (skipped.length ? `<div class="card-sub" style="margin-top:8px;">لا توجد مقارنة للشهور: ${skipped.map(r=>mdn(r.month)+(r.hasCur?(r.prev?' (الشهر السابق بلا بيانات)':' (لا يوجد شهر سابق)'):' (لا توجد بيانات)')).join('، ')}.</div>` : '');
   const sum = f=>comparable.reduce((a,r)=>a+r[f],0);
   const cnt = f=>comparable.reduce((a,r)=>a+r[f].length,0);
   const pc = (a,b)=> b>0 ? fmtPct(a/b*100) : '—';
