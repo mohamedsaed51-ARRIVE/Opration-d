@@ -1,0 +1,64 @@
+commit 5bad33c95734f38005b19d3645a75ad37b41f9a7
+Author: Claude <noreply@anthropic.com>
+Date:   Wed Nov 4 12:33:32 2026 +0000
+
+    Exclude Friday (weekly holiday) from first-attempt delivery day count
+    
+    Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01Y4fuahJnMdvrrzgMyFbdSn
+
+diff --git a/Code.gs b/Code.gs
+index e8a01b6..4095323 100644
+--- a/Code.gs
++++ b/Code.gs
+@@ -984,6 +984,16 @@ function summaryParseFilters(params) {
+   return sanitizeFilters_(filters);
+ }
+ 
++// Number of Fridays after the pickup date up to and including the last-status date (calendar dates only).
++function summaryCountFridaysBetween_(from, to) {
++  var a = new Date(from.getFullYear(), from.getMonth(), from.getDate());
++  var b = new Date(to.getFullYear(), to.getMonth(), to.getDate());
++  if (b <= a) return 0;
++  var total = Math.round((b.getTime() - a.getTime()) / 86400000);
++  var firstFri = ((5 - a.getDay() + 7) % 7) || 7;
++  return firstFri > total ? 0 : 1 + Math.floor((total - firstFri) / 7);
++}
++
+ function summaryClassifyAttempt(slaDays, t1, t2) {
+   if (slaDays === null || slaDays === undefined) return "na";
+   if (slaDays <= t1) return "first";
+@@ -1625,7 +1635,8 @@ function getMonthDashboardSummary(sheetName, params) {
+     // longer had a slaDays value — a real regression, caught before this
+     // was ever shipped, not after).
+     var attemptDays = null;
+-    if (pickup && lastStatus) attemptDays = (lastStatus.getTime() - pickup.getTime()) / 86400000;
++    // Friday is a weekly holiday: it is not counted as a day (Thu pickup delivered Sat = first attempt).
++    if (pickup && lastStatus) attemptDays = (lastStatus.getTime() - pickup.getTime()) / 86400000 - summaryCountFridaysBetween_(pickup, lastStatus);
+     var attemptCat = summaryClassifyAttempt(attemptDays, attemptT1, attemptT2);
+ 
+     // SLA END DATE PRIORITY (see docs/production-debug-fixes.md — Bug #9):
+diff --git a/index.html b/index.html
+index 5813439..2c7b5b7 100644
+--- a/index.html
++++ b/index.html
+@@ -2228,9 +2228,18 @@ async function savePersistedStatusMapping(){
+ let ATTEMPT_T1_DAYS = 1; // max days-diff counted as "محاولة أولى"
+ let ATTEMPT_T2_DAYS = 2; // max days-diff counted as "محاولة ثانية" (beyond T1)
+ const ATTEMPT_LABELS = { first:'محاولة أولى', second:'محاولة ثانية', other:'باقي المحاولات', na:'غير محدد (تاريخ ناقص)' };
++// عدد أيام الجمعة بين تاريخ البيك أب وتاريخ آخر حالة (بدون يوم البيك أب، وشامل يوم آخر حالة)
++function countFridaysBetween(from, to){
++  const a = dateOnly(from), b = dateOnly(to);
++  if(!a || !b || b <= a) return 0;
++  const total = Math.round((b - a) / 86400000);
++  const firstFri = ((5 - a.getDay() + 7) % 7) || 7; // أول جمعة بعد يوم البيك أب (بالأيام)
++  return firstFri > total ? 0 : 1 + Math.floor((total - firstFri) / 7);
++}
+ function classifyAttempt(row){
+   if(!row.pickup || !row.lastStatus) return ATTEMPT_LABELS.na;
+-  const diffDays = Math.round((dateOnly(row.lastStatus) - dateOnly(row.pickup)) / 86400000);
++  // الجمعة إجازة: مش بتتحسب كيوم (بيك أب الخميس واتسلم السبت = محاولة أولى)
++  const diffDays = Math.round((dateOnly(row.lastStatus) - dateOnly(row.pickup)) / 86400000) - countFridaysBetween(row.pickup, row.lastStatus);
+   if(diffDays <= ATTEMPT_T1_DAYS) return ATTEMPT_LABELS.first;
+   if(diffDays <= ATTEMPT_T2_DAYS) return ATTEMPT_LABELS.second;
+   return ATTEMPT_LABELS.other;
