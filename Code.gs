@@ -984,6 +984,16 @@ function summaryParseFilters(params) {
   return sanitizeFilters_(filters);
 }
 
+// Number of Fridays after the pickup date up to and including the last-status date (calendar dates only).
+function summaryCountFridaysBetween_(from, to) {
+  var a = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  var b = new Date(to.getFullYear(), to.getMonth(), to.getDate());
+  if (b <= a) return 0;
+  var total = Math.round((b.getTime() - a.getTime()) / 86400000);
+  var firstFri = ((5 - a.getDay() + 7) % 7) || 7;
+  return firstFri > total ? 0 : 1 + Math.floor((total - firstFri) / 7);
+}
+
 function summaryClassifyAttempt(slaDays, t1, t2) {
   if (slaDays === null || slaDays === undefined) return "na";
   if (slaDays <= t1) return "first";
@@ -1625,7 +1635,8 @@ function getMonthDashboardSummary(sheetName, params) {
     // longer had a slaDays value — a real regression, caught before this
     // was ever shipped, not after).
     var attemptDays = null;
-    if (pickup && lastStatus) attemptDays = (lastStatus.getTime() - pickup.getTime()) / 86400000;
+    // Friday is a weekly holiday: it is not counted as a day (Thu pickup delivered Sat = first attempt).
+    if (pickup && lastStatus) attemptDays = (lastStatus.getTime() - pickup.getTime()) / 86400000 - summaryCountFridaysBetween_(pickup, lastStatus);
     var attemptCat = summaryClassifyAttempt(attemptDays, attemptT1, attemptT2);
 
     // SLA END DATE PRIORITY (see docs/production-debug-fixes.md — Bug #9):
