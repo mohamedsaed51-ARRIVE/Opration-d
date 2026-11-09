@@ -738,7 +738,7 @@ body:not(.on-overview) .exec-wrap{display:none;}
 .age-two{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
 .age-two table.data-table{min-width:0;}
 @media (max-width:1100px){ .age-two{grid-template-columns:1fr;} }
-.age-chart{display:block; width:100%; max-width:720px; height:auto; margin:14px auto 0;}
+.age-chart{display:block; width:100%; max-width:560px; height:auto; margin:14px auto 0;}
 .age-bar-cell{font-variant-numeric:tabular-nums; text-align:center;}
 .age-note{font-size:var(--fs-caption); color:var(--text-secondary); line-height:1.8; margin-top:6px;}
 .age-method{font-size:var(--fs-small); line-height:2; margin:0; padding-inline-start:20px;}
@@ -8302,14 +8302,16 @@ const AGE_CHART_PLUGINS = [
       ch.data.datasets.forEach((ds,i)=>{
         const meta = ch.getDatasetMeta(i); if(meta.hidden) return;
         meta.data.forEach((bar,j)=>{
-          const v = ds.data[j]; if(v==null || isNaN(v)) return;
+          const v = ds.data[j]; if(v==null || isNaN(v) || (o.minShow && v<o.minShow)) return;
           if(o.inside){ if(v < (o.minInside||7)) return; c.fillStyle='#fff'; c.textBaseline='middle'; c.fillText(o.fmt(v), bar.x, (bar.y + bar.base)/2); }
+          else if(o.rotate){ c.save(); c.fillStyle=AGE_C.navy; c.textAlign='left'; c.textBaseline='middle'; c.translate(bar.x, bar.y-4); c.rotate(-Math.PI/2); c.fillText(o.fmt(v), 0, 0); c.restore(); }
           else { c.fillStyle=AGE_C.navy; c.textBaseline='bottom'; c.fillText(o.fmt(v), bar.x, bar.y-3); }
         });
       });
       c.restore();
   } }
 ];
+const AGE_IMG_SIZE = new Map(); // data-url -> [w,h] logical size, reused by the Word export so charts keep their true proportions
 function ageChartImage(cfg, w, h){
   if(typeof Chart === 'undefined') return null;
   try{
@@ -8320,6 +8322,7 @@ function ageChartImage(cfg, w, h){
     const ch = new Chart(cv, cfg);
     const url = cv.toDataURL('image/png');
     ch.destroy();
+    AGE_IMG_SIZE.set(url, [w, h]);
     return url;
   }catch(e){ console.warn('[AGE chart]', e); return null; }
 }
@@ -8327,16 +8330,17 @@ function ageChartOpts(title, sub, o){
   o = o || {};
   const font = (size, weight)=>({ size, weight:weight||'normal', family:AGE_FONT });
   return {
-    layout:{ padding:{ top:4, right:10, left:4, bottom:2 } },
+    layout:{ padding:{ top:o.top==null?14:o.top, right:8, left:2, bottom:2 } },
     plugins: Object.assign({
-      title:{ display:true, text:title, color:AGE_C.navy, font:font(14,'bold') },
-      subtitle:{ display:true, text:sub, color:AGE_C.grey, font:font(10), padding:{ bottom:6 } },
-      legend:{ rtl:true, textDirection:'rtl', position:'bottom', onClick:()=>{}, labels:Object.assign({ boxWidth:11, boxHeight:11, font:font(10), color:'#334155' }, o.legendLabels||{}) },
+      title:{ display:true, text:title, color:AGE_C.navy, font:font(13,'bold'), padding:{ top:0, bottom:2 } },
+      subtitle:{ display:true, text:sub, color:AGE_C.grey, font:font(9), padding:{ bottom:o.top==null?12:6 } },
+      legend:{ rtl:true, textDirection:'rtl', position:'bottom', onClick:()=>{}, labels:Object.assign({ boxWidth:11, boxHeight:11, font:font(10.5,'bold'), color:'#1E293B', padding:8 }, o.legendLabels||{}) },
       tooltip:{ enabled:false }
     }, o.plugins||{}),
     scales:{
-      x:{ reverse:true, stacked:!!o.stacked, grid:{ display:false }, ticks:{ color:'#334155', font:font(9), maxRotation:0, autoSkip:false } },
-      y:{ position:'left', stacked:!!o.stacked, min:0, max:o.yMax, suggestedMax:o.ySuggested, ticks:{ color:AGE_C.grey, font:font(9), callback:v=>v+'%' }, grid:{ color:'#E5E7EB' } }
+      x:{ reverse:true, stacked:!!o.stacked, grid:{ display:false }, ticks:{ color:'#1E293B', font:font(10,'bold'), maxRotation:0, autoSkip:false } },
+      y:{ position:'left', stacked:!!o.stacked, min:0, max:o.yMax==null?undefined:o.yMax+(o.yHead||0), suggestedMax:o.ySuggested, grace:o.grace,
+        afterBuildTicks:o.yMax==null?undefined:(ax=>{ ax.ticks = ax.ticks.filter(t=>t.value<=o.yMax); }), ticks:{ color:'#475569', font:font(10), callback:v=>v+'%' }, grid:{ color:'#E5E7EB' } }
     }
   };
 }
@@ -8353,10 +8357,9 @@ function ageChartDist(d, g){
     { text:`تجاوز ${ageDays(g.delivery)}  ${ageN(over)} (${pc(over)}%)`, fillStyle:AGE_C.red, strokeStyle:AGE_C.red, lineWidth:0, fontColor:'#334155' } ] };
   const o = ageChartOpts(`توزيع الشحنات المسلّمة حسب يوم التسليم - ${g.name}`,
     `نسبة الشحنات المسلّمة من إجمالي مسلّم المجموعة | معيار السوق: ${ageDays(g.market)} | معيار الشركة: ${ageDays(g.delivery)} | ${ageSubPeriod(d)}`,
-    { ySuggested:20, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:9 } } });
+    { ySuggested:20, grace:dist.length>12?'30%':'12%', plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:9, rotate:dist.length>12, minShow:0.1 } } });
   o.plugins.legend.labels.generateLabels = legend.generateLabels;
-  o.scales.x.ticks.font.size = 10;
-  return ageChartImage({ type:'bar', data:{ labels, datasets:[{ data:dist.map(n=>n/sum*100), backgroundColor:colors, borderWidth:0, barPercentage:.7, categoryPercentage:.9 }] }, options:o }, 640, 300);
+  return ageChartImage({ type:'bar', data:{ labels, datasets:[{ data:dist.map(n=>n/sum*100), backgroundColor:colors, borderWidth:0, barPercentage:.78, categoryPercentage:.92 }] }, options:o }, 560, 250);
 }
 // A report from an older Code.gs has no «مرتجع معلق» fields — fill them with zeros so the page and exports never crash.
 function ageEnsureHoldFields(d){
@@ -8377,26 +8380,26 @@ function ageBranchRowsRet(g){ return g.branches.filter(b=>b.kinds.returnClosed.c
 function ageChartBranchDelivery(d, g){
   const rows = ageBranchRowsDel(g); if(!rows.length) return null;
   const o = ageChartOpts(`التسليم حسب الفرع - ${g.name}`, `نسبة الشحنات المسلّمة ضمن معيار السوق ومعيار الشركة | ${ageSubPeriod(d)}`,
-    { yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:rows.length>6?8:10 } } });
+    { yMax:100, yHead:rows.length>3?30:12, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:10, rotate:rows.length>3 } } });
   return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>b.name), datasets:[
     { label:`ضمن معيار السوق (${ageDays(g.market)})`, data:rows.map(b=>b.kinds.delivered.marketPct), backgroundColor:AGE_C.blue, borderWidth:0, barPercentage:.9, categoryPercentage:.8 },
-    { label:`ضمن معيار الشركة (${ageDays(g.delivery)})`, data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_C.teal, borderWidth:0, barPercentage:.9, categoryPercentage:.8 } ] }, options:o }, 640, 280);
+    { label:`ضمن معيار الشركة (${ageDays(g.delivery)})`, data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_C.teal, borderWidth:0, barPercentage:.9, categoryPercentage:.8 } ] }, options:o }, 560, rows.length>3?270:240);
 }
 function ageChartReturns(d, g){
   const rows = ageBranchRowsRet(g).filter(b=>b.kinds.returnClosed.count>0); if(!rows.length) return null;
   const o = ageChartOpts(`المرتجعات المغلقة حسب الفرع - ${g.name}`, `نسبة المرتجعات المغلقة ضمن معيار الشركة (${ageDays(g.returns)}) وتجاوزه | ${ageSubPeriod(d)}`,
-    { stacked:true, yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', inside:true, size:rows.length>6?8:10 } } });
+    { stacked:true, yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', inside:true, size:10 } } });
   return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>b.name), datasets:[
     { label:'ضمن المعيار', data:rows.map(b=>b.kinds.returnClosed.companyPct), backgroundColor:AGE_C.green, borderWidth:0, barPercentage:.75 },
-    { label:'تجاوز المدة', data:rows.map(b=>b.kinds.returnClosed.overPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.75 } ] }, options:o }, 640, 270);
+    { label:'تجاوز المدة', data:rows.map(b=>b.kinds.returnClosed.overPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.75 } ] }, options:o }, 560, 240);
 }
 function ageChartOpen(d){
   const g = d.open.byGroup; if(!g.length) return null;
   const o = ageChartOpts('الشحنات المفتوحة المتجاوزة لمعيارها - حسب المجموعة', `نسبة المتجاوز من المفتوح في كل فئة | العمر حتى ${d.params.asOf}`,
-    { yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:10 } } });
+    { yMax:100, yHead:14, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:11 } } });
   return ageChartImage({ type:'bar', data:{ labels:g.map(x=>x.name), datasets:[
     { label:'قيد التشغيل متجاوز', data:g.map(x=>x.inProgressOverPct), backgroundColor:AGE_C.orange, borderWidth:0, barPercentage:.7 },
-    { label:'مرتجع مفتوح متجاوز', data:g.map(x=>x.returnOpenOverPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.7 } ] }, options:o }, 640, 280);
+    { label:'مرتجع مفتوح متجاوز', data:g.map(x=>x.returnOpenOverPct), backgroundColor:AGE_C.red, borderWidth:0, barPercentage:.7 } ] }, options:o }, 560, 240);
 }
 function ageBuildCharts(d){
   const out = { dist:{}, del:{}, ret:{}, open:null };
@@ -8506,9 +8509,9 @@ async function exportAgeDocx(){
         children:[ para([t(String(num).padStart(2,'0'),{ size:24, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0, plain:true }) ] });
       const titleCell = new TableCell({ width:{ size:W-700, type:WidthType.DXA }, borders:{ ...none, right:{ style:BorderStyle.SINGLE, size:24, color:TEAL } }, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:LIGHT }, margins:{ top:70, bottom:70, left:160, right:160 },
         children:[ para([t(title,{ size:26, bold:true, color:BLUE })],{ after:0, keepNext:true, plain:true }) ] });
-      return [ para([t('',{ size:6 })],{ before:200, after:0, keepNext:true, plain:true }),
+      return [ para([t('',{ size:6 })],{ before:120, after:0, keepNext:true, plain:true }),
         new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[700, W-700], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[numCell, titleCell] }) ] }),
-        para([t('',{ size:6 })],{ after:60, plain:true }) ];
+        para([t('',{ size:4 })],{ after:20, plain:true }) ];
     };
     const bullet = (title)=>para([t('■ ',{ size:16, color:TEAL }), t(title, { size:24, bold:true, color:BLUE })], { before:140, after:80, keepNext:true });
     const sub = (title)=>para([t(title, { size:22, bold:true, color:NAVY })], { before:140, after:60, keepNext:true });
@@ -8532,14 +8535,15 @@ async function exportAgeDocx(){
         shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:60, bottom:60, left:50, right:50 },
         children:[ para([t(h,{ size:16, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0 }) ] })) });
       const body = rows.map((r,ri)=>new TableRow({ cantSplit:true, children:r.cells.map((v,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
-        shading:{ type:ShadingType.CLEAR, color:'auto', fill: r.total ? TOTAL : (ri%2 ? ZEBRA2 : ZEBRA1) }, margins:{ top:50, bottom:50, left:50, right:50 },
+        shading:{ type:ShadingType.CLEAR, color:'auto', fill: r.total ? TOTAL : (ri%2 ? ZEBRA2 : ZEBRA1) }, margins:{ top:35, bottom:35, left:50, right:50 },
         children:[ para([t(v,{ size:16, bold: r.total || i===0, color: (r.red && r.red.indexOf(i)>=0) ? BADC : (r.total ? NAVY : INK) })],{ align:AlignmentType.CENTER, after:0 }) ] })) }));
       return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cw, visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[head].concat(body) });
     }
     const redIf = v=>(v!=null && v>=50);
-    function image(url, w, h){
+    function image(url){
       if(!url) return null;
-      return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:w||640, height:h||300 }, type:'png' }) ], { align:AlignmentType.CENTER, before:60, after:100, plain:true });
+      const sz = AGE_IMG_SIZE.get(url) || [560, 250];
+      return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:sz[0], height:sz[1] }, type:'png' }) ], { align:AlignmentType.CENTER, before:40, after:60, plain:true });
     }
     const pushAll = (arr, items)=>items.forEach(x=>arr.push(x));
     const push = (arr, ...items)=>items.forEach(x=>{ if(x) arr.push(x); });
@@ -8557,8 +8561,6 @@ async function exportAgeDocx(){
       children:[ logo ? para([ new ImageRun({ data:ageDataUrlBytes(logo.url), transformation:{ width:LOGO_W, height:logoH }, type:'png' }) ],{ align:AlignmentType.CENTER, after:0, plain:true }) : para([t('ARRIVE',{ bold:true, size:30, color:'FFFFFF' })],{ align:AlignmentType.CENTER, plain:true }) ] });
     children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W-2600,2600], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[titleCell, logoCell] }) ] }));
     children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ children:[ new TableCell({ width:{ size:W, type:WidthType.DXA }, borders:bannerB, shading:{ type:ShadingType.CLEAR, color:'auto', fill:TEAL }, children:[ para([t('',{ size:4 })],{ after:0, plain:true }) ] }) ] }) ] }));
-    children.push(spacer(100));
-
     // ---- 1. goal ----
     pushAll(children, heading(1,'هدف التقرير'));
     children.push(para([t('• يهدف هذا التقرير إلى ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم. يقيس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ويقارنها بمعيارين منفصلين: مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.')]));
@@ -8606,8 +8608,7 @@ async function exportAgeDocx(){
       if(K.other.count) rows.push({ cells:[ AGE_KIND_LABEL.other, ageN(K.other.count), dash, dash, dash, dash ] });
       rows.push({ total:true, cells:[ 'الإجمالي', ageN(g.total), dash, judged?ageP(g.withinPct):dash, judged?ageP(g.overPct):dash, dash ] });
       children.push(dataTable(['الحالة','عدد الشحنات', judged?`ضمن ${ageDays(g.market)}`:'ضمن معيار السوق', judged?`ضمن ${g.delivery} ${g.delivery<=10?'أيام':'يوم'} (للتسليم) / ${ageDays(g.returns)} (للمرتجع)`:'ضمن معيار الشركة','متجاوز المدة المطبقة','متوسط المدة / العمر (يوم)'], rows, [1.6,1.2,1.1,2.0,1.4,1.3]));
-      if(judged) push(children, image(charts.dist[g.key], 640, 300));
-      else children.push(spacer());
+      if(judged) push(children, image(charts.dist[g.key]));
     });
     children.push(para([t(`* العمر للشحنات المفتوحة (مرتجع مفتوح / قيد التشغيل) محسوب حتى تاريخ القياس: ${asOfTxt}. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.`,{ size:15, color:MUTE })]));
 
@@ -8622,7 +8623,7 @@ async function exportAgeDocx(){
       if(dRows.length){
         dRows.push({ total:true, cells:['إجمالي المجموعة', ageN(dt.count), ageP(dt.marketPct), ageP(dt.companyPct), ageP(dt.overPct), ageD(dt.avgAge)] });
         children.push(dataTable(['الفرع','مسلّمة',`ضمن معيار السوق (${ageDays(g.market)})`,`ضمن معيار الشركة (${ageDays(g.delivery)})`,'تجاوز معيار الشركة','متوسط مدة التسليم (يوم)'], dRows, [1.6,1,1.5,1.5,1.3,1.4]));
-        push(children, image(charts.del[g.key], 640, 280));
+        push(children, image(charts.del[g.key]));
       } else children.push(para([t('لا توجد تسليمات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
       children.push(para([t('ب) المرتجعات حسب الفرع',{ bold:true, size:19, color:NAVY })],{ keepNext:true, before:100 }));
       const rRows = ageBranchRowsRet(g).map(b=>{ const a=b.kinds.returnClosed; return { cells:[b.name, ageN(a.count), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge), ageN(b.kinds.returnOpen.count), ageN(b.kinds.returnHold.count)], red:redIf(a.overPct)?[3]:[] }; });
@@ -8630,7 +8631,7 @@ async function exportAgeDocx(){
       if(rRows.length){
         rRows.push({ total:true, cells:['إجمالي المجموعة', ageN(rt.count), ageP(rt.companyPct), ageP(rt.overPct), ageD(rt.avgAge), ageN(g.kinds.returnOpen.count), ageN(g.kinds.returnHold.count)] });
         children.push(dataTable(['الفرع','مرتجعات مغلقة',`ضمن ${ageDays(g.returns)}`,'تجاوز المدة','متوسط المدة (يوم)','مرتجعات مفتوحة','مرتجعات معلقة'], rRows, [1.5,1.2,1.1,1.1,1.3,1.2,1.2]));
-        push(children, image(charts.ret[g.key], 640, 270));
+        push(children, image(charts.ret[g.key]));
       } else children.push(para([t('لا توجد مرتجعات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
     });
 
@@ -8643,13 +8644,12 @@ async function exportAgeDocx(){
       { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt} | قيد التشغيل ${ageD(k.avgInProgressAge)} | مرتجع ${ageD(k.avgOpenReturnAge)}`, color:'E36C0A' },
       { value:ageP(k.inProgressOverduePct), label:'قيد التشغيل المتجاوز لمعيار الشركة', sub:`${ageN(k.inProgressOverdue)} من ${ageN(k.inProgress)}`, color:'E36C0A' },
       { value:ageP(k.returnOpenOverduePct), label:'المرتجعات المفتوحة المتجاوزة', sub:`${ageN(k.returnOpenOverdue)} من ${ageN(k.returnOpen)}`, color:'DC2626' } ]));
-    children.push(spacer());
     const ob = d.open.byGroup, ot = ageSumOpen(ob);
     const oRows = ob.map(g=>({ cells:[g.name, ageDays(g.delivery), ageN(g.inProgress), ageN(g.inProgressOver), ageP(g.inProgressOverPct), ageDays(g.returns), ageN(g.returnOpen), ageN(g.returnOpenOver), ageP(g.returnOpenOverPct), ageN(g.returnHold), ageN(g.returnHoldOver), ageP(g.returnHoldOverPct), ageN(g.overTotal), ageP(g.overPctOfOpen)], red:[redIf(g.inProgressOverPct)?4:-1, redIf(g.returnOpenOverPct)?8:-1, redIf(g.returnHoldOverPct)?11:-1] }));
     oRows.push({ total:true, cells:['الإجمالي','—',ageN(ot.inProgress),ageN(ot.inProgressOver),ageP(ageRatio(ot.inProgressOver,ot.inProgress)),'—',ageN(ot.returnOpen),ageN(ot.returnOpenOver),ageP(ageRatio(ot.returnOpenOver,ot.returnOpen)),ageN(ot.returnHold),ageN(ot.returnHoldOver),ageP(ageRatio(ot.returnHoldOver,ot.returnHold)),ageN(ot.overTotal),ageP(ageRatio(ot.overTotal,ot.inProgress+ot.returnOpen+ot.returnHold))] });
     children.push(dataTable(['المجموعة','معيار الشركة (قيد التشغيل)','قيد التشغيل','متجاوز المعيار','النسبة','معيار المرتجع','مرتجع مفتوح','متجاوز المدة','النسبة','مرتجع معلق','متجاوز المدة','النسبة','إجمالي المتجاوز','نسبة من المفتوح'], oRows, [1.4,1,.8,.8,.7,.8,.8,.8,.7,.8,.8,.7,.8,.8]));
     children.push(para([t(`قيد التشغيل يقاس بمعيار الشركة للتسليم، والمرتجع المفتوح بمعيار الشركة للمرتجع. العمر = ${asOfTxt} − تاريخ استلام البيك أب. نسبة إجمالي المتجاوز من إجمالي المفتوحة في المجموعة.`,{ size:15, color:MUTE })],{ before:60 }));
-    push(children, image(charts.open, 640, 280));
+    push(children, image(charts.open));
     children.push(sub('أعلى 5 فروع بالشحنات المفتوحة المتجاوزة'));
     if(d.open.topBranches.length){
       children.push(dataTable(['الفرع','قيد التشغيل','المتجاوز منها','مرتجع مفتوح','المتجاوز منها','مرتجع معلق','المتجاوز منها','إجمالي المتجاوز','النسبة من مفتوح الفرع'],
