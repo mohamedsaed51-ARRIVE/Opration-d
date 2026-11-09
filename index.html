@@ -718,6 +718,12 @@ body:not(.on-overview) .exec-wrap{display:none;}
 .age-std-actions{margin-top:8px;}
 .age-period-chip{height:var(--control-h-md); display:flex; align-items:center; padding:0 12px; border:1px solid var(--border-strong); border-radius:var(--radius-sm); background:var(--arrive-light-blue); color:var(--arrive-blue); font-weight:var(--fw-bold); font-size:var(--fs-small); white-space:nowrap;}
 .age-ctl-row .filter-group.age-period{max-width:360px;}
+.age-cmp-box{margin-top:12px; padding:12px; border:1px dashed var(--border-strong); border-radius:var(--radius-md); background:var(--arrive-light-blue);}
+.age-cmp-box[hidden]{display:none;}
+.age-cmp-title{font-size:var(--fs-small); color:var(--text-secondary); margin-bottom:8px;}
+.age-cmp-up{color:var(--arrive-blue); font-weight:var(--fw-bold);}
+.age-cmp-down{color:var(--arrive-navy); font-weight:var(--fw-bold);}
+.age-cmp-flat{color:var(--text-secondary);}
 .age-title{display:none; background:linear-gradient(135deg,var(--arrive-navy),var(--arrive-blue)); color:#fff; border-radius:var(--radius-md); padding:20px 24px; margin-bottom:var(--space-4);}
 .age-title h2{margin:0 0 6px; font-size:20px; line-height:1.5; color:#fff;}
 .age-title .meta{font-size:var(--fs-small); opacity:.9; line-height:1.9;}
@@ -742,6 +748,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
 .age-loading i{font-size:26px; color:var(--arrive-blue); margin-bottom:10px; display:block;}
 @media print{
   .age-controls,#ageStatus{display:none !important;}
+  #ageCompare .card{break-inside:avoid;}
   .age-title{display:block !important; background:var(--arrive-blue) !important; color:#fff;}
   .age-two{grid-template-columns:1fr 1fr;}
   .age-sec .card{break-inside:auto;}
@@ -946,11 +953,24 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
   <div class="tab-panel" id="tab-shipage">
     <section class="card age-controls" aria-label="خيارات تقرير عمر الشحنة">
       <div class="age-ctl-row">
+        <div class="filter-group"><label for="ageFrom">من تاريخ (استلام البيك أب)</label><input type="date" id="ageFrom"></div>
+        <div class="filter-group"><label for="ageTo">إلى تاريخ</label><input type="date" id="ageTo"></div>
         <div class="filter-group"><label for="ageAsOf">قياس عمر الشحنات المفتوحة حتى</label><input type="date" id="ageAsOf"></div>
         <button class="btn-primary" id="ageRunBtn" type="button"><i class="fa-solid fa-play" aria-hidden="true"></i> إنشاء التقرير</button>
         <button class="btn-primary" id="ageDocxBtn" type="button" disabled><i class="fa-solid fa-file-word" aria-hidden="true"></i> تصدير التقرير (Word)</button>
         <button class="btn-secondary" id="ageXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تصدير Excel</button>
         <button class="btn-secondary" id="agePrintBtn" type="button" disabled><i class="fa-solid fa-print" aria-hidden="true"></i> طباعة / PDF</button>
+        <button class="btn-ghost" id="ageClearDatesBtn" type="button" title="الرجوع لفترة الشهر المختار في الداشبورد"><i class="fa-solid fa-eraser" aria-hidden="true"></i> مسح التواريخ</button>
+        <button class="btn-secondary" id="ageCmpToggle" type="button" aria-expanded="false"><i class="fa-solid fa-code-compare" aria-hidden="true"></i> مقارنة بين فترتين</button>
+      </div>
+      <div class="age-cmp-box" id="ageCmpBox" hidden>
+        <div class="age-cmp-title">الفترة (أ) = التواريخ بالأعلى · الفترة (ب) = التواريخ التالية (نفس تاريخ القياس للفترتين)</div>
+        <div class="age-ctl-row">
+          <div class="filter-group"><label for="ageFromB">الفترة (ب): من تاريخ</label><input type="date" id="ageFromB"></div>
+          <div class="filter-group"><label for="ageToB">الفترة (ب): إلى تاريخ</label><input type="date" id="ageToB"></div>
+          <button class="btn-primary" id="ageCmpRunBtn" type="button"><i class="fa-solid fa-scale-balanced" aria-hidden="true"></i> قارن الفترتين</button>
+          <button class="btn-ghost" id="ageCmpClearBtn" type="button">إخفاء المقارنة</button>
+        </div>
       </div>
       <details class="age-std">
         <summary><i class="fa-solid fa-sliders" aria-hidden="true"></i> معايير المدد بالأيام (قابلة للتعديل)</summary>
@@ -959,6 +979,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
       </details>
     </section>
     <div id="ageStatus" aria-live="polite"></div>
+    <div id="ageCompare"></div>
     <div id="ageReport"></div>
   </div>
 
@@ -7800,7 +7821,25 @@ function ageLoadPrefs(){
 function ageSavePrefs(){ /* standards are saved server-side (Settings); nothing is kept in the browser any more */ }
 const AGE_MONTHS_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 /* the report follows the dashboard period: one month, or every available month when «كل الشهور» is selected */
+function ageLocalDates(){
+  const v = id=>{ const e=document.getElementById(id); return e ? (e.value||'') : ''; };
+  return { from:v('ageFrom'), to:v('ageTo') };
+}
+/* a custom pickup-date range → the sheets (months) it touches; with a missing bound every available month is read */
+function ageSelForRange(from, to){
+  let sheets = availableMonths.slice();
+  if(from && to){
+    const [y1,m1] = from.split('-').map(Number), [y2,m2] = to.split('-').map(Number);
+    const names = new Set(); let y=y1, m=m1, guard=0;
+    while((y<y2 || (y===y2 && m<=m2)) && guard++<24){ names.add(AGE_MONTHS_EN[m-1]); m++; if(m>12){ m=1; y++; } }
+    const hit = availableMonths.filter(x=>names.has(x));
+    if(hit.length) sheets = hit;
+  }
+  return { all:false, custom:true, sheets, dateFrom:from, dateTo:to };
+}
 function ageSelection(){
+  const ld = ageLocalDates();
+  if(ld.from || ld.to) return ageSelForRange(ld.from, ld.to);
   const all = (selectedMonth === ALL_MONTHS_SENTINEL);
   const sheets = all ? availableMonths.slice() : (selectedMonth ? [selectedMonth] : []);
   const f = STATE.filters || {};
@@ -7809,6 +7848,7 @@ function ageSelection(){
 function ageSelLabel(sel){
   const ar = m=>{ const i = AGE_MONTHS_EN.indexOf(m); return i>=0 ? AGE_MONTHS_AR[i] : m; };
   const sorted = sel.sheets.slice().sort((a,b)=>AGE_MONTHS_EN.indexOf(a)-AGE_MONTHS_EN.indexOf(b));
+  if(sel.custom) return `فترة مخصصة · من ${sel.dateFrom||'…'} إلى ${sel.dateTo||'…'}`;
   let txt = sel.all ? ('كل الشهور' + (sorted.length ? ` (${ar(sorted[0])}${sorted.length>1?' – '+ar(sorted[sorted.length-1]):''})` : '')) : ('شهر ' + (sorted[0] ? ar(sorted[0]) : '—'));
   if(sel.dateFrom || sel.dateTo) txt += ` · من ${sel.dateFrom||'…'} إلى ${sel.dateTo||'…'}`;
   return txt;
@@ -7824,6 +7864,7 @@ function agePeriodText(d){
   if(d.params.scope === 'sheets' && ms.length === 1) txt = `شهر ${ar(ms[0])} ${years}`.trim();
   else if(d.params.scope === 'sheets' && ms.length > 1) txt = `كل الشهور: ${ar(ms[0])} – ${ar(ms[ms.length-1])} ${years}`.trim();
   else txt = ageRangeText(d.params.dateFrom, d.params.dateTo);
+  if(d.params.boundFrom && d.params.boundTo) return ageRangeText(d.params.boundFrom, d.params.boundTo);
   if(d.params.scope === 'sheets' && (d.params.boundFrom || d.params.boundTo)) txt += ` (من ${d.params.boundFrom||'…'} إلى ${d.params.boundTo||'…'})`;
   return txt;
 }
@@ -7915,7 +7956,14 @@ function initShipAge(){
   document.getElementById('ageAsOf').value = ageIso(new Date());
   ageRenderStdTable();
   initAgeStdSettings();
-  document.getElementById('ageRunBtn').addEventListener('click', ()=>runAgeReport(true));
+  document.getElementById('ageRunBtn').addEventListener('click', ()=>{ ageClearCompare(); runAgeReport(true); });
+  document.getElementById('ageClearDatesBtn').addEventListener('click', ()=>{ ['ageFrom','ageTo'].forEach(id=>{ document.getElementById(id).value=''; }); ageClearCompare(); runAgeReport(true); });
+  document.getElementById('ageCmpToggle').addEventListener('click', ()=>{
+    const box = document.getElementById('ageCmpBox'), t = document.getElementById('ageCmpToggle');
+    box.hidden = !box.hidden; t.setAttribute('aria-expanded', String(!box.hidden));
+  });
+  document.getElementById('ageCmpRunBtn').addEventListener('click', runAgeCompare);
+  document.getElementById('ageCmpClearBtn').addEventListener('click', ()=>{ ageClearCompare(); document.getElementById('ageCmpBox').hidden = true; document.getElementById('ageCmpToggle').setAttribute('aria-expanded','false'); });
   document.getElementById('ageDocxBtn').addEventListener('click', exportAgeDocx);
   const rb = document.getElementById('rebuildDashboardBtn'); if(rb) rb.addEventListener('click', ()=>rebuildSummariesThenRefresh());
   document.getElementById('ageXlsxBtn').addEventListener('click', exportAgeXlsx);
@@ -7927,12 +7975,31 @@ function initShipAge(){
 
 function ageSetStatus(html){ const el=document.getElementById('ageStatus'); if(el) el.innerHTML = html||''; }
 
+async function ageFetchReport(sel, asOf, force){
+  const params = { action:'ageReport', sheets: sel.sheets.join(','), asOf:asOf, };
+  if(AGE.stdDirty) params.standards = JSON.stringify(AGE.std); // otherwise the server uses the saved standards (Settings)
+  if(sel.dateFrom) params.dateFrom = sel.dateFrom;
+  if(sel.dateTo) params.dateTo = sel.dateTo;
+  if(force) params.refresh = '1';
+  const res = await fetchWithTimeout(buildAppsScriptUrl(params), {cache:'no-store'}, 240000);
+  if(!res.ok) throw new Error('تعذر الوصول إلى مصدر البيانات (HTTP '+res.status+').');
+  let payload; const text = await res.text();
+  try{ payload = JSON.parse(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
+  if(payload && payload.success === false){
+    // an older Code.gs deployment does not know the `sheets` parameter (month-linked mode) and asks for explicit dates
+    if(/يجب تحديد تاريخ البداية والنهاية/.test(String(payload.error||''))) throw new Error('نسخة Code.gs المنشورة في Apps Script قديمة. الصق آخر Code.gs ثم Deploy ← Manage deployments ← Edit ← New version ← Deploy، وأعد المحاولة.');
+    throw new Error(payload.error || 'تعذر إنشاء التقرير.');
+  }
+  ageEnsureHoldFields(payload); // tolerate a report produced by an older Code.gs (no separate on-hold returns)
+  return payload;
+}
 async function runAgeReport(force){
   if(AGE.loading) return;
   const sel = ageSelection(), asOf = document.getElementById('ageAsOf').value;
   const bad = msg=>{ ageSetStatus(`<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>${msg[0]}</b> — ${msg[1]}</div></div>`); };
   if(!sel.sheets.length){ bad(['لا توجد شهور','لم يتم تحديد شهر أو لا توجد شهور متاحة بعد.']); return; }
   if(!asOf){ bad(['بيانات ناقصة','حدّد تاريخ القياس.']); return; }
+  if(sel.dateFrom && sel.dateTo && sel.dateFrom > sel.dateTo){ bad(['فترة غير صحيحة','تاريخ «من» يجب ألا يتجاوز تاريخ «إلى».']); return; }
   AGE.key = ageSelKey(sel);
   ageUpdatePeriodChip();
   AGE.loading = true;
@@ -7940,21 +8007,7 @@ async function runAgeReport(force){
   ageSetStatus('');
   document.getElementById('ageReport').innerHTML = '<div class="card age-loading"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>جاري حساب أعمار الشحنات من ملفات الشهور… قد تستغرق العملية دقيقة للفترات الكبيرة.</div>';
   try{
-    const params = { action:'ageReport', sheets: sel.sheets.join(','), asOf:asOf, };
-    if(AGE.stdDirty) params.standards = JSON.stringify(AGE.std); // otherwise the server uses the saved standards (Settings)
-    if(sel.dateFrom) params.dateFrom = sel.dateFrom;
-    if(sel.dateTo) params.dateTo = sel.dateTo;
-    if(force) params.refresh = '1';
-    const res = await fetchWithTimeout(buildAppsScriptUrl(params), {cache:'no-store'}, 240000);
-    if(!res.ok) throw new Error('تعذر الوصول إلى مصدر البيانات (HTTP '+res.status+').');
-    let payload; const text = await res.text();
-    try{ payload = JSON.parse(text); }catch(e){ throw new Error('استجابة غير صالحة من مصدر البيانات — تأكد من نشر آخر نسخة من Code.gs.'); }
-    if(payload && payload.success === false){
-      // an older Code.gs deployment does not know the `sheets` parameter (month-linked mode) and asks for explicit dates
-      if(/يجب تحديد تاريخ البداية والنهاية/.test(String(payload.error||''))) throw new Error('نسخة Code.gs المنشورة في Apps Script قديمة. الصق آخر Code.gs ثم Deploy ← Manage deployments ← Edit ← New version ← Deploy، وأعد المحاولة.');
-      throw new Error(payload.error || 'تعذر إنشاء التقرير.');
-    }
-    ageEnsureHoldFields(payload); // tolerate a report produced by an older Code.gs (no separate on-hold returns)
+    const payload = await ageFetchReport(sel, asOf, force);
     AGE.data = payload; AGE.failKey = null;
     renderAgeReport(payload);
     document.getElementById('ageXlsxBtn').disabled = false;
@@ -7973,6 +8026,93 @@ async function runAgeReport(force){
     document.getElementById('ageRunBtn').disabled = false;
     // the month / date filter changed while this request was running — follow the new period
     if(document.body.classList.contains('on-shipage') && ageSelKey(ageSelection()) !== AGE.key) setTimeout(renderShipAgeTab, 0);
+  }
+}
+
+/* ---------- مقارنة بين فترتين (أ) و(ب) ---------- */
+function ageClearCompare(){ const el=document.getElementById('ageCompare'); if(el) el.innerHTML=''; AGE.cmp=null; }
+function ageCmpDiff(a, b, type){
+  if(a==null || b==null || isNaN(a) || isNaN(b)) return { diff:'—', chg:'—', cls:'age-cmp-flat' };
+  const dv = b - a, cls = Math.abs(dv) < 1e-9 ? 'age-cmp-flat' : (dv > 0 ? 'age-cmp-up' : 'age-cmp-down');
+  const arrow = Math.abs(dv) < 1e-9 ? '＝' : (dv > 0 ? '▲' : '▼');
+  const sign = dv > 0 ? '+' : (dv < 0 ? '−' : '');
+  const abs = Math.abs(dv);
+  if(type==='p') return { diff:`${arrow} ${sign}${abs.toFixed(1)} نقطة مئوية`, chg:'—', cls };
+  if(type==='d') return { diff:`${arrow} ${sign}${abs.toFixed(1)} يوم`, chg: a>0 ? `${sign}${(abs/a*100).toFixed(1)}%` : '—', cls };
+  return { diff:`${arrow} ${sign}${ageN(abs)}`, chg: a>0 ? `${sign}${(abs/a*100).toFixed(1)}%` : '—', cls };
+}
+function ageCmpFmt(v, type){ return v==null||isNaN(v) ? '—' : (type==='p' ? ageP(v) : type==='d' ? ageD(v)+' يوم' : ageN(v)); }
+function ageCmpRow(label, a, b, type){
+  const x = ageCmpDiff(a, b, type);
+  return `<tr><td>${ageEsc(label)}</td><td>${ageCmpFmt(a,type)}</td><td>${ageCmpFmt(b,type)}</td><td class="${x.cls}">${x.diff}</td><td>${x.chg}</td></tr>`;
+}
+const AGE_CMP_HEAD = ['المؤشر','الفترة (أ)','الفترة (ب)','الفرق (ب − أ)','نسبة التغيّر'];
+function renderAgeCompare(A, B, labelA, labelB){
+  const ka = A.kpis, kb = B.kpis;
+  const defs = [
+    ['إجمالي الشحنات','shipments','n'], ['التسليم الناجح (عدد)','delivered','n'], ['نسبة التسليم الناجح','deliveredPct','p'],
+    ['التسليم ضمن معيار السوق','deliveredWithinMarketPct','p'], ['التسليم ضمن معيار الشركة','deliveredWithinCompanyPct','p'],
+    ['متوسط مدة التسليم','avgDeliveryAge','d'],
+    ['إجمالي المرتجعات (عدد)','returns','n'], ['نسبة المرتجعات من الشحنات','returnsPct','p'],
+    ['مرتجع مغلق ضمن المدة','returnClosedWithinPct','p'], ['مرتجع مغلق وتجاوز المدة','returnClosedOverPct','p'],
+    ['مرتجعات مفتوحة (عدد)','returnOpen','n'], ['مرتجعات معلقة (عدد)','returnHold','n'],
+    ['إجمالي الشحنات المفتوحة','open','n'], ['المفتوحة المتجاوزة لمعيار الشركة (عدد)','openOverdue','n'],
+    ['نسبة المتجاوز من المفتوحة','openOverduePct','p'], ['متوسط عمر المفتوحة','avgOpenAge','d'],
+  ];
+  const kpiRows = defs.map(([l,f,t])=>ageCmpRow(l, ka[f], kb[f], t)).join('');
+  const gb = new Map((B.groups||[]).map(g=>[g.key,g]));
+  const grpRows = (A.groups||[]).map(g=>{
+    const h = gb.get(g.key) || {};
+    return ageCmpRow(`${g.name} — عدد الشحنات`, g.total, h.total, 'n') + ageCmpRow(`${g.name} — ضمن معيار الشركة`, g.withinPct, h.withinPct, 'p') + ageCmpRow(`${g.name} — متجاوز المدة`, g.overPct, h.overPct, 'p');
+  }).join('');
+  const branchMap = r=>{ const m = new Map(); (r.groups||[]).forEach(g=>(g.branches||[]).forEach(b=>m.set(b.name, b.kinds.delivered))); return m; };
+  const ba = branchMap(A), bb = branchMap(B);
+  const names = [...new Set([...ba.keys(), ...bb.keys()])].filter(n=>(ba.get(n)&&ba.get(n).count)||(bb.get(n)&&bb.get(n).count)).sort((x,y)=>x.localeCompare(y,'ar'));
+  const brRows = names.map(n=>{
+    const a = ba.get(n)||{}, b = bb.get(n)||{};
+    const dc = ageCmpDiff(a.count||0, b.count||0, 'n'), dd = ageCmpDiff(a.avgAge, b.avgAge, 'd'), dp = ageCmpDiff(a.companyPct, b.companyPct, 'p');
+    return `<tr><td>${ageEsc(n)}</td><td>${ageN(a.count||0)}</td><td>${ageN(b.count||0)}</td><td class="${dc.cls}">${dc.diff}</td><td>${ageD(a.avgAge)}</td><td>${ageD(b.avgAge)}</td><td class="${dd.cls}">${dd.diff}</td><td>${ageP(a.companyPct)}</td><td>${ageP(b.companyPct)}</td><td class="${dp.cls}">${dp.diff}</td></tr>`;
+  }).join('');
+  const note = A.params.asOf === B.params.asOf ? `تاريخ القياس للفترتين: ${ageArDate(A.params.asOf)}` : `تاريخ القياس: ${ageArDate(A.params.asOf)} / ${ageArDate(B.params.asOf)}`;
+  document.getElementById('ageCompare').innerHTML = `
+  <section class="age-sec">
+    <div class="age-title" style="display:block"><h2>مقارنة عمر الشحنة بين فترتين</h2>
+      <div class="meta">الفترة (أ): ${ageEsc(labelA)}<br>الفترة (ب): ${ageEsc(labelB)}<br>${note}</div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-title">المؤشرات الرئيسية</div>${ageTable(AGE_CMP_HEAD, kpiRows)}
+      <div class="age-note">الفرق = قيمة (ب) − قيمة (أ). النسب تُقارَن بالنقطة المئوية، والأعداد والمتوسطات بالفرق المطلق ونسبة التغيّر. ▲ زيادة · ▼ انخفاض — الاتجاه لا يعني تحسنًا أو تراجعًا بحد ذاته (مثلًا زيادة نسبة التجاوز سلبية، وزيادة التسليم ضمن المعيار إيجابية). اختلاف حجم الفترتين يؤثر على الأعداد فيُفضَّل الاعتماد على النسب.</div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-title">حسب المجموعة الجغرافية</div>${ageTable(AGE_CMP_HEAD, grpRows)}</div>
+    <div class="card"><div class="card-title">التسليمات حسب الفرع</div>${brRows ? ageTable(['الفرع','مسلّمة (أ)','مسلّمة (ب)','الفرق','متوسط المدة (أ)','متوسط المدة (ب)','الفرق','ضمن معيار الشركة (أ)','ضمن معيار الشركة (ب)','الفرق'], brRows, {sticky:true}) : '<div class="age-note">لا توجد تسليمات في الفترتين.</div>'}</div>
+  </section>`;
+  try{ ARRIVE_DS.enhanceTables(); }catch(e){}
+}
+async function runAgeCompare(){
+  if(AGE.loading) return;
+  const asOf = document.getElementById('ageAsOf').value;
+  const fb = document.getElementById('ageFromB').value, tb = document.getElementById('ageToB').value;
+  const bad = msg=>{ ageSetStatus(`<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>${msg[0]}</b> — ${msg[1]}</div></div>`); };
+  const selA = ageSelection();
+  const ld = ageLocalDates();
+  if(!ld.from || !ld.to){ bad(['الفترة (أ) ناقصة','حدّد «من تاريخ» و«إلى تاريخ» للفترة (أ) بالأعلى.']); return; }
+  if(!fb || !tb){ bad(['الفترة (ب) ناقصة','حدّد «من» و«إلى» للفترة (ب).']); return; }
+  if(ld.from > ld.to || fb > tb){ bad(['فترة غير صحيحة','تاريخ «من» يجب ألا يتجاوز تاريخ «إلى».']); return; }
+  if(!asOf){ bad(['بيانات ناقصة','حدّد تاريخ القياس.']); return; }
+  const selB = ageSelForRange(fb, tb);
+  AGE.loading = true; AGE.key = ageSelKey(selA);
+  const btns = ['ageRunBtn','ageCmpRunBtn'].map(id=>document.getElementById(id)); btns.forEach(b=>b.disabled = true);
+  ageSetStatus(''); document.getElementById('ageCompare').innerHTML = '';
+  document.getElementById('ageReport').innerHTML = '<div class="card age-loading"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>جاري حساب الفترتين للمقارنة… قد تستغرق العملية دقيقة أو أكثر.</div>';
+  try{
+    const A = await ageFetchReport(selA, asOf, false);
+    const B = await ageFetchReport(selB, asOf, false);
+    AGE.data = A; AGE.failKey = null;
+    renderAgeReport(A); // the full report of period (أ) stays available for Word / Excel export
+    renderAgeCompare(A, B, ageRangeText(ld.from, ld.to), ageRangeText(fb, tb));
+    ['ageXlsxBtn','ageDocxBtn','agePrintBtn'].forEach(id=>{ document.getElementById(id).disabled = false; });
+  }catch(err){
+    document.getElementById('ageReport').innerHTML = '';
+    ageSetStatus(`<div class="ds-alert violation"><span class="ds-alert-ico" aria-hidden="true"></span><div class="ds-alert-body"><b>تعذر إنشاء المقارنة</b> — ${ageEsc(err && err.message ? err.message : String(err))}</div></div>`);
+  }finally{
+    AGE.loading = false; btns.forEach(b=>b.disabled = false);
   }
 }
 
