@@ -956,7 +956,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <div class="filter-group"><label for="ageFrom">من تاريخ (استلام البيك أب)</label><input type="date" id="ageFrom"></div>
         <div class="filter-group"><label for="ageTo">إلى تاريخ</label><input type="date" id="ageTo"></div>
         <div class="filter-group"><label for="ageAsOf">قياس عمر الشحنات المفتوحة حتى</label><input type="date" id="ageAsOf"></div>
-        <button class="btn-primary" id="ageRunBtn" type="button"><i class="fa-solid fa-play" aria-hidden="true"></i> إنشاء التقرير</button>
+        <button class="btn-primary" id="ageRunBtn" type="button"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i> بحث</button>
         <button class="btn-primary" id="ageDocxBtn" type="button" disabled><i class="fa-solid fa-file-word" aria-hidden="true"></i> تصدير التقرير (Word)</button>
         <button class="btn-secondary" id="ageXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تصدير Excel</button>
         <button class="btn-secondary" id="agePrintBtn" type="button" disabled><i class="fa-solid fa-print" aria-hidden="true"></i> طباعة / PDF</button>
@@ -7957,7 +7957,7 @@ function initShipAge(){
   ageRenderStdTable();
   initAgeStdSettings();
   document.getElementById('ageRunBtn').addEventListener('click', ()=>{ ageClearCompare(); runAgeReport(true); });
-  document.getElementById('ageClearDatesBtn').addEventListener('click', ()=>{ ['ageFrom','ageTo'].forEach(id=>{ document.getElementById(id).value=''; }); ageClearCompare(); runAgeReport(true); });
+  document.getElementById('ageClearDatesBtn').addEventListener('click', ()=>{ ['ageFrom','ageTo'].forEach(id=>{ document.getElementById(id).value=''; }); ageClearCompare(); AGE.data=null; AGE.failKey=null; ['ageXlsxBtn','ageDocxBtn','agePrintBtn'].forEach(id=>{ document.getElementById(id).disabled=true; }); ageSetStatus(''); renderShipAgeTab(); });
   document.getElementById('ageCmpToggle').addEventListener('click', ()=>{
     const box = document.getElementById('ageCmpBox'), t = document.getElementById('ageCmpToggle');
     box.hidden = !box.hidden; t.setAttribute('aria-expanded', String(!box.hidden));
@@ -8122,6 +8122,12 @@ function renderShipAgeTab(){
   const key = ageSelKey(ageSelection());
   if(AGE.data && AGE.key === key) return; // already showing this period; DOM persists across tab switches
   if(AGE.failKey === key) return;
+  // no period chosen yet: wait for the user to pick dates and press «بحث» (the report is independent of the dashboard months)
+  const ld = ageLocalDates();
+  if(!ld.from && !ld.to){
+    if(!AGE.data) document.getElementById('ageReport').innerHTML = '<div class="card age-loading"><i class="fa-solid fa-calendar-days" aria-hidden="true"></i>اختر «من تاريخ» و«إلى تاريخ» ثم اضغط «بحث» لعرض بيانات هذه المدة فقط، بغض النظر عن الشهور المحددة في الداشبورد.</div>';
+    return;
+  }
   runAgeReport(false);
 }
 
