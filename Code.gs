@@ -188,6 +188,10 @@ function doGet(e) {
       result = diagnoseMonth(sheetName);
     }
 
+    else if (action === "summaryStatus") {
+      result = summaryStatusReport();
+    }
+
     else if (action === "diagnoseStatuses") {
       result = diagnoseStatusBreakdown(sheetName);
     }
@@ -3143,6 +3147,45 @@ function ageGetSnapshot_(month) {
     json += String(parts[j][5] || "");
   }
   try { return JSON.parse(json); } catch (e) { console.log("[AGE SNAPSHOT INVALID] " + month + " " + String(e)); return null; }
+}
+
+// Read-only check: for every month, is there a saved summary, when was it built, and does it match the settings
+// saved in THIS Apps Script project? Lists the exact reason when it does not. Open <web app URL>?action=summaryStatus,
+// or run logSummaryStatus from the editor — the two outputs must be identical (same scriptId, same settings).
+function summaryStatusReport() {
+  var persisted = getPersistedSlaSettings_();
+  var sig = statusMappingSig_();
+  var scriptId = ""; try { scriptId = ScriptApp.getScriptId(); } catch (e) {}
+  var months = [], stale = [], missing = [];
+  for (var i = 0; i < MONTH_ORDER.length; i++) {
+    var month = MONTH_ORDER[i], snap = null, readError = "";
+    try { snap = getSavedMonthSummary_(month); } catch (eRead) { readError = String(eRead && eRead.message ? eRead.message : eRead); }
+    var row = { month: month, hasSummary: !!snap };
+    if (readError) row.readError = readError;
+    if (!snap) { missing.push(month); months.push(row); continue; }
+    row.generatedAt = snap.generatedAt || null;
+    row.totalRows = Number(snap.totalRows || 0);
+    if (snap.empty || snap.noData) { row.empty = true; row.compatible = true; months.push(row); continue; }
+    var bc = snap.filterCube && snap.filterCube.buildConfig, reasons = [];
+    if (!bc) reasons.push("no-build-config (ملخص من نسخة قديمة جدًا)");
+    else {
+      if (Number(bc.attemptT1) !== 1 || Number(bc.attemptT2) !== 2) reasons.push("attempt: built " + bc.attemptT1 + "/" + bc.attemptT2 + " vs 1/2");
+      if (Number(bc.slaTargetDefault) !== Number(persisted.slaTargetDefault)) reasons.push("slaTargetDefault: built " + bc.slaTargetDefault + " vs saved " + persisted.slaTargetDefault);
+      if (!summaryBranchTargetsEqual_(bc.branchSlaTargets, persisted.branchSlaTargets)) reasons.push("branchSlaTargets: built " + JSON.stringify(bc.branchSlaTargets || {}) + " vs saved " + JSON.stringify(persisted.branchSlaTargets || {}));
+      if (!summaryConfigStatusOk_(bc)) reasons.push("statusMapping: built [" + String(bc.statusMappingSig || "") + "] vs saved [" + sig + "]");
+    }
+    row.compatible = !reasons.length;
+    if (reasons.length) { row.reasons = reasons; stale.push(month); }
+    months.push(row);
+  }
+  return { success: true, scriptId: scriptId, generationStamp: getSnapshotGenerationStamp_(),
+    savedSettings: { slaTargetDefault: persisted.slaTargetDefault, branchSlaTargets: persisted.branchSlaTargets, statusMappingSig: sig },
+    staleMonths: stale, missingMonths: missing, allCompatible: !stale.length && !missing.length, months: months };
+}
+function logSummaryStatus() {
+  var rep = summaryStatusReport();
+  Logger.log(JSON.stringify(rep, null, 2));
+  return rep;
 }
 
 // Non-blocking notice for menu/editor runs. A modal alert() keeps the execution waiting for someone to press OK in
