@@ -2113,9 +2113,19 @@ function getSlaTarget(branch){
 // (mgmtEnsureMonthsLoaded/getMonthSummaryLite) read SLA_TARGET_DAYS/
 // BRANCH_SLA_TARGETS from here and pass them explicitly as request params —
 // there is no second, independently-maintained copy anywhere else.
+// false until the saved SLA settings were really read from the server. While false, requests carry the built-in
+// defaults (2 days, no branch targets), so the server may flag every month as «built with previous settings»
+// although nothing is wrong with the saved summaries — the stale-months notice says so instead of asking for a rebuild.
+let SLA_SETTINGS_VERIFIED = false;
 async function loadPersistedSlaSettings(){
+  if(!effectiveWebAppUrl()) return; // no data source configured yet — keep the hardcoded 2/{} defaults
+  for(let attempt = 1; attempt <= 3 && !SLA_SETTINGS_VERIFIED; attempt++){
+    await loadPersistedSlaSettingsOnce();
+    if(!SLA_SETTINGS_VERIFIED && attempt < 3) await new Promise(r=>setTimeout(r, 1500*attempt));
+  }
+}
+async function loadPersistedSlaSettingsOnce(){
   try{
-    if(!effectiveWebAppUrl()) return; // no data source configured yet — keep the hardcoded 2/{} defaults
     const url = buildAppsScriptUrl({ action:'getSlaSettings' });
     const res = await fetchWithTimeout(url, {cache:'no-store'}, LIST_SHEETS_TIMEOUT_MS);
     if(!res.ok) throw new Error('HTTP '+res.status);
@@ -2127,6 +2137,7 @@ async function loadPersistedSlaSettings(){
     if(payload.branchSlaTargets && typeof payload.branchSlaTargets === 'object'){
       BRANCH_SLA_TARGETS = payload.branchSlaTargets;
     }
+    SLA_SETTINGS_VERIFIED = true;
     console.info('[SLA SETTINGS LOADED]', { slaTargetDefault: SLA_TARGET_DAYS, branchOverrideCount: Object.keys(BRANCH_SLA_TARGETS).length });
   }catch(e){
     // Fails open: keep whatever SLA_TARGET_DAYS/BRANCH_SLA_TARGETS already
@@ -6769,6 +6780,9 @@ function renderAllMonthsCompletenessWarning(summary){
     dsSetAlertText(el, message);
   } else if(hasStaleSla){
     el.className = 'ds-alert';
+    if(!SLA_SETTINGS_VERIFIED){
+      dsSetAlertText(el, 'تعذّر تحميل إعدادات SLA المحفوظة من الخادم، فتمت المقارنة بالإعدادات الافتراضية — تنبيه «شهور مبنية بإعدادات سابقة» قد يكون غير صحيح. أعد تحميل الصفحة (ويفضّل بعد انتهاء أي تحديث للملخصات يعمل الآن) قبل إعادة بناء أي شهر.');
+    } else
     dsSetAlertText(el, `الإجمالي معروض بالكامل، لكن هذه الشهور مبنية بإعدادات سابقة (SLA أو تصنيف الحالات) وليست الحالية: ${staleSla.map(monthDisplayName).join('، ')}. أعد بناءها بإعدادات SLA الحالية من الإعدادات ← «تحديث الداش بورد» (اختر «كل الشهور» أولاً)، أو شغّل rebuildAllSummaries من محرر Apps Script وكرّرها حتى تظهر allMonthsComplete: true، ثم أعد تحميل الصفحة. تأكد أيضاً أنك نشرت آخر نسخة من Code.gs.`);
   } else {
     // Purely informational — no problem, no incomplete data, nothing to retry.
