@@ -8454,16 +8454,6 @@ function ageLogoTilePng(){
   });
 }
 
-function ageLogoInfo(){
-  return new Promise(resolve=>{
-    try{
-      const img = new Image();
-      img.onload = ()=>resolve({ url:window.ARRIVE_LOGO_WEB, w:img.naturalWidth, h:img.naturalHeight });
-      img.onerror = ()=>resolve(null);
-      img.src = window.ARRIVE_LOGO_WEB;
-    }catch(e){ resolve(null); }
-  });
-}
 function ageBranchesIntro(d){
   const del = [], ret = [];
   d.groups.forEach(g=>g.branches.forEach(b=>{
@@ -8482,6 +8472,112 @@ function ageBranchesIntro(d){
   return parts;
 }
 
+/* ---------- charts for the Word export — styled like the approved report (title, summary pills, legend on top) ---------- */
+const AGE_R = { green:'#16A34A', orange:'#F5A800', red:'#DC2626', brown:'#9A3412', navy:'#1F3A5F', ink:'#1E293B', grey:'#64748B' };
+AGE_CHART_PLUGINS.push({ id:'ageRef', afterDraw(ch, args, o){
+  if(!o || !o.title) return;
+  const c = ch.ctx, W = ch.width, cx = W/2, f = (px, w)=>`${w||'normal'} ${px}px ${AGE_FONT}`;
+  c.save(); c.textBaseline = 'top'; c.direction = 'rtl'; c.textAlign = 'center';
+  c.fillStyle = AGE_R.navy; c.font = f(15,'bold'); c.fillText(o.title, cx, 4);
+  c.fillStyle = AGE_R.grey; c.font = f(9.5); c.fillText(o.sub||'', cx, 27);
+  let y = 46;
+  const pills = o.pills || [];
+  if(pills.length){
+    const gap = 8, pw = (W-16-gap*(pills.length-1))/pills.length, ph = 38;
+    pills.forEach((p,i)=>{
+      const x = 8+(pw+gap)*i;
+      c.fillStyle = p.color; c.beginPath(); if(c.roundRect) c.roundRect(x,y,pw,ph,6); else c.rect(x,y,pw,ph); c.fill();
+      c.fillStyle = '#fff'; c.font = f(11,'bold'); c.fillText(p.label, x+pw/2, y+5); c.fillText(p.value, x+pw/2, y+21);
+    });
+    y += ph+10;
+  }
+  const legend = o.legend || [];
+  c.font = f(9.5,'bold'); c.textAlign = 'right';
+  let x = W-10;
+  legend.slice().reverse().forEach(l=>{ c.fillStyle = l.color; c.fillRect(x-10, y+1, 10, 10); c.fillStyle = AGE_R.ink; c.fillText(l.text, x-15, y); x -= 15+c.measureText(l.text).width+18; });
+  const xs = ch.scales.x;
+  if(o.subLabels && xs){ c.textAlign = 'center'; c.font = f(8.5); c.fillStyle = AGE_R.grey; o.subLabels.forEach((s,i)=>c.fillText(s, xs.getPixelForValue(i), xs.bottom+1)); }
+  if(o.foot){ c.textAlign = 'center'; c.font = f(9); c.fillStyle = AGE_R.ink; c.fillText(o.foot, cx, ch.height-15); }
+  c.restore();
+} });
+function ageRefOpts(head, o){
+  o = o || {};
+  const font = (size, weight)=>({ size, weight:weight||'normal', family:AGE_FONT });
+  const top = 46 + ((head.pills||[]).length ? 48 : 0) + 20 + (o.head||0);
+  return {
+    layout:{ padding:{ top, right:10, left:4, bottom:(head.subLabels?14:0)+(head.foot?18:0)+2 } },
+    plugins:Object.assign({ title:{ display:false }, subtitle:{ display:false }, legend:{ display:false }, tooltip:{ enabled:false }, ageRef:head }, o.plugins||{}),
+    scales:{
+      x:{ stacked:!!o.stacked, grid:{ display:false }, border:{ color:AGE_R.ink }, title:{ display:!!o.xTitle, text:o.xTitle, color:AGE_R.ink, font:font(10.5,'bold'), padding:{ top:2, bottom:0 } },
+        ticks:{ color:AGE_R.ink, font:font(o.tick||9.5,'bold'), maxRotation:0, autoSkip:false } },
+      y:{ stacked:!!o.stacked, min:0, max:o.yMax, suggestedMax:o.ySuggested, grace:o.grace, border:{ display:false }, grid:{ color:'#E2E8F0' },
+        title:{ display:true, text:o.yTitle||'نسبة الشحنات (%)', color:AGE_R.ink, font:font(9.5,'bold') }, ticks:{ color:AGE_R.ink, font:font(9.5,'bold'), stepSize:o.yMax===100?25:undefined, callback:v=>v+'%' } }
+    }
+  };
+}
+function ageRefName(name, n){ return (n > 6 && /\s/.test(name)) ? name.split(/\s+/) : name; }
+function ageDocChartDist(d, g){
+  const dist = g.dist || [], sum = dist.reduce((a,b)=>a+b,0); if(!sum) return null;
+  const M = g.market, D = g.delivery;
+  const within = dist.slice(0, M).reduce((a,b)=>a+b,0), over = dist[D] || 0;
+  const val = n=>`${ageN(n)} (${(n/sum*100).toFixed(1)}%)`;
+  const head = { title:`توزيع الشحنات المسلّمة حسب يوم التسليم - ${g.name}`,
+    sub:`النسبة من الشحنات المسلّمة (${ageN(sum)}) | معيار السوق ${ageDays(M)} | معيار الشركة ${ageDays(D)}`,
+    pills:[ { color:AGE_R.green, label:`تسلم خلال ${ageDays(M)}`, value:val(within) }, { color:AGE_R.orange, label:`تسلم خلال ${ageDays(D)}`, value:val(sum-over) }, { color:AGE_R.red, label:`تجاوز ${ageDays(D)}`, value:val(over) } ],
+    legend:[ { color:AGE_R.green, text:`تسلم خلال ${ageDays(M)}` }, { color:AGE_R.orange, text:`تسلم من ${M+1} إلى ${ageDays(D)}` }, { color:AGE_R.red, text:`تجاوز ${ageDays(D)}` } ],
+    foot:`«تسلم خلال ${ageDays(D)}» يشمل جميع الشحنات المسلّمة من اليوم 0-1 حتى اليوم ${D}` };
+  const many = dist.length > 17;
+  const o = ageRefOpts(head, { xTitle:'يوم التسليم', yTitle:'نسبة الشحنات المسلّمة (%)', ySuggested:20, grace:'12%', tick:many?8.5:9.5,
+    plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:many?8:9.5, minShow:0.05 } } });
+  return ageChartImage({ type:'bar', data:{ labels:dist.map((_,i)=> i===D ? ['تجاوز', String(D)] : [i===0?'0-1':String(i+1), 'يوم']),
+    datasets:[{ data:dist.map(n=>n/sum*100), backgroundColor:dist.map((_,i)=> i===D ? AGE_R.red : (i < M ? AGE_R.green : AGE_R.orange)), borderWidth:0, barPercentage:.8, categoryPercentage:.95 }] }, options:o }, 620, 340);
+}
+function ageDocChartBranchDelivery(d, g){
+  const rows = ageBranchRowsDel(g); if(!rows.length) return null;
+  const head = { title:`التسليم حسب الفرع - ${g.name}`, sub:`معيار السوق ${ageDays(g.market)} | معيار الشركة ${ageDays(g.delivery)} | النسبة من الشحنات المسلّمة في الفرع`,
+    legend:[ { color:AGE_R.green, text:'ضمن معيار السوق' }, { color:AGE_R.orange, text:'ضمن معيار الشركة' } ], subLabels:rows.map(b=>`من ${ageN(b.kinds.delivered.count)}`) };
+  const o = ageRefOpts(head, { yMax:100, head:14, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:rows.length>8?8:9.5 } } });
+  return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>ageRefName(b.name, rows.length)), datasets:[
+    { data:rows.map(b=>b.kinds.delivered.marketPct), backgroundColor:AGE_R.green, borderWidth:0, barPercentage:.92, categoryPercentage:.72 },
+    { data:rows.map(b=>b.kinds.delivered.companyPct), backgroundColor:AGE_R.orange, borderWidth:0, barPercentage:.92, categoryPercentage:.72 } ] }, options:o }, 620, 270);
+}
+function ageDocChartReturns(d, g){
+  const rows = ageBranchRowsRet(g).filter(b=>b.kinds.returnClosed.count>0); if(!rows.length) return null;
+  const head = { title:`المرتجعات المغلقة حسب الفرع - ${g.name}`, sub:`معيار الشركة للمرتجع ${ageDays(g.returns)} | النسبة من المرتجعات المغلقة في الفرع`,
+    legend:[ { color:AGE_R.green, text:'ضمن معيار الشركة' }, { color:AGE_R.red, text:'تجاوز المدة' } ], subLabels:rows.map(b=>`من ${ageN(b.kinds.returnClosed.count)}`) };
+  const o = ageRefOpts(head, { stacked:true, yMax:100, plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', inside:true, size:9 } } });
+  return ageChartImage({ type:'bar', data:{ labels:rows.map(b=>ageRefName(b.name, rows.length)), datasets:[
+    { data:rows.map(b=>b.kinds.returnClosed.companyPct), backgroundColor:AGE_R.green, borderWidth:0, barPercentage:.6 },
+    { data:rows.map(b=>b.kinds.returnClosed.overPct), backgroundColor:AGE_R.red, borderWidth:0, barPercentage:.6 } ] }, options:o }, 620, 250);
+}
+function ageDocChartOpen(d){
+  const g = d.open.byGroup; if(!g.length) return null;
+  const k = d.kpis, hold = k.returnHold > 0, pct = (a,b)=> b ? (a/b*100).toFixed(1)+'%' : '—';
+  const within = k.open - k.openOverdue;
+  const pills = [ { color:AGE_R.orange, label:'قيد التشغيل متجاوز', value:`${ageN(k.inProgressOverdue)} (${pct(k.inProgressOverdue,k.inProgress)})` },
+    { color:AGE_R.red, label:'مرتجع مفتوح متجاوز', value:`${ageN(k.returnOpenOverdue)} (${pct(k.returnOpenOverdue,k.returnOpen)})` } ];
+  const legend = [ { color:AGE_R.orange, text:'قيد التشغيل متجاوز' }, { color:AGE_R.red, text:'مرتجع مفتوح متجاوز' } ];
+  const sets = [ { data:g.map(x=>x.inProgressOverPct), backgroundColor:AGE_R.orange, borderWidth:0, barPercentage:.9, categoryPercentage:.6 },
+    { data:g.map(x=>x.returnOpenOverPct), backgroundColor:AGE_R.red, borderWidth:0, barPercentage:.9, categoryPercentage:.6 } ];
+  if(hold){
+    pills.push({ color:AGE_R.brown, label:'مرتجع معلق متجاوز', value:`${ageN(k.returnHoldOverdue)} (${pct(k.returnHoldOverdue,k.returnHold)})` });
+    legend.push({ color:AGE_R.brown, text:'مرتجع معلق متجاوز' });
+    sets.push({ data:g.map(x=>x.returnHoldOverPct), backgroundColor:AGE_R.brown, borderWidth:0, barPercentage:.9, categoryPercentage:.6 });
+  }
+  pills.unshift({ color:AGE_R.green, label:'ضمن المعيار', value:`${ageN(within)} (${pct(within,k.open)})` });
+  const head = { title:'الشحنات المفتوحة المتجاوزة لمعيارها - حسب المجموعة', sub:`نسبة المتجاوز من المفتوح في كل فئة | العمر حتى ${agePlainDate(d.params.asOf)}`, pills, legend,
+    subLabels:g.map(x=> hold ? `تشغيل ${ageN(x.inProgress)} | مفتوح ${ageN(x.returnOpen)} | معلق ${ageN(x.returnHold)}` : `قيد التشغيل ${ageN(x.inProgress)} | مرتجع مفتوح ${ageN(x.returnOpen)}`) };
+  const o = ageRefOpts(head, { yMax:100, head:14, yTitle:'نسبة الشحنات المتجاوزة (%)', plugins:{ ageLabels:{ fmt:v=>v.toFixed(1)+'%', size:hold?8.5:10 } } });
+  if(hold) sets.forEach(x=>{ x.categoryPercentage = .8; });
+  return ageChartImage({ type:'bar', data:{ labels:g.map(x=>x.name), datasets:sets }, options:o }, 560, 330);
+}
+function ageBuildDocCharts(d){
+  const out = { dist:{}, del:{}, ret:{}, open:null };
+  d.groups.forEach(g=>{ out.dist[g.key] = ageDocChartDist(d,g); out.del[g.key] = ageDocChartBranchDelivery(d,g); out.ret[g.key] = ageDocChartReturns(d,g); });
+  out.open = ageDocChartOpen(d);
+  return out;
+}
+
 async function exportAgeDocx(){
   const d = AGE.data;
   if(!d){ alert('أنشئ التقرير أولًا ثم صدّره.'); return; }
@@ -8490,174 +8586,174 @@ async function exportAgeDocx(){
     const lib = await ageLoadDocxLib();
     const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle, AlignmentType,
             VerticalAlign, ImageRun, LineRuleType, Footer, PageNumber, PageBorderDisplay, PageBorderOffsetFrom, TableLayoutType } = lib;
-    const BLUE='0837C9', NAVY='0F172A', TEAL='00C7E6', LIGHT='E6F4FF', ZEBRA1='F8FAFC', ZEBRA2='F1F5F9', TOTAL=LIGHT, GRID='E2E8F0', INK='0F172A', MUTE='64748B', OKC='15803D', WARNC='B45309', BADC='B91C1C', FONT='Cairo';
-    const TONE = { '16A34A':OKC, 'E36C0A':WARNC, 'DC2626':BADC };
-    const charts = AGE.charts || ageBuildCharts(d);
-    const logo = await ageLogoInfo();
-    const k = d.kpis, std = d.standards;
+    // palette + type of the approved report layout
+    const NAVY='1F3A5F', INK='1B2A3A', DARK='1E293B', SLATE='475569', MUTE='64748B', GRID='CBD5E1', ZEBRA='F1F5F9', TOTAL='DCE6F0', CARD='F8FAFC', CALLOUT='EAF0F6',
+          RULE='0E7C66', OKC='16A34A', WARNC='E36C0A', BADC='DC2626', FONT='Arial';
+    const charts = ageBuildDocCharts(d);
+    const logo = await ageLogoTilePng();
+    const k = d.kpis, std = d.standards, hold = k.returnHold > 0;
     const periodTxt = agePeriodText(d);
     const asOfTxt = agePlainDate(d.params.asOf);
     const W = 10092;
 
     const t = (text, o)=>{ o = o||{}; return new TextRun({ text:String(text==null?'':text), rightToLeft:true, font:FONT, size:o.size||18, bold:!!o.bold, color:o.color||INK }); };
-    const para = (runs, o)=>{ o = o||{}; return new Paragraph({ bidirectional:true, alignment:o.align||AlignmentType.START, keepNext:!!o.keepNext, keepLines:true,
-      spacing:{ before:o.before||0, after:o.after==null?80:o.after, line:o.plain?undefined:276, lineRule:o.plain?undefined:LineRuleType.AUTO }, border:o.border, indent:o.indent, children:Array.isArray(runs)?runs:[runs] }); };
-    const spacer = (n)=>para([t('',{size:8})], { after:n==null?60:n });
-    const heading = (num, title)=>{
-      const nb = { style:BorderStyle.NONE, size:0, color:'FFFFFF' }, none = { top:nb, bottom:nb, left:nb, right:nb };
-      const numCell = new TableCell({ width:{ size:700, type:WidthType.DXA }, borders:none, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:70, bottom:70, left:40, right:40 },
-        children:[ para([t(String(num).padStart(2,'0'),{ size:24, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0, plain:true }) ] });
-      const titleCell = new TableCell({ width:{ size:W-700, type:WidthType.DXA }, borders:{ ...none, right:{ style:BorderStyle.SINGLE, size:24, color:TEAL } }, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:LIGHT }, margins:{ top:70, bottom:70, left:160, right:160 },
-        children:[ para([t(title,{ size:26, bold:true, color:BLUE })],{ after:0, keepNext:true, plain:true }) ] });
-      return [ para([t('',{ size:6 })],{ before:120, after:0, keepNext:true, plain:true }),
-        new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[700, W-700], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[numCell, titleCell] }) ] }),
-        para([t('',{ size:4 })],{ after:20, plain:true }) ];
-    };
-    const bullet = (title)=>para([t('■ ',{ size:16, color:TEAL }), t(title, { size:24, bold:true, color:BLUE })], { before:140, after:80, keepNext:true });
-    const sub = (title)=>para([t(title, { size:22, bold:true, color:NAVY })], { before:140, after:60, keepNext:true });
-    const line = (b)=>({ style:BorderStyle.SINGLE, size:4, color:GRID });
-    const allB = { top:line(), bottom:line(), left:line(), right:line() };
-    const noB = { top:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, bottom:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, left:{style:BorderStyle.NONE,size:0,color:'FFFFFF'}, right:{style:BorderStyle.NONE,size:0,color:'FFFFFF'} };
+    const para = (runs, o)=>{ o = o||{}; return new Paragraph({ bidirectional:true, alignment:o.align||AlignmentType.START, keepNext:!!o.keepNext, keepLines:true, pageBreakBefore:!!o.pageBreak,
+      spacing:{ before:o.before||0, after:o.after==null?60:o.after, line:o.line||264, lineRule:LineRuleType.AUTO }, border:o.border, shading:o.shading, indent:o.indent, children:Array.isArray(runs)?runs:[runs] }); };
+    const cellPara = (runs)=>para(runs, { align:AlignmentType.CENTER, after:0 });
+    let secNo = 0;
+    const heading = (title, pageBreak)=>para([t(`${++secNo})  ${title}`, { size:20, bold:true, color:NAVY })],
+      { before:160, after:120, line:240, keepNext:true, pageBreak, border:{ bottom:{ style:BorderStyle.SINGLE, size:8, space:3, color:RULE } } });
+    const bullet = (title)=>para([t('•  '+title, { size:22, bold:true, color:NAVY })], { before:80, after:60, keepNext:true, indent:{ start:270 } });
+    const sub = (title)=>para([t(title, { size:20, bold:true, color:NAVY })], { before:140, after:60, keepNext:true, indent:{ start:270 } });
+    const sub2 = (title, before)=>para([t(title, { bold:true, color:NAVY })], { before:before||80, after:40, keepNext:true });
+    const note = (text)=>para([t(text, { color:MUTE })], { before:60, after:60 });
+    const callout = (runs)=>para(runs, { before:40, after:120, shading:{ type:ShadingType.CLEAR, color:'auto', fill:CALLOUT }, border:{ right:{ style:BorderStyle.SINGLE, size:24, space:6, color:NAVY } } });
+    const line = (sz)=>({ style:BorderStyle.SINGLE, size:sz||4, color:GRID });
+    const allB = (sz)=>({ top:line(sz), bottom:line(sz), left:line(sz), right:line(sz) });
+    const nb = { style:BorderStyle.NONE, size:0, color:'FFFFFF' }, noB = { top:nb, bottom:nb, left:nb, right:nb };
+    const fill = (c)=>({ type:ShadingType.CLEAR, color:'auto', fill:c });
+    const widths = (fr)=>{ const sum = fr.reduce((a,b)=>a+b,0), cw = fr.map(x=>Math.round(x/sum*W)); cw[cw.length-1] += W-cw.reduce((a,b)=>a+b,0); return cw; };
+    const table = (cw, rows)=>new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cw, visuallyRightToLeft:true, layout:TableLayoutType.FIXED, alignment:AlignmentType.CENTER, rows });
 
+    // KPI cards: value / label / detail in one bordered light cell each (c.w = relative width)
     function kpiTable(cards){
-      const cw = Math.floor(W/cards.length);
-      return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cards.map(()=>cw), visuallyRightToLeft:true, layout:TableLayoutType.FIXED,
-        rows:[ new TableRow({ cantSplit:true, children:cards.map(c=>new TableCell({ width:{ size:cw, type:WidthType.DXA }, borders:{ ...allB, top:{ style:BorderStyle.SINGLE, size:24, color:TEAL } }, verticalAlign:VerticalAlign.CENTER,
-          shading:{ type:ShadingType.CLEAR, color:'auto', fill:'FFFFFF' }, margins:{ top:110, bottom:110, left:80, right:80 },
-          children:[ para([t(c.value,{ size:30, bold:true, color:TONE[c.color]||BLUE })],{ align:AlignmentType.CENTER, after:20 }),
-                     para([t(c.label,{ size:17, bold:true, color:NAVY })],{ align:AlignmentType.CENTER, after:20 }),
-                     para([t(c.sub||'',{ size:15, color:MUTE })],{ align:AlignmentType.CENTER, after:0 }) ] })) }) ] });
+      const cw = widths(cards.map(c=>c.w||1));
+      return table(cw, [ new TableRow({ cantSplit:true, children:cards.map((c,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB(6), verticalAlign:VerticalAlign.CENTER,
+        shading:fill(CARD), margins:{ top:90, bottom:90, left:80, right:80 },
+        children:[ cellPara([t(c.value, { bold:true, color:c.color||NAVY })]), cellPara([t(c.label, { bold:true, color:DARK })]) ].concat(c.sub ? [ cellPara([t(c.sub, { color:MUTE })]) ] : []) })) }) ]);
     }
-    // rows: [{cells:[...], total:bool, red:[colIdx]}]; widths = fractions
+    // rows: [{ cells:[text | [[text, {bold,color,size}], ...lines] ], total:bool }]; fr = relative widths. Counts dark, percentages muted.
+    const isPct = v=>/%$/.test(String(v));
     function dataTable(heads, rows, fr){
-      const sum = fr.reduce((a,b)=>a+b,0), cw = fr.map(x=>Math.round(x/sum*W));
-      const head = new TableRow({ tableHeader:true, cantSplit:true, children:heads.map((h,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
-        shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:60, bottom:60, left:50, right:50 },
-        children:[ para([t(h,{ size:16, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:0 }) ] })) });
-      const body = rows.map((r,ri)=>new TableRow({ cantSplit:true, children:r.cells.map((v,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB, verticalAlign:VerticalAlign.CENTER,
-        shading:{ type:ShadingType.CLEAR, color:'auto', fill: r.total ? TOTAL : (ri%2 ? ZEBRA2 : ZEBRA1) }, margins:{ top:35, bottom:35, left:50, right:50 },
-        children:[ para([t(v,{ size:16, bold: r.total || i===0, color: (r.red && r.red.indexOf(i)>=0) ? BADC : (r.total ? NAVY : INK) })],{ align:AlignmentType.CENTER, after:0 }) ] })) }));
-      return new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:cw, visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[head].concat(body) });
+      const cw = widths(fr);
+      const head = new TableRow({ tableHeader:true, cantSplit:true, children:heads.map((h,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB(), verticalAlign:VerticalAlign.CENTER,
+        shading:fill(NAVY), margins:{ top:70, bottom:70, left:70, right:70 }, children:[ cellPara([t(h, { size:17, bold:true, color:'FFFFFF' })]) ] })) });
+      const body = rows.map((r,ri)=>new TableRow({ cantSplit:true, children:r.cells.map((v,i)=>new TableCell({ width:{ size:cw[i], type:WidthType.DXA }, borders:allB(), verticalAlign:VerticalAlign.CENTER,
+        shading:fill(r.total ? TOTAL : (ri%2 ? ZEBRA : 'FFFFFF')), margins:{ top:50, bottom:50, left:70, right:70 },
+        children: Array.isArray(v) ? v.map(([txt, st])=>cellPara([t(txt, Object.assign({ size:17 }, st))]))
+          : [ cellPara([t(v, (isPct(v) && i>0) ? { size:16, color:MUTE, bold:false } : { size:17, bold: r.total || i===0, color:INK })]) ] })) }));
+      return table(cw, [head].concat(body));
     }
-    const redIf = v=>(v!=null && v>=50);
+    const over = (n, pct)=>[[ageN(n), { bold:true, color:n>0?BADC:INK }], [ageP(pct), { color:MUTE }]]; // overdue count (red) over its share
     function image(url){
       if(!url) return null;
-      const sz = AGE_IMG_SIZE.get(url) || [560, 250];
-      return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:sz[0], height:sz[1] }, type:'png' }) ], { align:AlignmentType.CENTER, before:40, after:60, plain:true });
+      const sz = AGE_IMG_SIZE.get(url) || [620, 270];
+      return para([ new ImageRun({ data:ageDataUrlBytes(url), transformation:{ width:sz[0], height:sz[1] }, type:'png' }) ], { align:AlignmentType.CENTER, before:100, after:80, line:240 });
     }
-    const pushAll = (arr, items)=>items.forEach(x=>arr.push(x));
     const push = (arr, ...items)=>items.forEach(x=>{ if(x) arr.push(x); });
 
     const children = [];
-    // ---- ARRIVE cover banner (navy, logo, teal rule) ----
-    const bn = { style:BorderStyle.NONE, size:0, color:NAVY };
-    const bannerB = { top:bn, bottom:bn, left:bn, right:bn };
-    const LOGO_W = 150, logoH = logo ? Math.round(LOGO_W*logo.h/logo.w) : 0;
-    const titleCell = new TableCell({ width:{ size:W-2600, type:WidthType.DXA }, borders:bannerB, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:260, bottom:260, left:200, right:300 }, children:[
-      para([t('التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',{ size:34, bold:true, color:'FFFFFF' })],{ after:100, plain:true }),
-      para([t(`الفترة: ${periodTxt} (حسب تاريخ استلام البيك أب)`,{ size:21, bold:true, color:TEAL })],{ after:60, plain:true }),
-      para([t(`تاريخ الإصدار: ${agePlainDate(ageIso(new Date()))}  |  قياس الشحنات المفتوحة حتى: ${asOfTxt}`,{ size:17, color:'CBD5E1' })],{ after:0, plain:true }) ] });
-    const logoCell = new TableCell({ width:{ size:2600, type:WidthType.DXA }, borders:bannerB, verticalAlign:VerticalAlign.CENTER, shading:{ type:ShadingType.CLEAR, color:'auto', fill:NAVY }, margins:{ top:200, bottom:200, left:200, right:200 },
-      children:[ logo ? para([ new ImageRun({ data:ageDataUrlBytes(logo.url), transformation:{ width:LOGO_W, height:logoH }, type:'png' }) ],{ align:AlignmentType.CENTER, after:0, plain:true }) : para([t('ARRIVE',{ bold:true, size:30, color:'FFFFFF' })],{ align:AlignmentType.CENTER, plain:true }) ] });
-    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W-2600,2600], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[titleCell, logoCell] }) ] }));
-    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ children:[ new TableCell({ width:{ size:W, type:WidthType.DXA }, borders:bannerB, shading:{ type:ShadingType.CLEAR, color:'auto', fill:TEAL }, children:[ para([t('',{ size:4 })],{ after:0, plain:true }) ] }) ] }) ] }));
+    // ---- title block: report title + period + dates, ARRIVE logo tile beside it ----
+    const LOGO_W = 1247;
+    children.push(table([W-LOGO_W, LOGO_W], [ new TableRow({ cantSplit:true, children:[
+      new TableCell({ width:{ size:W-LOGO_W, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER, children:[
+        cellPara([t('التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة', { size:30, bold:true, color:NAVY })]),
+        cellPara([t(`الفترة: ${periodTxt} (حسب تاريخ استلام البيك أب)`, { size:21, bold:true, color:DARK })]),
+        cellPara([t(`تاريخ القياس للشحنات المفتوحة: ${asOfTxt}  |  تاريخ الإصدار: ${agePlainDate(ageIso(new Date()))}`, { color:SLATE })]) ] }),
+      new TableCell({ width:{ size:LOGO_W, type:WidthType.DXA }, borders:noB, verticalAlign:VerticalAlign.CENTER, children:[
+        logo ? cellPara([ new ImageRun({ data:ageDataUrlBytes(logo), transformation:{ width:68, height:68 }, type:'png' }) ]) : cellPara([t('ARRIVE', { size:26, bold:true, color:NAVY })]) ] }) ] }) ]));
+
     // ---- 1. goal ----
-    pushAll(children, heading(1,'هدف التقرير'));
-    children.push(para([t('• يهدف هذا التقرير إلى ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم. يقيس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ويقارنها بمعيارين منفصلين: مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.')]));
-    children.push(para([t('ويهدف التقرير إلى تحقيق ما يلي:')]));
+    children.push(heading('هدف التقرير'));
+    children.push(para([t('•  يهدف هذا التقرير إلى ضبط أعمار الشحنات في ARRIVE وتحسين سرعة التسليم. يقيس المدة الفعلية لكل شحنة منذ استلامها من المرسل حتى آخر حالة لها، ويقارنها بمعيارين منفصلين: مدة السوق لكل مجموعة جغرافية، والمدة الداخلية المعتمدة في الشركة.')], { indent:{ start:270 } }));
+    children.push(para([t('ويهدف التقرير إلى تحقيق ما يلي:')], { after:40 }));
     ['قياس التزام كل مجموعة جغرافية بمدد التسليم والمرتجع، وتحديد الشحنات المتجاوزة لمدة السوق ولمدة الشركة مع فصل التسليم عن المرتجع.',
      'تحديد الفروع والمناطق التي تحتاج إلى إجراءات تصحيحية، والشحنات المفتوحة (قيد التشغيل والمرتجع المفتوح) التي تتطلب إغلاقًا أو تصعيدًا.',
      'إبراز الملاحظات الرقابية وجودة البيانات، وتوفير أداة ثابتة للمراجعة الدورية.'
-    ].forEach((x,i)=>children.push(para([t(`${i+1}.  ${x}`)],{ indent:{ start:240 } })));
+    ].forEach((x,i)=>children.push(para([t(`${i+1}. ${x}`)], { after:40, indent:{ start:270 } })));
 
     // ---- 2. executive summary ----
     const stdM = ageStdText('market', std), stdC = ageStdText('delivery', std), stdR = ageStdText('returns', std);
-    pushAll(children, heading(2,'الملخص التنفيذي'));
+    children.push(heading('الملخص التنفيذي'));
     children.push(bullet('التسليمات'));
     children.push(kpiTable([
-      { value:ageN(k.shipments), label:'إجمالي الشحنات', sub:'شحنة استُلمت من المرسل في الفترة' },
-      { value:ageP(k.deliveredPct), label:'التسليم الناجح', sub:`${ageN(k.delivered)} من ${ageN(k.shipments)} شحنة`, color:'E36C0A' },
-      { value:ageP(k.deliveredWithinMarketPct), label:`التسليم ضمن (${stdM})`, sub:`${ageN(k.deliveredWithinMarket)} من ${ageN(k.delivered)} مسلّمة`, color:'E36C0A' },
-      { value:ageP(k.deliveredWithinCompanyPct), label:`التسليم ضمن (${stdC})`, sub:`${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة`, color:'16A34A' },
-      { value:k.avgDeliveryAge==null ? '—' : `${ageD(k.avgDeliveryAge)} يوم`, label:'متوسط مدة التسليم', sub:`من استلام البيك أب حتى التسليم`, color:'1F4E79' } ]));
+      { w:1.4, value:ageN(k.shipments), label:'إجمالي الشحنات' },
+      { w:1.8, value:ageP(k.deliveredPct), label:'التسليم الناجح', sub:`${ageN(k.delivered)} من ${ageN(k.shipments)} شحنة`, color:OKC },
+      { w:3.2, value:ageP(k.deliveredWithinMarketPct), label:`التسليم ضمن (${stdM})`, sub:`${ageN(k.deliveredWithinMarket)} من ${ageN(k.delivered)} مسلّمة`, color:WARNC },
+      { w:3.5, value:ageP(k.deliveredWithinCompanyPct), label:`التسليم ضمن (${stdC})`, sub:`${ageN(k.deliveredWithinCompany)} من ${ageN(k.delivered)} مسلّمة`, color:OKC } ]));
     children.push(bullet('المرتجعات'));
-    children.push(kpiTable([
-      { value:ageP(k.returnsPct), label:'إجمالي المرتجعات', sub:`${ageN(k.returns)} من إجمالي الشحنات ${ageN(k.shipments)}` },
-      { value:ageP(k.returnClosedWithinPct), label:`مرتجع مغلق ضمن (${stdR})`, sub:`${ageN(k.returnClosedWithin)} من ${ageN(k.returns)} مرتجعًا`, color:'16A34A' },
-      { value:ageP(k.returnClosedOverPct), label:'مرتجعات مغلقة وتجاوزت المدة', sub:`${ageN(k.returnClosedOver)} من ${ageN(k.returns)} مرتجعًا`, color:'E36C0A' },
-      { value:ageP(k.returnOpenPct), label:'مرتجعات مفتوحة', sub:`${ageN(k.returnOpen)} من ${ageN(k.returns)} مرتجعًا`, color:'DC2626' },
-      { value:ageP(k.returnHoldPct), label:'مرتجعات معلقة', sub:`${ageN(k.returnHold)} من ${ageN(k.returns)} مرتجعًا`, color:'E36C0A' } ]));
-    children.push(bullet('الشحنات المفتوحة'));
-    children.push(kpiTable([
-      { value:ageN(k.open), label:'إجمالي المفتوحة', sub:`${ageN(k.inProgress)} قيد التشغيل + ${ageN(k.returnOpen)} مرتجع مفتوح + ${ageN(k.returnHold)} مرتجع معلق` },
-      { value:ageP(k.openOverduePct), label:'متجاوز لمعيار الشركة', sub:`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة`, color:'E36C0A' },
-      { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt}`, color:'E36C0A' } ]));
+    const retCards = [
+      { w:1.8, value:ageP(k.returnsPct), label:'إجمالي المرتجعات', sub:`${ageN(k.returns)} من إجمالي الشحنات ${ageN(k.shipments)}` },
+      { w:2.9, value:ageP(k.returnClosedWithinPct), label:`مرتجع مغلق ضمن (${stdR})`, sub:`${ageN(k.returnClosedWithin)} من ${ageN(k.returns)} مرتجعًا`, color:OKC },
+      { w:2.2, value:ageP(k.returnClosedOverPct), label:'مغلقة وتجاوزت المدة', sub:`${ageN(k.returnClosedOver)} من ${ageN(k.returns)} مرتجعًا`, color:BADC },
+      { w:1.8, value:ageP(k.returnOpenPct), label:'مرتجعات مفتوحة', sub:`${ageN(k.returnOpen)} من ${ageN(k.returns)} مرتجعًا`, color:INK } ];
+    if(hold) retCards.push({ w:1.8, value:ageP(k.returnHoldPct), label:'مرتجعات معلقة', sub:`${ageN(k.returnHold)} من ${ageN(k.returns)} مرتجعًا`, color:INK });
+    children.push(kpiTable(retCards));
 
     // ---- 3. geographic groups ----
-    pushAll(children, heading(3,'تحليل المجموعات الجغرافية'));
-    const letters = ['أ','ب','ج'];
+    children.push(heading('تحليل المجموعات الجغرافية'));
+    const letters = ['أ','ب','ج','د','هـ'];
     d.groups.concat(d.unassigned?[d.unassigned]:[]).forEach((g,gi)=>{
       const judged = g.delivery != null, K = g.kinds, dash = '—';
-      children.push(sub(`${letters[gi]||''}) ${g.name}`.replace(/^\) /,'')));
-      children.push(para([t(`إجمالي الشحنات: ${ageN(g.total)} (${ageP(g.sharePct)} من إجمالي الشركة)${judged?`  |  معيار السوق: ${ageDays(g.market)}  |  معيار الشركة للتسليم: ${ageDays(g.delivery)}  |  معيار الشركة للمرتجع: ${ageDays(g.returns)}`:''}`,{ size:17, color:MUTE })],{ keepNext:true }));
+      children.push(sub(`${letters[gi]||'•'}) ${g.name}`));
+      children.push(para([t(`إجمالي الشحنات: ${ageN(g.total)} (${ageP(g.sharePct)} من إجمالي الشركة)${judged?`  |  معيار السوق: ${ageDays(g.market)}  |  معيار الشركة للتسليم: ${ageDays(g.delivery)}  |  معيار الشركة للمرتجع: ${ageDays(g.returns)}`:''}`, { color:SLATE })], { keepNext:true }));
       const rows = [];
       [['delivered',true],['returnClosed',false],['returnOpen',false],['returnHold',false],['inProgress',false]].forEach(([kind,mk])=>{
         const a = K[kind]; if(!a.count) return;
-        rows.push({ cells:[ AGE_KIND_LABEL[kind]+(kind==='delivered'?'':' *'), ageN(a.count), (mk&&judged)?ageP(a.marketPct):dash, judged?ageP(a.companyPct):dash, judged?ageP(a.overPct):dash, ageD(a.avgAge) ], red: judged&&redIf(a.overPct)?[4]:[] });
+        rows.push({ cells:[ AGE_KIND_LABEL[kind]+(kind==='delivered'?'':' *'), ageN(a.count), (mk&&judged)?ageP(a.marketPct):dash, judged?ageP(a.companyPct):dash, judged?ageP(a.overPct):dash, ageD(a.avgAge) ] });
       });
       if(K.other.count) rows.push({ cells:[ AGE_KIND_LABEL.other, ageN(K.other.count), dash, dash, dash, dash ] });
       rows.push({ total:true, cells:[ 'الإجمالي', ageN(g.total), dash, judged?ageP(g.withinPct):dash, judged?ageP(g.overPct):dash, dash ] });
-      children.push(dataTable(['الحالة','عدد الشحنات', judged?`ضمن ${ageDays(g.market)}`:'ضمن معيار السوق', judged?`ضمن ${g.delivery} ${g.delivery<=10?'أيام':'يوم'} (للتسليم) / ${ageDays(g.returns)} (للمرتجع)`:'ضمن معيار الشركة','متجاوز المدة المطبقة','متوسط المدة / العمر (يوم)'], rows, [1.6,1.2,1.1,2.0,1.4,1.3]));
+      children.push(dataTable(['الحالة','عدد الشحنات', judged?`ضمن ${ageDays(g.market)}`:'ضمن معيار السوق', judged?`ضمن ${g.delivery} ${g.delivery<=10?'أيام':'يوم'} (للتسليم) / ${ageDays(g.returns)} (للمرتجع)`:'ضمن معيار الشركة','متجاوز المدة المطبقة','متوسط المدة / العمر (يوم)'], rows, [1.73,1.33,1.66,1.73,1.73,1.86]));
       if(judged) push(children, image(charts.dist[g.key]));
     });
-    children.push(para([t(`* العمر للشحنات المفتوحة (مرتجع مفتوح / قيد التشغيل) محسوب حتى تاريخ القياس: ${asOfTxt}. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.`,{ size:15, color:MUTE })]));
+    children.push(note(`* العمر للشحنات المفتوحة (مرتجع مفتوح / معلق / قيد التشغيل) محسوب حتى تاريخ القياس: ${asOfTxt}. العمر للمغلقة = تاريخ آخر حالة − تاريخ استلام البيك أب.`));
 
     // ---- 4. branches ----
-    pushAll(children, heading(4,'تحليل الفروع'));
-    ageBranchesIntro(d).forEach(([lbl, txt])=>children.push(para([t(lbl,{ bold:true }), t(txt)])));
+    children.push(heading('تحليل الفروع', true));
+    const intro = ageBranchesIntro(d);
+    if(intro.length) children.push(callout(intro.map(([lbl, txt], i)=>t((i?' ':'')+lbl+txt, { bold:true, color:NAVY }))));
     d.groups.forEach((g,gi)=>{
-      children.push(sub(`${gi+1}. ${g.name}`));
-      children.push(para([t('أ) التسليمات حسب الفرع',{ bold:true, size:19, color:NAVY })],{ keepNext:true }));
-      const dRows = ageBranchRowsDel(g).map(b=>{ const a=b.kinds.delivered; return { cells:[ageBranchLabel(b,g), ageN(a.count), ageP(a.marketPct), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge)], red:redIf(a.overPct)?[4]:[] }; });
+      children.push(sub(`${gi+1}.  ${g.name}`));
+      children.push(sub2('أ) التسليمات حسب الفرع'));
+      const dRows = ageBranchRowsDel(g).map(b=>{ const a=b.kinds.delivered; return { cells:[ageBranchLabel(b,g), ageN(a.count), ageP(a.marketPct), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge)] }; });
       const dt = g.kinds.delivered;
       if(dRows.length){
         dRows.push({ total:true, cells:['إجمالي المجموعة', ageN(dt.count), ageP(dt.marketPct), ageP(dt.companyPct), ageP(dt.overPct), ageD(dt.avgAge)] });
-        children.push(dataTable(['الفرع','مسلّمة',`ضمن معيار السوق (${ageDays(g.market)})`,`ضمن معيار الشركة (${ageDays(g.delivery)})`,'تجاوز معيار الشركة','متوسط مدة التسليم (يوم)'], dRows, [1.6,1,1.5,1.5,1.3,1.4]));
+        children.push(dataTable(['الفرع','مسلّمة',`ضمن معيار السوق (${ageDays(g.market)})`,`ضمن معيار الشركة (${ageDays(g.delivery)})`,'تجاوز معيار الشركة','متوسط مدة التسليم (يوم)'], dRows, [1.91,1.24,1.69,1.69,1.69,1.69]));
         push(children, image(charts.del[g.key]));
-      } else children.push(para([t('لا توجد تسليمات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
-      children.push(para([t('ب) المرتجعات حسب الفرع',{ bold:true, size:19, color:NAVY })],{ keepNext:true, before:100 }));
-      const rRows = ageBranchRowsRet(g).map(b=>{ const a=b.kinds.returnClosed; return { cells:[b.name, ageN(a.count), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge), ageN(b.kinds.returnOpen.count), ageN(b.kinds.returnHold.count)], red:redIf(a.overPct)?[3]:[] }; });
-      const rt = g.kinds.returnClosed;
+      } else children.push(note('لا توجد تسليمات في هذه المجموعة خلال الفترة.'));
+      children.push(sub2('ب) المرتجعات حسب الفرع', 120));
+      const gHold = g.kinds.returnHold.count > 0;
+      const rCells = (name, a, open, held)=>[name, ageN(a.count), ageP(a.companyPct), ageP(a.overPct), ageD(a.avgAge), ageN(open)].concat(gHold?[ageN(held)]:[]);
+      const rRows = ageBranchRowsRet(g).map(b=>({ cells:rCells(b.name, b.kinds.returnClosed, b.kinds.returnOpen.count, b.kinds.returnHold.count) }));
       if(rRows.length){
-        rRows.push({ total:true, cells:['إجمالي المجموعة', ageN(rt.count), ageP(rt.companyPct), ageP(rt.overPct), ageD(rt.avgAge), ageN(g.kinds.returnOpen.count), ageN(g.kinds.returnHold.count)] });
-        children.push(dataTable(['الفرع','مرتجعات مغلقة',`ضمن ${ageDays(g.returns)}`,'تجاوز المدة','متوسط المدة (يوم)','مرتجعات مفتوحة','مرتجعات معلقة'], rRows, [1.5,1.2,1.1,1.1,1.3,1.2,1.2]));
+        rRows.push({ total:true, cells:rCells('إجمالي المجموعة', g.kinds.returnClosed, g.kinds.returnOpen.count, g.kinds.returnHold.count) });
+        children.push(dataTable(['الفرع','مرتجعات مغلقة',`ضمن ${ageDays(g.returns)}`,'تجاوز المدة','متوسط المدة (يوم)','مرتجعات مفتوحة'].concat(gHold?['مرتجعات معلقة']:[]), rRows, [1.81,1.3,1.53,1.53,1.42,1.25].concat(gHold?[1.25]:[])));
         push(children, image(charts.ret[g.key]));
-      } else children.push(para([t('لا توجد مرتجعات في هذه المجموعة خلال الفترة.',{ color:MUTE })]));
+      } else children.push(note('لا توجد مرتجعات في هذه المجموعة خلال الفترة.'));
     });
+    children.push(note('نسب التسليم من المسلّمة في الفرع، ونسب المرتجعات من المرتجعات المغلقة في الفرع.'));
 
     // ---- 5. open shipments ----
-    pushAll(children, heading(5,'شحنات قيد التشغيل والمفتوحة'));
-    children.push(para([t(`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة (${ageP(k.openOverduePct)}) تجاوزت معيارها عند تاريخ القياس.`,{ bold:true }),
-      t(k.returnOpen>0 && k.minOpenReturnAge!=null ? ` المرتجعات المفتوحة (${ageN(k.returnOpen)}) أعمارها من ${k.minOpenReturnAge} إلى ${k.maxOpenReturnAge} يومًا.` : '')]));
+    children.push(heading('شحنات قيد التشغيل والمفتوحة', true));
+    children.push(callout([ t(`${ageN(k.openOverdue)} من ${ageN(k.open)} شحنة مفتوحة (${ageP(k.openOverduePct)}) تجاوزت معيارها عند تاريخ القياس.`, { bold:true, color:NAVY }),
+      t(k.returnOpen>0 && k.minOpenReturnAge!=null ? ` المرتجعات المفتوحة (${ageN(k.returnOpen)}) أعمارها من ${k.minOpenReturnAge} إلى ${k.maxOpenReturnAge} يومًا.` : '', { bold:true, color:NAVY }) ]));
     children.push(kpiTable([
-      { value:ageN(k.open), label:'إجمالي المفتوحة', sub:`${ageN(k.inProgress)} قيد التشغيل + ${ageN(k.returnOpen)} مرتجع مفتوح + ${ageN(k.returnHold)} مرتجع معلق` },
-      { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt} | قيد التشغيل ${ageD(k.avgInProgressAge)} | مرتجع ${ageD(k.avgOpenReturnAge)}`, color:'E36C0A' },
-      { value:ageP(k.inProgressOverduePct), label:'قيد التشغيل المتجاوز لمعيار الشركة', sub:`${ageN(k.inProgressOverdue)} من ${ageN(k.inProgress)}`, color:'E36C0A' },
-      { value:ageP(k.returnOpenOverduePct), label:'المرتجعات المفتوحة المتجاوزة', sub:`${ageN(k.returnOpenOverdue)} من ${ageN(k.returnOpen)}`, color:'DC2626' } ]));
+      { value:ageN(k.open), label:'إجمالي المفتوحة', sub:`${ageN(k.inProgress)} قيد التشغيل + ${ageN(k.returnOpen)} مرتجع مفتوح${hold?` + ${ageN(k.returnHold)} مرتجع معلق`:''}` },
+      { value:ageD(k.avgOpenAge), label:'متوسط العمر (يوم)', sub:`حتى ${asOfTxt} | قيد التشغيل ${ageD(k.avgInProgressAge)} | مرتجع ${ageD(k.avgOpenReturnAge)}` },
+      { value:ageP(k.inProgressOverduePct), label:'قيد التشغيل المتجاوز لمعيار الشركة', sub:`${ageN(k.inProgressOverdue)} من ${ageN(k.inProgress)}`, color:BADC },
+      { value:ageP(k.returnOpenOverduePct), label:'المرتجعات المفتوحة المتجاوزة', sub:`${ageN(k.returnOpenOverdue)} من ${ageN(k.returnOpen)}`, color:BADC } ]));
+    children.push(para([t('', { size:8 })], { after:60 }));
     const ob = d.open.byGroup, ot = ageSumOpen(ob);
-    const oRows = ob.map(g=>({ cells:[g.name, ageDays(g.delivery), ageN(g.inProgress), ageN(g.inProgressOver), ageP(g.inProgressOverPct), ageDays(g.returns), ageN(g.returnOpen), ageN(g.returnOpenOver), ageP(g.returnOpenOverPct), ageN(g.returnHold), ageN(g.returnHoldOver), ageP(g.returnHoldOverPct), ageN(g.overTotal), ageP(g.overPctOfOpen)], red:[redIf(g.inProgressOverPct)?4:-1, redIf(g.returnOpenOverPct)?8:-1, redIf(g.returnHoldOverPct)?11:-1] }));
-    oRows.push({ total:true, cells:['الإجمالي','—',ageN(ot.inProgress),ageN(ot.inProgressOver),ageP(ageRatio(ot.inProgressOver,ot.inProgress)),'—',ageN(ot.returnOpen),ageN(ot.returnOpenOver),ageP(ageRatio(ot.returnOpenOver,ot.returnOpen)),ageN(ot.returnHold),ageN(ot.returnHoldOver),ageP(ageRatio(ot.returnHoldOver,ot.returnHold)),ageN(ot.overTotal),ageP(ageRatio(ot.overTotal,ot.inProgress+ot.returnOpen+ot.returnHold))] });
-    children.push(dataTable(['المجموعة','معيار الشركة (قيد التشغيل)','قيد التشغيل','متجاوز المعيار','النسبة','معيار المرتجع','مرتجع مفتوح','متجاوز المدة','النسبة','مرتجع معلق','متجاوز المدة','النسبة','إجمالي المتجاوز','نسبة من المفتوح'], oRows, [1.4,1,.8,.8,.7,.8,.8,.8,.7,.8,.8,.7,.8,.8]));
-    children.push(para([t(`قيد التشغيل يقاس بمعيار الشركة للتسليم، والمرتجع المفتوح بمعيار الشركة للمرتجع. العمر = ${asOfTxt} − تاريخ استلام البيك أب. نسبة إجمالي المتجاوز من إجمالي المفتوحة في المجموعة.`,{ size:15, color:MUTE })],{ before:60 }));
+    const oRow = (name, del, ret, x, total, pctOpen)=>({ total, cells:[ name, del, ageN(x.inProgress), over(x.inProgressOver, ageRatio(x.inProgressOver, x.inProgress)), ret, ageN(x.returnOpen), over(x.returnOpenOver, ageRatio(x.returnOpenOver, x.returnOpen)) ]
+      .concat(hold ? [ ageN(x.returnHold), over(x.returnHoldOver, ageRatio(x.returnHoldOver, x.returnHold)) ] : []).concat([ over(x.overTotal, pctOpen) ]) });
+    const oRows = ob.map(g=>oRow(g.name, ageDays(g.delivery), ageDays(g.returns), g, false, g.overPctOfOpen));
+    oRows.push(oRow('الإجمالي', '—', '—', ot, true, ageRatio(ot.overTotal, ot.inProgress+ot.returnOpen+ot.returnHold)));
+    children.push(dataTable(['المجموعة','معيار الشركة (قيد التشغيل)','قيد التشغيل','متجاوز المعيار','معيار المرتجع','مرتجع مفتوح','متجاوز المدة'].concat(hold?['مرتجع معلق','متجاوز المدة']:[]).concat(['إجمالي المتجاوز']), oRows,
+      [1.81,1.36,1.08,1.25,1.02,1.08,1.25].concat(hold?[1.08,1.25]:[]).concat([1.25])));
+    children.push(note(`قيد التشغيل يقاس بمعيار الشركة للتسليم، والمرتجع المفتوح${hold?' والمعلق':''} بمعيار الشركة للمرتجع. العمر = ${asOfTxt} − تاريخ استلام البيك أب. نسبة إجمالي المتجاوز من إجمالي المفتوحة في المجموعة.`));
     push(children, image(charts.open));
-    children.push(sub('أعلى 5 فروع بالشحنات المفتوحة المتجاوزة'));
+    children.push(sub2('أعلى 5 فروع بالشحنات المفتوحة المتجاوزة'));
     if(d.open.topBranches.length){
-      children.push(dataTable(['الفرع','قيد التشغيل','المتجاوز منها','مرتجع مفتوح','المتجاوز منها','مرتجع معلق','المتجاوز منها','إجمالي المتجاوز','النسبة من مفتوح الفرع'],
-        d.open.topBranches.map(b=>({ cells:[b.branch, ageN(b.inProgress), ageN(b.inProgressOver), ageN(b.returnOpen), ageN(b.returnOpenOver), ageN(b.returnHold), ageN(b.returnHoldOver), ageN(b.overTotal), ageP(b.overPctOfOpen)] })), [1.5,.9,.9,.9,.9,.9,.9,1,1.1]));
-    } else children.push(para([t('لا توجد شحنات مفتوحة متجاوزة.',{ color:MUTE })]));
+      const red = n=>[[ageN(n), { bold:true, color:n>0?BADC:INK }]];
+      children.push(dataTable(['الفرع','قيد التشغيل','المتجاوز منها','مرتجع مفتوح','المتجاوز منها'].concat(hold?['مرتجع معلق','المتجاوز منها']:[]).concat(['إجمالي المتجاوز','النسبة من مفتوح الفرع']),
+        d.open.topBranches.map(b=>({ cells:[b.branch, ageN(b.inProgress), ageN(b.inProgressOver), ageN(b.returnOpen), ageN(b.returnOpenOver)].concat(hold?[ageN(b.returnHold), ageN(b.returnHoldOver)]:[]).concat([red(b.overTotal), [[ageP(b.overPctOfOpen), {}]]]) })),
+        [2.04,1.25,1.25,1.25,1.25].concat(hold?[1.25,1.25]:[]).concat([1.36,1.7])));
+    } else children.push(note('لا توجد شحنات مفتوحة متجاوزة.'));
 
     // ---- 6. control notes ----
-    pushAll(children, heading(6,'الملاحظات الرقابية وجودة البيانات'));
+    children.push(heading('الملاحظات الرقابية وجودة البيانات'));
     const q = d.dq, notes = [];
     if(d.skippedMonths && d.skippedMonths.length) notes.push(`لم تُقرأ شهور بسبب ضيق وقت التنفيذ: ${d.skippedMonths.join('، ')} — الأرقام لا تشملها.`);
     if(d.missingMonths && d.missingMonths.length) notes.push(`لم يتم العثور على بيانات للشهور: ${d.missingMonths.join('، ')} — الأرقام لا تشمل الفترة الواقعة فيها.`);
@@ -8670,26 +8766,19 @@ async function exportAgeDocx(){
     if(q.duplicatesRemoved) notes.push(`تم حذف ${ageN(q.duplicatesRemoved)} سجلًا مكررًا (نفس رقم البوليصة) مع الإبقاء على الأحدث.`);
     if(ageSourcesText(d)) notes.push('مصدر الأرقام — '+ageSourcesText(d)+'.');
     if(!notes.length) notes.push('لا توجد ملاحظات جودة بيانات حرجة: كل الشحنات صُنِّفت وحُسبت أعمارها.');
-    notes.forEach(n=>children.push(para([t('• '+n)])));
-    children.push(para([t(`منهجية الحساب: العمر بالأيام التقويمية (بدون الوقت). للمسلّمة والمرتجع المغلق = تاريخ آخر حالة − تاريخ استلام البيك أب؛ وللمفتوحة = تاريخ القياس (${asOfTxt}) − تاريخ البيك أب. «ضمن المدة» = العمر ≤ المعيار. الشهور المقروءة: ${(d.months||[]).join('، ')||'—'}. الأرقام باللون الأحمر في الجداول تعني نسبة 50% فأكثر في عمود التجاوز.`,{ size:15, color:MUTE })],{ before:80 }));
+    notes.forEach(n=>children.push(para([t('•  '+n)], { indent:{ start:270 } })));
+    children.push(note(`منهجية الحساب: العمر بالأيام التقويمية (بدون الوقت). للمسلّمة والمرتجع المغلق = تاريخ آخر حالة − تاريخ استلام البيك أب؛ وللمفتوحة = تاريخ القياس (${asOfTxt}) − تاريخ البيك أب. «ضمن المدة» = العمر ≤ المعيار. الشهور المقروءة: ${(d.months||[]).map(m=>AGE_MONTHS_AR[AGE_MONTHS_EN.indexOf(m)]||m).join('، ')||'—'}. الأرقام باللون الأحمر في جداول الشحنات المفتوحة = عدد الشحنات المتجاوزة لمعيارها.`));
 
-    // ---- closing banner ----
-    children.push(spacer(200));
-    children.push(new Table({ width:{ size:W, type:WidthType.DXA }, columnWidths:[W], visuallyRightToLeft:true, layout:TableLayoutType.FIXED, rows:[ new TableRow({ cantSplit:true, children:[ new TableCell({ width:{ size:W, type:WidthType.DXA }, borders:bannerB, shading:{ type:ShadingType.CLEAR, color:'auto', fill:BLUE }, margins:{ top:200, bottom:200, left:200, right:200 }, children:[
-      para([t('نهاية التقرير',{ size:26, bold:true, color:'FFFFFF' })],{ align:AlignmentType.CENTER, after:40, plain:true }),
-      para([t(`ARRIVE · لوحة المتابعة التشغيلية  |  ${periodTxt}`,{ size:17, color:'E6F4FF' })],{ align:AlignmentType.CENTER, after:0, plain:true }) ] }) ] }) ] }));
-
-    // ---- footer + document ----
+    // ---- footer + document (black page frame, as in the approved layout) ----
     const fr = { font:FONT, size:15, color:MUTE, rightToLeft:true };
-    const footer = new Footer({ children:[ new Paragraph({ bidirectional:true, alignment:AlignmentType.CENTER, border:{ top:{ style:BorderStyle.SINGLE, size:8, color:TEAL, space:4 } }, children:[
-      new TextRun({ text:`ARRIVE  |  التقرير الإداري والرقابي لعمر الشحنة  |  ${periodTxt}  |  صفحة `, ...fr }),
-      new TextRun({ children:[PageNumber.CURRENT], ...fr }),
-      new TextRun({ text:' من ', ...fr }),
-      new TextRun({ children:[PageNumber.TOTAL_PAGES], ...fr }) ] }) ] });
+    const footer = new Footer({ children:[ new Paragraph({ bidirectional:true, alignment:AlignmentType.CENTER, children:[
+      new TextRun({ text:'صفحة ', ...fr }), new TextRun({ children:[PageNumber.CURRENT], ...fr }), new TextRun({ text:' من ', ...fr }), new TextRun({ children:[PageNumber.TOTAL_PAGES], ...fr }) ] }) ] });
+    const frame = { style:BorderStyle.SINGLE, size:18, color:'auto', space:24 };
     const doc = new Document({
       creator:'ARRIVE', title:'التقرير الإداري والرقابي الموحد للتسليم والمرتجع لعمر الشحنة',
       styles:{ default:{ document:{ run:{ font:FONT, size:18, rightToLeft:true } } } },
-      sections:[{ properties:{ page:{ size:{ width:11906, height:16838 }, margin:{ top:700, right:907, bottom:1100, left:907, header:500, footer:454 } } },
+      sections:[{ properties:{ page:{ size:{ width:11906, height:16838 }, margin:{ top:850, right:907, bottom:1170, left:907, header:720, footer:640 },
+          borders:{ pageBorders:{ display:PageBorderDisplay.ALL_PAGES, offsetFrom:PageBorderOffsetFrom.PAGE }, pageBorderTop:frame, pageBorderBottom:frame, pageBorderLeft:frame, pageBorderRight:frame } } },
         footers:{ default:footer }, children }]
     });
     const blob = await Packer.toBlob(doc);
