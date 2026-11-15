@@ -3144,18 +3144,38 @@ function ageGetSnapshot_(month) {
   try { return JSON.parse(json); } catch (e) { console.log("[AGE SNAPSHOT INVALID] " + month + " " + String(e)); return null; }
 }
 
+// Removes every row of `month` (column A) from a summary tab, bottom-up in contiguous blocks.
+// If another execution changed the tab meanwhile (rows already deleted -> "Those rows are out of bounds"),
+// the tab is re-read and the delete is retried instead of failing the whole month build.
+function summaryDeleteMonthRows_(sh, month) {
+  var lastErr = null;
+  for (var attempt = 0; attempt < 3; attempt++) {
+    if (attempt) { try { SpreadsheetApp.flush(); } catch (eFlush) {} }
+    var last = sh.getLastRow();
+    if (last < 2) return;
+    var existing = sh.getRange(2, 1, last - 1, 1).getValues();
+    try {
+      var end = -1; // index of the bottom row of the block being collected
+      for (var r = existing.length - 1; r >= -1; r--) {
+        var hit = r >= 0 && String(existing[r][0] || "").trim() === month;
+        if (hit) { if (end < 0) end = r; continue; }
+        if (end >= 0) { sh.deleteRows(r + 3, end - r); end = -1; }
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.log("[SUMMARY DELETE RETRY] " + month + " attempt " + (attempt + 1) + ": " + String(e));
+    }
+  }
+  throw lastErr;
+}
+
 function ageSaveSnapshot_(month, snap) {
   var sh = ageSnapshotSheet_(MONTH_SOURCE[month]);
   var json = JSON.stringify(snap), chunks = [];
   for (var i = 0; i < json.length; i += AGE_SNAPSHOT_CHUNK) chunks.push(json.substring(i, i + AGE_SNAPSHOT_CHUNK));
   if (!chunks.length) chunks.push("{}");
-  var last = sh.getLastRow();
-  if (last >= 2) {
-    var existing = sh.getRange(2, 1, last - 1, 1).getValues();
-    for (var r = existing.length - 1; r >= 0; r--) {
-      if (String(existing[r][0] || "").trim() === month) sh.deleteRow(r + 2);
-    }
-  }
+  summaryDeleteMonthRows_(sh, month);
   var values = [];
   for (var c = 0; c < chunks.length; c++) values.push([month, AGE_SNAPSHOT_VERSION, snap.generatedAt, c, chunks.length, chunks[c]]);
   sh.getRange(sh.getLastRow() + 1, 1, values.length, 6).setValues(values);
@@ -4012,13 +4032,7 @@ function saveMonthSummary_(sheetName, summary) {
   }
   if (!chunks.length) chunks.push("{}");
 
-  var last = sh.getLastRow();
-  if (last >= 2) {
-    var existing = sh.getRange(2,1,last-1,1).getValues();
-    for (var r=existing.length-1;r>=0;r--) {
-      if (String(existing[r][0] || "").trim() === sheetName) sh.deleteRow(r+2);
-    }
-  }
+  summaryDeleteMonthRows_(sh, sheetName);
 
   var who = "";
   try { who = Session.getActiveUser().getEmail() || ""; } catch(e) {}
