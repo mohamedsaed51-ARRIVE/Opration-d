@@ -3145,6 +3145,12 @@ function ageGetSnapshot_(month) {
   try { return JSON.parse(json); } catch (e) { console.log("[AGE SNAPSHOT INVALID] " + month + " " + String(e)); return null; }
 }
 
+// Non-blocking notice for menu/editor runs. A modal alert() keeps the execution waiting for someone to press OK in
+// the spreadsheet window — run from the editor, that wait ends in «Exceeded maximum execution time» after the work is done.
+function summaryNotify_(msg) {
+  try { SpreadsheetApp.getActive().toast(String(msg), "ARRIVE Dashboard", 20); } catch (e) { /* no spreadsheet UI */ }
+}
+
 // Summary tabs (DASHBOARD_SUMMARY / AGE_SUMMARY): column A = month, column C = the save stamp of that month's chunk set.
 function summaryStampText_(v) { return (v instanceof Date) ? v.toISOString() : String(v == null ? "" : v); }
 
@@ -3407,7 +3413,7 @@ function listStatusNames() {
   var unknown = res.rows.filter(function (r) { return r.dashboard === DASH_KIND_LABELS_AR_.unknown; });
   Logger.log("STATUS NAMES (" + quarter + ") — months: " + res.monthsRead.join(", ") + "\n" +
     res.rows.map(function (r) { return r.month + " | " + r.status + " | " + r.count + " | " + r.dashboard + " | " + r.age; }).join("\n"));
-  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + STATUS_NAMES_SHEET + " — " + res.rows.length + " صفًا، منها " + unknown.length + " حالة «غير مصنف»."); } catch (e) { /* run from the editor: no UI */ }
+  try { summaryNotify_("تم. افتح تبويب " + STATUS_NAMES_SHEET + " — " + res.rows.length + " صفًا، منها " + unknown.length + " حالة «غير مصنف»."); } catch (e) { /* run from the editor: no UI */ }
   return { success: true, quarter: quarter, months: res.monthsRead, statuses: res.rows.length, unclassified: unknown.length };
 }
 
@@ -3492,7 +3498,7 @@ function listMissingSlaShipments() {
   Logger.log(JSON.stringify(res));
   var msg = complete ? ("اكتمل. تبويب " + MISSING_SLA_SHEET + " — " + total + " شحنة. حسب الشهر: " + JSON.stringify(done))
     : ("تم جزء من الشهور (" + processed.join("، ") + ")، المتبقي: " + (notReached.join("، ") || "—") + ". شغّل الدالة مرة أخرى للاستكمال.");
-  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { /* run from the editor: no UI */ }
+  try { summaryNotify_(msg); } catch (e) { /* run from the editor: no UI */ }
   return res;
 }
 
@@ -3543,7 +3549,7 @@ function profileColumns(monthName) {
   rows.forEach(function (r) { table.push(r); });
   out.getRange(1, 1, table.length, 5).setValues(table);
   out.setFrozenRows(1);
-  try { SpreadsheetApp.getUi().alert("تم. افتح تبويب " + COLUMN_PROFILE_SHEET + " (شهر " + picked + ")."); } catch (e) { /* editor run: no UI */ }
+  try { summaryNotify_("تم. افتح تبويب " + COLUMN_PROFILE_SHEET + " (شهر " + picked + ")."); } catch (e) { /* editor run: no UI */ }
   return { success: true, month: picked, columns: rows.length };
 }
 
@@ -3580,7 +3586,7 @@ function clearAllSummaries() {
   SpreadsheetApp.flush();
   var res = { success: true, cleared: cleared, next: "شغّل Rebuild ALL Summaries (أكثر من مرة) حتى allMonthsComplete: true" };
   Logger.log(JSON.stringify(res, null, 2));
-  try { SpreadsheetApp.getUi().alert("تم حذف كل الملخصات. الآن شغّل «Rebuild ALL Summaries» (كرّرها حتى تكتمل)."); } catch (e2) {}
+  try { summaryNotify_("تم حذف كل الملخصات. الآن شغّل «Rebuild ALL Summaries» (كرّرها حتى تكتمل)."); } catch (e2) {}
   return res;
 }
 
@@ -3592,7 +3598,7 @@ function rebuildAllSummaries() {
     ? "اكتملت إعادة بناء كل الملخصات ✔"
     : "تم بناء: " + (rep.monthsCompletedThisRun.join("، ") || "—") + " — الشهر التالي: " + rep.nextMonthToProcess + ". شغّل الدالة مرة أخرى.";
   Logger.log(msg);
-  try { SpreadsheetApp.getUi().alert(msg); } catch (e) {}
+  try { summaryNotify_(msg); } catch (e) {}
   return rep;
 }
 

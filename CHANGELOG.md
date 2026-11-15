@@ -5,6 +5,7 @@
 - `saveMonthSummary_` و`ageSaveSnapshot_`: الملخص الجديد يُكتب أولًا ثم يُحذف القديم (كان العكس)؛ خطأ من Google Sheets أو انتهاء وقت التنفيذ في منتصف الحفظ لا يترك الشهر «بدون ملخص محفوظ». القراءة (`getSavedMonthSummary_` / `ageGetSnapshot_`) تأخذ أحدث مجموعة محفوظة.
 - حذف صفوف الشهر القديمة صار بكتل متصلة (استدعاء واحد بدل استدعاء لكل صف) مع إعادة المحاولة عند «Those rows are out of bounds».
 - `buildAllDashboardSummaries` («Update All 12 Month Summaries») و`buildMissingMonthSnapshots` (`buildMissingSummaries`): لا تبدآن شهرًا جديدًا بعد 200 ثانية من بدء التنفيذ، وترجعان `notReached` و`complete` — شغّل الدالة مرة أخرى للباقي. كانتا بلا حد زمني فتُقطعان عند 6 دقائق في منتصف شهر.
+- رسائل نهاية التنفيذ (`rebuildAllSummaries` وغيرها) صارت إشعارًا غير حاجب (toast) بدل نافذة `alert`؛ النافذة كانت تُبقي التنفيذ منتظرًا حتى «Exceeded maximum execution time» بعد اكتمال العمل.
 - اختبار جديد: `tests/test_summary_save_safety.js`.
 - **يلزم نشر `Code.gs` (New version) ليعمل الإصلاح.**
 
