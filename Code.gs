@@ -3133,6 +3133,7 @@ function ageGetSnapshot_(month) {
     if (String(rows[i][0] || "").trim() === month && String(rows[i][1] || "") === AGE_SNAPSHOT_VERSION) parts.push(rows[i]);
   }
   if (!parts.length) return null;
+  parts = summaryNewestRows_(parts, 2);
   parts.sort(function (a, b) { return Number(a[3]) - Number(b[3]); });
   var expected = Number(parts[0][4]) || 0;
   if (!expected || parts.length !== expected) return null;
@@ -3144,20 +3145,34 @@ function ageGetSnapshot_(month) {
   try { return JSON.parse(json); } catch (e) { console.log("[AGE SNAPSHOT INVALID] " + month + " " + String(e)); return null; }
 }
 
-// Removes every row of `month` (column A) from a summary tab, bottom-up in contiguous blocks.
-// If another execution changed the tab meanwhile (rows already deleted -> "Those rows are out of bounds"),
-// the tab is re-read and the delete is retried instead of failing the whole month build.
-function summaryDeleteMonthRows_(sh, month) {
+// Summary tabs (DASHBOARD_SUMMARY / AGE_SUMMARY): column A = month, column C = the save stamp of that month's chunk set.
+function summaryStampText_(v) { return (v instanceof Date) ? v.toISOString() : String(v == null ? "" : v); }
+
+// Of all the chunk rows of one month, keep only the NEWEST saved set (largest stamp). A save writes the new set
+// first and deletes the old one afterwards, so two sets can coexist for a moment (or stay, if the run was cut).
+function summaryNewestRows_(rows, stampCol) {
+  var best = "";
+  for (var i = 0; i < rows.length; i++) { var st = summaryStampText_(rows[i][stampCol]); if (st > best) best = st; }
+  var out = [];
+  for (var j = 0; j < rows.length; j++) if (summaryStampText_(rows[j][stampCol]) === best) out.push(rows[j]);
+  return out;
+}
+
+// Deletes rows of `month` from a summary tab, bottom-up in contiguous blocks (one call per block, not per row):
+// keepNewest=false -> only rows already carrying `stamp`; keepNewest=true -> every row EXCEPT those carrying `stamp`.
+// If another execution changed the tab meanwhile ("Those rows are out of bounds"), the tab is re-read and retried.
+function summaryDeleteMonthRows_(sh, month, stamp, keepNewest) {
   var lastErr = null;
   for (var attempt = 0; attempt < 3; attempt++) {
     if (attempt) { try { SpreadsheetApp.flush(); } catch (eFlush) {} }
     var last = sh.getLastRow();
     if (last < 2) return;
-    var existing = sh.getRange(2, 1, last - 1, 1).getValues();
+    var existing = sh.getRange(2, 1, last - 1, 3).getValues();
     try {
       var end = -1; // index of the bottom row of the block being collected
       for (var r = existing.length - 1; r >= -1; r--) {
-        var hit = r >= 0 && String(existing[r][0] || "").trim() === month;
+        var hit = r >= 0 && String(existing[r][0] || "").trim() === month &&
+          ((summaryStampText_(existing[r][2]) === stamp) !== !!keepNewest);
         if (hit) { if (end < 0) end = r; continue; }
         if (end >= 0) { sh.deleteRows(r + 3, end - r); end = -1; }
       }
@@ -3170,16 +3185,23 @@ function summaryDeleteMonthRows_(sh, month) {
   throw lastErr;
 }
 
+// Batch builders must never START a month they cannot finish: a month needs up to ~2 minutes (read + save + age
+// summary) and Apps Script kills the run at 6 minutes.
+var SUMMARY_LOOP_START_BUDGET_MS = 200000;
+
 function ageSaveSnapshot_(month, snap) {
   var sh = ageSnapshotSheet_(MONTH_SOURCE[month]);
   var json = JSON.stringify(snap), chunks = [];
   for (var i = 0; i < json.length; i += AGE_SNAPSHOT_CHUNK) chunks.push(json.substring(i, i + AGE_SNAPSHOT_CHUNK));
   if (!chunks.length) chunks.push("{}");
-  summaryDeleteMonthRows_(sh, month);
+  // New set is written FIRST and the previous one removed after — a failure in between never leaves the month without a summary.
+  var stamp = summaryStampText_(snap.generatedAt || new Date().toISOString());
+  summaryDeleteMonthRows_(sh, month, stamp, false); // only a leftover set with this very stamp (would otherwise duplicate)
   var values = [];
-  for (var c = 0; c < chunks.length; c++) values.push([month, AGE_SNAPSHOT_VERSION, snap.generatedAt, c, chunks.length, chunks[c]]);
+  for (var c = 0; c < chunks.length; c++) values.push([month, AGE_SNAPSHOT_VERSION, stamp, c, chunks.length, chunks[c]]);
   sh.getRange(sh.getLastRow() + 1, 1, values.length, 6).setValues(values);
   SpreadsheetApp.flush();
+  try { summaryDeleteMonthRows_(sh, month, stamp, true); } catch (eOld) { console.log("[AGE SNAPSHOT OLD ROWS LEFT] " + month + " " + String(eOld)); }
   bumpSnapshotGenerationStamp_(); // invalidates cached age-report results (their cache key includes this stamp)
   return chunks.length;
 }
@@ -4001,6 +4023,7 @@ function getSavedMonthSummary_(sheetName) {
     }
   }
   if (!matches.length) return null;
+  matches = summaryNewestRows_(matches, 2);
   matches.sort(function(a,b){ return Number(a[5]) - Number(b[5]); });
   var expected = Number(matches[0][6]) || 0;
   if (!expected || matches.length !== expected) return null;
@@ -4032,8 +4055,6 @@ function saveMonthSummary_(sheetName, summary) {
   }
   if (!chunks.length) chunks.push("{}");
 
-  summaryDeleteMonthRows_(sh, sheetName);
-
   var who = "";
   try { who = Session.getActiveUser().getEmail() || ""; } catch(e) {}
   var now = new Date().toISOString();
@@ -4051,8 +4072,11 @@ function saveMonthSummary_(sheetName, summary) {
       who
     ]);
   }
+  // New set is written FIRST and the previous one removed after — a failure in between (Sheets error, timeout)
+  // never leaves the month without a summary; readers always take the newest set (summaryNewestRows_).
   sh.getRange(sh.getLastRow()+1,1,values.length,9).setValues(values);
   SpreadsheetApp.flush();
+  try { summaryDeleteMonthRows_(sh, sheetName, now, true); } catch (eOld) { console.log("[PERSISTENT SUMMARY OLD ROWS LEFT] " + sheetName + " " + String(eOld)); }
   console.log("[PERSISTENT SUMMARY SAVED] " + JSON.stringify({month:sheetName,quarter:quarter,chunks:chunks.length,totalRows:summary.totalRows || 0}));
   bumpSnapshotGenerationStamp_(); // invalidate every cached dashboard result (single-month AND All Months) — see Bug #6
   return { success:true, month:sheetName, quarter:quarter, chunks:chunks.length };
@@ -4114,9 +4138,16 @@ function buildQuarterSummaries(quarter) {
 }
 
 function buildAllDashboardSummaries() {
-  var out = [];
-  for (var i=0;i<MONTH_ORDER.length;i++) out.push(buildAndSaveMonthSummary(MONTH_ORDER[i]));
-  return {success:true,results:out};
+  // NOTE: 12 months never fit one 6-minute run — this stops before the limit and reports what is left.
+  // Prefer «Rebuild ALL Summaries» (resumable) for a full rebuild.
+  var out = [], notReached = [], t0 = new Date().getTime();
+  for (var i=0;i<MONTH_ORDER.length;i++) {
+    if (new Date().getTime() - t0 > SUMMARY_LOOP_START_BUDGET_MS) { notReached.push(MONTH_ORDER[i]); continue; }
+    try { out.push(buildAndSaveMonthSummary(MONTH_ORDER[i])); }
+    catch (err) { out.push({ success:false, month: MONTH_ORDER[i], error: String(err && err.message ? err.message : err) }); }
+  }
+  if (notReached.length) console.log("[SUMMARY LOOP STOPPED — TIME BUDGET] not reached: " + notReached.join(", "));
+  return {success:true,results:out,notReached:notReached,complete:!notReached.length};
 }
 
 // Builds a snapshot ONLY for months that don't already have one usable
@@ -4143,6 +4174,7 @@ function buildMissingMonthSnapshots() {
   // numbers until this compatibility target changed too. Now compares
   // against the actual persisted configuration instead.
   var persisted = getPersistedSlaSettings_();
+  var notReached = [], t0 = new Date().getTime();
   for (var i = 0; i < MONTH_ORDER.length; i++) {
     var month = MONTH_ORDER[i];
     var existing;
@@ -4163,10 +4195,13 @@ function buildMissingMonthSnapshots() {
       }
     }
     if (!needsBuild) { out.push({ month: month, skipped: true, reason: skipReason }); continue; }
+    // never start a month that cannot finish before the 6-minute limit — run the function again for the rest
+    if (new Date().getTime() - t0 > SUMMARY_LOOP_START_BUDGET_MS) { notReached.push(month); continue; }
     try { out.push(buildAndSaveMonthSummary(month)); }
     catch (err) { out.push({ success:false, month: month, error: String(err && err.message ? err.message : err) }); }
   }
-  return { success: true, results: out };
+  if (notReached.length) console.log("[SUMMARY LOOP STOPPED — TIME BUDGET] not reached (run again): " + notReached.join(", "));
+  return { success: true, results: out, notReached: notReached, complete: !notReached.length };
 }
 
 // ============================================================
