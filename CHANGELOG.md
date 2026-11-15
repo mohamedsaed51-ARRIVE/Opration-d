@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — حفظ الملخصات: لا يضيع ملخص شهر عند انقطاع التحديث
+### Fixed
+- `saveMonthSummary_` و`ageSaveSnapshot_`: الملخص الجديد يُكتب أولًا ثم يُحذف القديم (كان العكس)؛ خطأ من Google Sheets أو انتهاء وقت التنفيذ في منتصف الحفظ لا يترك الشهر «بدون ملخص محفوظ». القراءة (`getSavedMonthSummary_` / `ageGetSnapshot_`) تأخذ أحدث مجموعة محفوظة.
+- حذف صفوف الشهر القديمة صار بكتل متصلة (استدعاء واحد بدل استدعاء لكل صف) مع إعادة المحاولة عند «Those rows are out of bounds».
+- `buildAllDashboardSummaries` («Update All 12 Month Summaries») و`buildMissingMonthSnapshots` (`buildMissingSummaries`): لا تبدآن شهرًا جديدًا بعد 200 ثانية من بدء التنفيذ، وترجعان `notReached` و`complete` — شغّل الدالة مرة أخرى للباقي. كانتا بلا حد زمني فتُقطعان عند 6 دقائق في منتصف شهر.
+- رسائل نهاية التنفيذ (`rebuildAllSummaries` وغيرها) صارت إشعارًا غير حاجب (toast) بدل نافذة `alert`؛ النافذة كانت تُبقي التنفيذ منتظرًا حتى «Exceeded maximum execution time» بعد اكتمال العمل.
+- اختبار جديد: `tests/test_summary_save_safety.js`.
+- **يلزم نشر `Code.gs` (New version) ليعمل الإصلاح.**
+
 ## [Unreleased] — تقرير عمر الشحنة (Word) بتخطيط التقرير المعتمد
 ### Changed
 - `exportAgeDocx` في `index.html`: ملف Word صار بنفس شكل التقرير المرجعي — إطار أسود للصفحة، ترويسة بيضاء (العنوان والفترة وتاريخ القياس/الإصدار في المنتصف وشعار ARRIVE المربع)، عناوين أقسام مرقّمة بخط سفلي أخضر، كروت فاتحة (القيمة/البند/التفصيل)، جداول بترويسة كحلية `1F3A5F` وصفوف متبادلة وصف إجمالي مظلل، فقرة خلاصة مظللة في قسمي الفروع والمفتوحة، الخط Arial.
