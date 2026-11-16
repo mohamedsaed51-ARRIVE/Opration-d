@@ -27,6 +27,7 @@ for (let i = 0; i < 40; i++) oct.push(['A' + i, 'الهرم', 'تسليم ناج
 const sheets = { October: memSheet(oct) }, store = { AGE_SUMMARY: memSheet([]) };
 const props = {};
 const sb = { console, Date, Math, JSON, Object, Number, String, isFinite, Array,
+  LockService: { getScriptLock: () => ({ hasLock: () => false, waitLock() {}, releaseLock() {} }) },
   Utilities: { computeDigest: (a, s) => Array.from(String(s)).slice(0, 8).map(c => c.charCodeAt(0) & 127), DigestAlgorithm: { MD5: 1 } },
   CacheService: { getScriptCache: () => ({ get: () => null, put: () => {}, getAll: () => ({}), putAll: () => {} }) },
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; }, deleteProperty: k => { delete props[k]; } }) },

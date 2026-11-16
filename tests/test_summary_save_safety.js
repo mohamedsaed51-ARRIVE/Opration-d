@@ -16,7 +16,7 @@ const ss = { getSheetByName(n) { return sheets[n] || null; }, insertSheet(n) { r
 let clock = Date.parse('2026-11-15T10:00:00Z');
 class FakeDate extends Date { constructor(...a) { if (a.length) super(...a); else super(clock += 1000); } }
 const props = {};
-const sandbox = { console: { log() {} }, Date: FakeDate, Math, JSON, Object, Number, String, isFinite, Utilities: {}, CacheService: {},
+const sandbox = { console: { log() {} }, Date: FakeDate, LockService: { held: false, taken: 0, busy: false, getScriptLock() { const L = this; return { hasLock() { return L.held; }, waitLock() { if (L.busy) throw new Error('lock timeout'); L.held = true; L.taken++; }, tryLock() { L.held = true; return true; }, releaseLock() { L.held = false; } }; } }, Math, JSON, Object, Number, String, isFinite, Utilities: {}, CacheService: {},
   Session: { getActiveUser() { return { getEmail() { return ''; } }; } },
   PropertiesService: { getScriptProperties() { return { getProperty(k) { return props[k] || null; }, setProperty(k, v) { props[k] = v; } }; } },
   SpreadsheetApp: { openById() { return ss; }, flush() {} } };
@@ -71,6 +71,20 @@ sandbox.ageSaveSnapshot_('August', snap('a3', '2026-11-15T12:00:00.000Z'));
 check('age: re-save replaces the old set', readAge().tag === 'a3' && monthRows(ash, 'August') === an, monthRows(ash, 'August'));
 sandbox.ageSaveSnapshot_('August', snap('a4', '2026-11-15T12:00:00.000Z'));
 check('age: same stamp saved twice does not duplicate', readAge().tag === 'a4' && monthRows(ash, 'August') === an, monthRows(ash, 'August'));
+
+// concurrent saves: every save runs under the script lock, and a busy lock fails the save without touching the tab
+const LS = sandbox.LockService, takenBefore = LS.taken;
+sandbox.saveMonthSummary_('August', big('v6'));
+check('save takes and releases the script lock', LS.taken === takenBefore + 1 && LS.held === false);
+LS.busy = true; let lockErr = '';
+const rowsBefore = sh.rows.length;
+try { sandbox.saveMonthSummary_('August', big('v7')); } catch (e) { lockErr = String(e.message); }
+LS.busy = false;
+check('busy lock: save refused, tab untouched, previous summary kept', !!lockErr && sh.rows.length === rowsBefore && get('August').tag === 'v6', lockErr);
+LS.held = true; // this execution already holds the lock (batch rebuild) -> no re-acquire, no early release
+sandbox.saveMonthSummary_('August', big('v8'));
+check('lock already held by this execution: save runs and the lock stays held', get('August').tag === 'v8' && LS.held === true && LS.taken === takenBefore + 1);
+LS.held = false;
 
 // batch loops stop before the 6-minute limit instead of starting a month they cannot finish
 let built = [];

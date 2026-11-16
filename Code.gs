@@ -3234,6 +3234,20 @@ function summaryDeleteMonthRows_(sh, month, stamp, keepNewest) {
   throw lastErr;
 }
 
+// Two executions saving to the same summary tab at the same time (the dashboard's «تحديث الداش بورد» button, the
+// spreadsheet menu, the editor) corrupt each other: summaryDeleteMonthRows_ reads the tab and then deletes by row
+// NUMBER, so rows shifted meanwhile by the other execution make it delete another month's chunks (that month then
+// reads as «لا يوجد ملخص محفوظ»). Every write+delete on a summary tab therefore runs under the script lock.
+var SUMMARY_SAVE_LOCK_WAIT_MS = 90000;
+function summaryWithSaveLock_(fn) {
+  var lock = LockService.getScriptLock();
+  if (lock.hasLock()) return fn(); // this execution already holds it (e.g. rebuildNextThreeMonthSummaryBatch)
+  try { lock.waitLock(SUMMARY_SAVE_LOCK_WAIT_MS); }
+  catch (e) { throw new Error("تبويب الملخصات مشغول بتحديث آخر يعمل الآن — أعد المحاولة بعد دقيقة."); }
+  try { return fn(); }
+  finally { try { SpreadsheetApp.flush(); } catch (eFlush) {} try { lock.releaseLock(); } catch (eRel) {} }
+}
+
 // Batch builders must never START a month they cannot finish: a month needs up to ~2 minutes (read + save + age
 // summary) and Apps Script kills the run at 6 minutes.
 var SUMMARY_LOOP_START_BUDGET_MS = 200000;
@@ -3245,12 +3259,14 @@ function ageSaveSnapshot_(month, snap) {
   if (!chunks.length) chunks.push("{}");
   // New set is written FIRST and the previous one removed after — a failure in between never leaves the month without a summary.
   var stamp = summaryStampText_(snap.generatedAt || new Date().toISOString());
-  summaryDeleteMonthRows_(sh, month, stamp, false); // only a leftover set with this very stamp (would otherwise duplicate)
   var values = [];
   for (var c = 0; c < chunks.length; c++) values.push([month, AGE_SNAPSHOT_VERSION, stamp, c, chunks.length, chunks[c]]);
-  sh.getRange(sh.getLastRow() + 1, 1, values.length, 6).setValues(values);
-  SpreadsheetApp.flush();
-  try { summaryDeleteMonthRows_(sh, month, stamp, true); } catch (eOld) { console.log("[AGE SNAPSHOT OLD ROWS LEFT] " + month + " " + String(eOld)); }
+  summaryWithSaveLock_(function () {
+    summaryDeleteMonthRows_(sh, month, stamp, false); // only a leftover set with this very stamp (would otherwise duplicate)
+    sh.getRange(sh.getLastRow() + 1, 1, values.length, 6).setValues(values);
+    SpreadsheetApp.flush();
+    try { summaryDeleteMonthRows_(sh, month, stamp, true); } catch (eOld) { console.log("[AGE SNAPSHOT OLD ROWS LEFT] " + month + " " + String(eOld)); }
+  });
   bumpSnapshotGenerationStamp_(); // invalidates cached age-report results (their cache key includes this stamp)
   return chunks.length;
 }
@@ -4123,9 +4139,11 @@ function saveMonthSummary_(sheetName, summary) {
   }
   // New set is written FIRST and the previous one removed after — a failure in between (Sheets error, timeout)
   // never leaves the month without a summary; readers always take the newest set (summaryNewestRows_).
-  sh.getRange(sh.getLastRow()+1,1,values.length,9).setValues(values);
-  SpreadsheetApp.flush();
-  try { summaryDeleteMonthRows_(sh, sheetName, now, true); } catch (eOld) { console.log("[PERSISTENT SUMMARY OLD ROWS LEFT] " + sheetName + " " + String(eOld)); }
+  summaryWithSaveLock_(function () {
+    sh.getRange(sh.getLastRow()+1,1,values.length,9).setValues(values);
+    SpreadsheetApp.flush();
+    try { summaryDeleteMonthRows_(sh, sheetName, now, true); } catch (eOld) { console.log("[PERSISTENT SUMMARY OLD ROWS LEFT] " + sheetName + " " + String(eOld)); }
+  });
   console.log("[PERSISTENT SUMMARY SAVED] " + JSON.stringify({month:sheetName,quarter:quarter,chunks:chunks.length,totalRows:summary.totalRows || 0}));
   bumpSnapshotGenerationStamp_(); // invalidate every cached dashboard result (single-month AND All Months) — see Bug #6
   return { success:true, month:sheetName, quarter:quarter, chunks:chunks.length };
