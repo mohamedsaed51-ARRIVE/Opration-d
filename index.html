@@ -960,7 +960,7 @@ tr.age-total td{background:var(--arrive-light-blue) !important; font-weight:var(
         <button class="btn-primary" id="ageDocxBtn" type="button" disabled><i class="fa-solid fa-file-word" aria-hidden="true"></i> تصدير التقرير (Word)</button>
         <button class="btn-secondary" id="ageXlsxBtn" type="button" disabled><i class="fa-solid fa-file-excel" aria-hidden="true"></i> تصدير Excel</button>
         <button class="btn-secondary" id="agePrintBtn" type="button" disabled><i class="fa-solid fa-print" aria-hidden="true"></i> طباعة / PDF</button>
-        <button class="btn-ghost" id="ageClearDatesBtn" type="button" title="الرجوع لفترة الشهر المختار في الداشبورد"><i class="fa-solid fa-eraser" aria-hidden="true"></i> مسح التواريخ</button>
+        <button class="btn-ghost" id="ageClearDatesBtn" type="button" title="الرجوع للفترة الافتراضية (آخر 30 يوم)"><i class="fa-solid fa-eraser" aria-hidden="true"></i> مسح التواريخ</button>
         <button class="btn-secondary" id="ageCmpToggle" type="button" aria-expanded="false"><i class="fa-solid fa-code-compare" aria-hidden="true"></i> مقارنة بين فترتين</button>
       </div>
       <div class="age-cmp-box" id="ageCmpBox" hidden>
@@ -8136,11 +8136,13 @@ function renderShipAgeTab(){
   const key = ageSelKey(ageSelection());
   if(AGE.data && AGE.key === key) return; // already showing this period; DOM persists across tab switches
   if(AGE.failKey === key) return;
-  // no period chosen yet: wait for the user to pick dates and press «بحث» (the report is independent of the dashboard months)
+  // no period chosen yet: default to the last month (last 30 days up to today) and run automatically — no need to press «بحث»
   const ld = ageLocalDates();
   if(!ld.from && !ld.to){
-    if(!AGE.data) document.getElementById('ageReport').innerHTML = '<div class="card age-loading"><i class="fa-solid fa-calendar-days" aria-hidden="true"></i>اختر «من تاريخ» و«إلى تاريخ» ثم اضغط «بحث» لعرض بيانات هذه المدة فقط، بغض النظر عن الشهور المحددة في الداشبورد.</div>';
-    return;
+    const to = new Date(), from = new Date(); from.setDate(from.getDate() - 30);
+    document.getElementById('ageFrom').value = ageIso(from);
+    document.getElementById('ageTo').value = ageIso(to);
+    if(AGE.failKey === ageSelKey(ageSelection())) return;
   }
   runAgeReport(false);
 }
