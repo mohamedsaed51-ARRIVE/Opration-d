@@ -6131,14 +6131,15 @@ async function custChangeRows(mode){
   return pairs.map(({ m, prev })=>{
     const hasCur = cmpHasData(sums[m]), hasPrev = !!(prev && prev !== m && cmpHasData(sums[prev]));
     const cur = custMapOf(sums[m]);
-    const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, stoppedShipments:0, stoppedDelivered:0, prevTotal:0, year:custYearOf(sums[m]), prevYear:custYearOf(sums[prev]) };
+    const o = { month:m, prev, hasCur, hasPrev, active:cur.size, newList:[], stoppedList:[], newShipments:0, newDelivered:0, newShipCost:0, stoppedShipments:0, stoppedDelivered:0, stoppedShipCost:0, costOk:true, prevTotal:0, year:custYearOf(sums[m]), prevYear:custYearOf(sums[prev]) };
     if(!hasCur || !hasPrev) return o;
     const pm = custMapOf(sums[prev]);
-    cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:n, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
-    pm.forEach((r,n)=>{ o.prevTotal += r.shipments; if(!cur.has(n)) o.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, deliveryRate:r.deliveryRate }); });
+    cur.forEach((r,n)=>{ if(!pm.has(n)) o.newList.push({ name:n, month:m, prev, shipments:r.shipments, delivered:r.delivered||0, shipCost:r.deliveredShipCost, deliveryRate:r.deliveryRate, successRate:r.successRate }); });
+    pm.forEach((r,n)=>{ o.prevTotal += r.shipments; if(!cur.has(n)) o.stoppedList.push({ name:n, month:m, prevMonth:prev, shipments:r.shipments, delivered:r.delivered||0, shipCost:r.deliveredShipCost, deliveryRate:r.deliveryRate }); });
     o.newList.sort((a,b)=>b.shipments-a.shipments); o.stoppedList.sort((a,b)=>b.shipments-a.shipments);
-    o.newList.forEach(x=>{ o.newShipments += x.shipments; o.newDelivered += x.delivered; });
-    o.stoppedList.forEach(x=>{ o.stoppedShipments += x.shipments; o.stoppedDelivered += x.delivered; });
+    // مصاريف الشحن = تكلفة الشحن للشحنات المسلّمة (التسليم الناجح) فقط. الملخصات المحفوظة قبل هذا التعديل لا تحمل الحقل — فلا تُعرض أرقام ناقصة.
+    o.newList.forEach(x=>{ o.newShipments += x.shipments; o.newDelivered += x.delivered; if(typeof x.shipCost === 'number') o.newShipCost += x.shipCost; else o.costOk = false; });
+    o.stoppedList.forEach(x=>{ o.stoppedShipments += x.shipments; o.stoppedDelivered += x.delivered; if(typeof x.shipCost === 'number') o.stoppedShipCost += x.shipCost; else o.costOk = false; });
     return o;
   });
 }
@@ -6202,12 +6203,14 @@ async function renderCustChangeTab(mode){
     const dash = '<td>—</td>';
     const cl = (kind, n, month)=> n>0 ? `<button type="button" class="cust-count-link" data-cust-list="${kind}" data-cust-month="${month}" title="اضغط لعرض أسماء العملاء">${fmtInt(n)}</button>` : fmtInt(n);
     const trs = rows.map(r=>{
-      if(!(r.hasCur && r.hasPrev)) return `<tr><td>${mdn(r.month)}</td><td>${r.prev?mdn(r.prev):'—'}</td><td>${r.hasCur?fmtInt(r.active):'—'}</td>${dash.repeat(7)}</tr>`;
-      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${cl('new',r.newList.length,r.month)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${cl('stopped',r.stoppedList.length,r.month)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${sg(r.newList.length - r.stoppedList.length)}</td><td>${sg(r.newShipments - r.stoppedShipments)}</td></tr>`;
+      if(!(r.hasCur && r.hasPrev)) return `<tr><td>${mdn(r.month)}</td><td>${r.prev?mdn(r.prev):'—'}</td><td>${r.hasCur?fmtInt(r.active):'—'}</td>${dash.repeat(9)}</tr>`;
+      return `<tr><td>${mdn(r.month)}</td><td>${mdn(r.prev)}</td><td>${fmtInt(r.active)}</td><td>${cl('new',r.newList.length,r.month)}</td><td>${fmtInt(r.newShipments)}</td><td>${fmtInt(r.newDelivered)}</td><td>${r.costOk?fmtInt(r.newShipCost):'—'}</td><td>${cl('stopped',r.stoppedList.length,r.month)}</td><td>${fmtInt(r.stoppedShipments)}</td><td>${r.costOk?fmtInt(r.stoppedShipCost):'—'}</td><td>${sg(r.newList.length - r.stoppedList.length)}</td><td>${sg(r.newShipments - r.stoppedShipments)}</td></tr>`;
     }).join('');
-    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${cl('new',cnt('newList'),'')}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${cl('stopped',cnt('stoppedList'),'')}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${sg(cnt('newList') - cnt('stoppedList'))}</td><td>${sg(sum('newShipments') - sum('stoppedShipments'))}</td></tr>` : '';
+    const costAll = comparable.every(r=>r.costOk);
+    const tot = comparable.length ? `<tr class="age-total"><td>إجمالي الفترة</td><td>—</td><td>—</td><td>${cl('new',cnt('newList'),'')}</td><td>${fmtInt(sum('newShipments'))}</td><td>${fmtInt(sum('newDelivered'))}</td><td>${costAll?fmtInt(sum('newShipCost')):'—'}</td><td>${cl('stopped',cnt('stoppedList'),'')}</td><td>${fmtInt(sum('stoppedShipments'))}</td><td>${costAll?fmtInt(sum('stoppedShipCost')):'—'}</td><td>${sg(cnt('newList') - cnt('stoppedList'))}</td><td>${sg(sum('newShipments') - sum('stoppedShipments'))}</td></tr>` : '';
+    const costNote = comparable.length && !costAll ? '<div class="card-sub" style="margin-top:8px;">مصاريف الشحن (—) غير متاحة لشهور محفوظة قبل إضافة هذا العمود — أعد بناء ملخص هذه الشهور من تاب الإعدادات لتظهر. المصاريف = تكلفة الشحن للشحنات المسلّمة (التسليم الناجح) فقط.</div>' : '<div class="card-sub" style="margin-top:8px;">مصاريف الشحن = مجموع «تكلفة الشحن» للشحنات المسلّمة (التسليم الناجح) فقط.</div>';
     const kp = `<div class="mgmt-mini-kpis">${kpi('عملاء فقدناهم', fmtInt(cnt('stoppedList')))}${kpi('شحنات فُقدت (مع المتوقفين)', fmtInt(sum('stoppedShipments')))}${kpi('عملاء جدد', fmtInt(cnt('newList')))}${kpi('شحنات العملاء الجدد', fmtInt(sum('newShipments')))}</div>`;
-    body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], trs + tot) + note;
+    body.innerHTML = kp + tbl(['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','مصاريف شحن التسليمات (جدد)','عملاء متوقفون','شحنات كانت لهم','مصاريف شحن تسليماتهم (متوقفون)','صافي العملاء','صافي الشحنات'], trs + tot) + costNote + note;
     body.onclick = (e)=>{
       const b = e.target.closest && e.target.closest('button[data-cust-list]'); if(!b) return;
       custShowNamesModal(b.dataset.custList, b.dataset.custMonth, comparable);
@@ -6222,8 +6225,8 @@ function custShowNamesModal(kind, month, rows){
   const mdn = m=>monthDisplayName(m);
   const title = (isStop ? 'العملاء المتوقفون' : 'العملاء الجدد') + ' — ' + (month ? `${mdn(month)} مقارنةً بـ ${mdn(sel[0] ? sel[0]._p || sel[0].prev : '')}` : 'إجمالي الفترة');
   const ship = items.reduce((a,x)=>a+x.shipments,0);
-  const head = ['#','العميل'].concat(month ? [] : ['الشهر']).concat([isStop ? 'شحنات آخر شهر نشاط' : 'شحنات الشهر','التسليمات','نسبة التسليم']);
-  const trs = items.map((x,i)=>`<tr><td>${i+1}</td><td>${custEsc(x.name)}</td>${month?'':`<td>${custEsc(mdn(x._m))}</td>`}<td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtPct(x.deliveryRate)}</td></tr>`).join('');
+  const head = ['#','العميل'].concat(month ? [] : ['الشهر']).concat([isStop ? 'شحنات آخر شهر نشاط' : 'شحنات الشهر','التسليمات','مصاريف شحن التسليمات','نسبة التسليم']);
+  const trs = items.map((x,i)=>`<tr><td>${i+1}</td><td>${custEsc(x.name)}</td>${month?'':`<td>${custEsc(mdn(x._m))}</td>`}<td>${fmtInt(x.shipments)}</td><td>${fmtInt(x.delivered)}</td><td>${fmtInt(x.shipCost)}</td><td>${fmtPct(x.deliveryRate)}</td></tr>`).join('');
   let ov = document.getElementById('custNamesOverlay');
   if(!ov){
     ov = document.createElement('div'); ov.id = 'custNamesOverlay';
@@ -6253,8 +6256,8 @@ function custPeriodInfo(rows){
 function custAggregate(rows){
   const ok = rows.filter(r=>r.hasCur && r.hasPrev);
   const sum = f=>ok.reduce((a,r)=>a+r[f],0), cnt = f=>ok.reduce((a,r)=>a+r[f].length,0);
-  return { ok, newCount:cnt('newList'), newShipments:sum('newShipments'), newDelivered:sum('newDelivered'),
-    stoppedCount:cnt('stoppedList'), stoppedShipments:sum('stoppedShipments'), stoppedDelivered:sum('stoppedDelivered'),
+  return { ok, newCount:cnt('newList'), newShipments:sum('newShipments'), newDelivered:sum('newDelivered'), newShipCost:sum('newShipCost'),
+    stoppedCount:cnt('stoppedList'), stoppedShipments:sum('stoppedShipments'), stoppedDelivered:sum('stoppedDelivered'), stoppedShipCost:sum('stoppedShipCost'), costOk: ok.every(r=>r.costOk),
     newAll: ok.flatMap(r=>r.newList.map(x=>Object.assign({ year:r.year, prevYear:r.prevYear }, x))),
     stoppedAll: ok.flatMap(r=>r.stoppedList.map(x=>Object.assign({ prevTotal:r.prevTotal, year:r.year, prevYear:r.prevYear }, x))) };
 }
@@ -6329,11 +6332,12 @@ async function custExportPdf(mode){
         { label:'صافي العملاء', value:sg(A.newCount - A.stoppedCount), valueColor:(A.newCount - A.stoppedCount)>=0?C.success:C.violation } ]);
       y = pdfSectionTitle(doc, font, y, 'المقارنة بين الشهور');
       const body = rows.map(r=> (r.hasCur && r.hasPrev)
-        ? [custMonthPdf(r.month,r.year), custMonthPdf(r.prev,r.prevYear), pdfFormatNumber(r.active), pdfFormatNumber(r.newList.length), pdfFormatNumber(r.newShipments), pdfFormatNumber(r.newDelivered), pdfFormatNumber(r.stoppedList.length), pdfFormatNumber(r.stoppedShipments), sg(r.newList.length - r.stoppedList.length), sg(r.newShipments - r.stoppedShipments)]
-        : [custMonthPdf(r.month,r.year), r.prev?custMonthPdf(r.prev,r.prevYear):'—', r.hasCur?pdfFormatNumber(r.active):'—','—','—','—','—','—','—','—']);
-      if(A.ok.length > 1) body.push(['إجمالي الفترة','—','—', pdfFormatNumber(A.newCount), pdfFormatNumber(A.newShipments), pdfFormatNumber(A.newDelivered), pdfFormatNumber(A.stoppedCount), pdfFormatNumber(A.stoppedShipments), sg(A.newCount-A.stoppedCount), sg(A.newShipments-A.stoppedShipments)]);
+        ? [custMonthPdf(r.month,r.year), custMonthPdf(r.prev,r.prevYear), pdfFormatNumber(r.active), pdfFormatNumber(r.newList.length), pdfFormatNumber(r.newShipments), pdfFormatNumber(r.newDelivered), r.costOk?pdfFormatNumber(r.newShipCost):'—', pdfFormatNumber(r.stoppedList.length), pdfFormatNumber(r.stoppedShipments), r.costOk?pdfFormatNumber(r.stoppedShipCost):'—', sg(r.newList.length - r.stoppedList.length), sg(r.newShipments - r.stoppedShipments)]
+        : [custMonthPdf(r.month,r.year), r.prev?custMonthPdf(r.prev,r.prevYear):'—', r.hasCur?pdfFormatNumber(r.active):'—','—','—','—','—','—','—','—','—','—']);
+      if(A.ok.length > 1) body.push(['إجمالي الفترة','—','—', pdfFormatNumber(A.newCount), pdfFormatNumber(A.newShipments), pdfFormatNumber(A.newDelivered), A.costOk?pdfFormatNumber(A.newShipCost):'—', pdfFormatNumber(A.stoppedCount), pdfFormatNumber(A.stoppedShipments), A.costOk?pdfFormatNumber(A.stoppedShipCost):'—', sg(A.newCount-A.stoppedCount), sg(A.newShipments-A.stoppedShipments)]);
       y = pdfDrawTable(doc, font, y,
-        [{header:'الشهر',width:62},{header:'مقارنةً بـ',width:62},{header:'العملاء النشطون',width:52},{header:'عملاء جدد',width:44},{header:'شحناتهم',width:48},{header:'تسليماتهم',width:50},{header:'عملاء متوقفون',width:48},{header:'شحنات كانت لهم',width:52},{header:'صافي العملاء',width:48},{header:'صافي الشحنات',width:52}], body);
+        [{header:'الشهر',width:52},{header:'مقارنةً بـ',width:52},{header:'العملاء النشطون',width:40},{header:'عملاء جدد',width:36},{header:'شحناتهم',width:40},{header:'تسليماتهم',width:40},{header:'مصاريف شحن تسليماتهم',width:44},{header:'عملاء متوقفون',width:40},{header:'شحنات كانت لهم',width:40},{header:'مصاريف شحن تسليماتهم',width:44},{header:'صافي العملاء',width:38},{header:'صافي الشحنات',width:40}], body);
+      y = pdfParagraph(doc, font, y, 'مصاريف الشحن = مجموع «تكلفة الشحن» للشحنات المسلّمة (التسليم الناجح) فقط' + (A.costOk ? '.' : ' — (—) غير متاحة لشهور محفوظة قبل إضافة هذا العمود.'), {gap:4});
       const top = 15;
       if(A.newAll.length){
         y = pdfSectionTitle(doc, font, y, `أكبر العملاء الجدد (حتى ${top})`);
@@ -6417,11 +6421,12 @@ async function custExportXlsx(mode){
     } else {
       let ws = sheet('المقارنة بين الشهور');
       const body = rows.map(r=> (r.hasCur && r.hasPrev)
-        ? { vals:[mn(r.month,r.year), mn(r.prev,r.prevYear), r.active, r.newList.length, r.newShipments, r.newDelivered, r.stoppedList.length, r.stoppedShipments, r.newList.length - r.stoppedList.length, r.newShipments - r.stoppedShipments] }
-        : { vals:[mn(r.month,r.year), r.prev?mn(r.prev,r.prevYear):'—', r.hasCur?r.active:'—','—','—','—','—','—','—','—'] });
-      if(A.ok.length > 1) body.push({ total:true, vals:['إجمالي الفترة','—','—', A.newCount, A.newShipments, A.newDelivered, A.stoppedCount, A.stoppedShipments, A.newCount-A.stoppedCount, A.newShipments-A.stoppedShipments] });
-      table(ws, ['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','عملاء متوقفون','شحنات كانت لهم','صافي العملاء','صافي الشحنات'], body, [null,null,INT,INT,INT,INT,INT,INT,INT,INT], 4);
-      widths(ws,[18,18,16,12,12,12,14,16,14,14]);
+        ? { vals:[mn(r.month,r.year), mn(r.prev,r.prevYear), r.active, r.newList.length, r.newShipments, r.newDelivered, r.costOk?r.newShipCost:'—', r.stoppedList.length, r.stoppedShipments, r.costOk?r.stoppedShipCost:'—', r.newList.length - r.stoppedList.length, r.newShipments - r.stoppedShipments] }
+        : { vals:[mn(r.month,r.year), r.prev?mn(r.prev,r.prevYear):'—', r.hasCur?r.active:'—','—','—','—','—','—','—','—','—','—'] });
+      if(A.ok.length > 1) body.push({ total:true, vals:['إجمالي الفترة','—','—', A.newCount, A.newShipments, A.newDelivered, A.costOk?A.newShipCost:'—', A.stoppedCount, A.stoppedShipments, A.costOk?A.stoppedShipCost:'—', A.newCount-A.stoppedCount, A.newShipments-A.stoppedShipments] });
+      table(ws, ['الشهر','مقارنةً بـ','العملاء النشطون','عملاء جدد','شحناتهم','تسليماتهم','مصاريف شحن التسليمات (جدد)','عملاء متوقفون','شحنات كانت لهم','مصاريف شحن تسليماتهم (متوقفون)','صافي العملاء','صافي الشحنات'], body, [null,null,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT], 4);
+      widths(ws,[18,18,16,12,12,12,20,14,16,22,14,14]);
+      ws.getCell('A3').value = 'مصاريف الشحن = مجموع «تكلفة الشحن» للشحنات المسلّمة (التسليم الناجح) فقط' + (A.costOk ? '.' : ' — (—) غير متاحة لشهور محفوظة قبل إضافة هذا العمود.'); ws.getCell('A3').font = { size:9, color:{argb:'FF6B7280'} };
       ws = sheet('العملاء الجدد'); table(ws, ['العميل','شهر البداية','قورن بشهر','شحنات الشهر','التسليمات','نسبة التسليم','نسبة الوصول'], newRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,14]);
       ws = sheet('العملاء المتوقفون'); table(ws, ['العميل','توقف في شهر','آخر شهر نشاط','شحنات آخر شهر','التسليمات','نسبة التسليم','حصته من شحنات الشهر السابق'], stopRows, [null,null,null,INT,INT,PCT,PCT], 4); widths(ws,[34,18,18,14,14,14,22]);
     }

@@ -1081,12 +1081,14 @@ function summaryHashKey(s) {
 // ------------------------------------------------------------
 function summaryNewGroupAcc() {
   return { total: 0, delivered: 0, returned: 0, returnClosed: 0, returnOpen: 0, returnHold: 0, rejected: 0, pending: 0, unknown: 0,
-    withinSla: 0, slaBreach: 0, sumSlaDays: 0, deliveredWithDate: 0 };
+    withinSla: 0, slaBreach: 0, sumSlaDays: 0, deliveredWithDate: 0,
+    deliveredShipCost: 0 }; // deliveredShipCost = مجموع تكلفة الشحن للشحنات المسلّمة (التسليم الناجح) فقط
 }
 function summaryAccumulateRow(acc, r, target) {
   acc.total++;
   if (r.bucket === "delivered") {
     acc.delivered++;
+    acc.deliveredShipCost += r.shipCost || 0;
     if (r.slaDays !== null) {
       acc.deliveredWithDate++;
       acc.sumSlaDays += r.slaDays;
@@ -1109,7 +1111,8 @@ function summaryFinalizeGroup(name, acc) {
   return {
     name: name, shipments: total, delivered: acc.delivered, deliveryRate: deliveryRate,
     returned: acc.returned, returnRate: returnRate, rejected: acc.rejected, rejectedRate: rejectedRate,
-    successRate: successRate, avgDays: avgDays, withinSla: acc.withinSla, slaBreach: acc.slaBreach, slaPct: slaAchievement
+    successRate: successRate, avgDays: avgDays, withinSla: acc.withinSla, slaBreach: acc.slaBreach, slaPct: slaAchievement,
+    deliveredShipCost: Math.round((acc.deliveredShipCost || 0) * 100) / 100
   };
 }
 function summaryFinalizeGroupList(accMap, order, topN) {
@@ -1164,6 +1167,7 @@ function summaryAccumulateCubeRecord_(acc, rec, bucket, kind) {
   acc.total += n;
   if (bucket === "delivered") {
     acc.delivered += n;
+    acc.deliveredShipCost += rec[14] || 0;
     acc.deliveredWithDate += rec[11];
     acc.sumSlaDays += rec[10];
     acc.withinSla += rec[8];
@@ -2130,10 +2134,11 @@ function summaryMergeGroupLists(listOfArrays, topN) {
     var arr = listOfArrays[a] || [];
     for (var i = 0; i < arr.length; i++) {
       var e = arr[i];
-      if (!accMap[e.name]) { accMap[e.name] = { shipments:0, delivered:0, returned:0, rejected:0, withinSla:0, slaBreach:0, sumSlaDaysWeighted:0, dwdTotal:0 }; order.push(e.name); }
+      if (!accMap[e.name]) { accMap[e.name] = { shipments:0, delivered:0, returned:0, rejected:0, withinSla:0, slaBreach:0, sumSlaDaysWeighted:0, dwdTotal:0, deliveredShipCost:0 }; order.push(e.name); }
       var acc = accMap[e.name];
       acc.shipments += e.shipments||0; acc.delivered += e.delivered||0; acc.returned += e.returned||0; acc.rejected += e.rejected||0;
       acc.withinSla += e.withinSla||0; acc.slaBreach += e.slaBreach||0;
+      acc.deliveredShipCost += e.deliveredShipCost||0;
       var dwd = (e.withinSla||0) + (e.slaBreach||0);
       acc.sumSlaDaysWeighted += (e.avgDays||0) * dwd;
       acc.dwdTotal += dwd;
@@ -2152,6 +2157,7 @@ function summaryMergeGroupLists(listOfArrays, topN) {
       successRate: acc.shipments>0 ? ((acc.delivered+acc.rejected)/acc.shipments*100) : null,
       avgDays: acc.dwdTotal>0 ? (acc.sumSlaDaysWeighted/acc.dwdTotal) : null,
       withinSla: acc.withinSla, slaBreach: acc.slaBreach,
+      deliveredShipCost: Math.round(acc.deliveredShipCost * 100) / 100,
       slaPct: (acc.withinSla+acc.slaBreach)>0 ? (acc.withinSla/(acc.withinSla+acc.slaBreach)*100) : null
     });
   }
