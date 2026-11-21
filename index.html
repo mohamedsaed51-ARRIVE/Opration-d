@@ -2564,6 +2564,8 @@ function normalizeEmptySummary(summary){
 // must separately check isCacheFresh(savedAt) (SUMMARY_CACHE_TTL_MS) before
 // treating either kind of cache as good enough to skip a live check.
 function isUsableCachedSummary(summary, month){
+  // نسخة محفوظة في المتصفح قبل إضافة «مصاريف شحن الشحنات المسلّمة» لا تحمل الحقل deliveredShipCost — لا تُستخدم، فيُعاد التحميل من السيرفر.
+  if(summary && !summary.empty && !summary.noData && Array.isArray(summary.customerSummary) && summary.customerSummary.length && summary.customerSummary[0].deliveredShipCost === undefined) return false;
   if(month !== ALL_MONTHS_SENTINEL) return true;
   if(!summary) return false;
   if(summary.empty || summary.noData) return true; // genuinely empty is not "partial", nothing to complete
